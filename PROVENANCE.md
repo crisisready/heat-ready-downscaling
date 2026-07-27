@@ -14,9 +14,23 @@ just a reading of this document.
 
 ## Files extracted from `crisisready/heat-risk-data-api`
 
-| File in this repository | Extracted from (private repo path) | Source branch tip SHA | Extracted |
-|---|---|---|---|
-| _to be filled in during extraction — see the private repo's `docs/plan-2026-07-27-heatready-crowdsourced-model-improvement.md` section 5.1_ | | | |
+All nine extracted 2026-07-27 from `origin/feature/downscaling-phase4-model-training` at tip
+commit `9d8a678c594fbe2878033373b750cc8465a9d80e`, verbatim (`git show <sha>:<path>`, no merge).
+
+| File in this repository | Extracted from (private repo path) |
+|---|---|
+| `scripts/train_downscaling.py` | `scripts/train_downscaling.py` |
+| `scripts/sweep_qrf_hyperparams.py` | `scripts/sweep_qrf_hyperparams.py` |
+| `scripts/sweep_gbm.py` | `scripts/sweep_gbm.py` |
+| `scripts/backfill_wind.py` | `scripts/backfill_wind.py` |
+| `scripts/build_training_set.py` | `scripts/build_training_set.py` (forward-ported onto main's current `src/` API afterward — see this file's own header for the call-site fixes applied post-extraction) |
+| `tests/test_train_downscaling.py` | `tests/test_train_downscaling.py` |
+| `tests/test_sweep_qrf_hyperparams.py` | `tests/test_sweep_qrf_hyperparams.py` |
+| `tests/test_sweep_gbm.py` | `tests/test_sweep_gbm.py` |
+| `tests/test_backfill_wind.py` | `tests/test_backfill_wind.py` |
+
+The private repository tagged `archive/downscaling-phase4-model-training` at this same SHA at
+extraction time, specifically so the branch stops looking mergeable to a future reader there.
 
 ## What was NOT extracted (written fresh in this repository)
 
