@@ -99,6 +99,40 @@ itself attributes to LST (Landsat scene availability moving between runs).
 **One station absent**: `NIM00065082` has zero rows in `ghcn_training` — excluded from the
 original training build (most likely by an activity-date filter at build time), not a diff bug.
 
+## Phase 1.4 — validate/publish scripts moved from the private repo (2026-07-27)
+
+Five more files moved from `crisisready/heat-risk-data-api`'s `main` (not the archived branch —
+these were never part of the branch; they were written directly against the shipped
+`ds-2026.07-rf4` model) and deleted there in the same close-out PR:
+
+| File in this repository | Extracted from (private repo `main`) |
+|---|---|
+| `scripts/validate_lagfill_downscaling.py` | `scripts/validate_lagfill_downscaling.py` @ `a31ec14863273904ae6a9de7a6c34cb77f84f4f4` |
+| `scripts/validate_forecast_downscaling.py` | `scripts/validate_forecast_downscaling.py` @ `a31ec14863273904ae6a9de7a6c34cb77f84f4f4` |
+| `scripts/validate_station_blend.py` | `scripts/validate_station_blend.py` @ `e6cc1d2a338fd9c87ef51cbc1daf6cb1ed5e2b3b` |
+| `scripts/publish_band_gate.py` | `scripts/publish_band_gate.py` @ `a31ec14863273904ae6a9de7a6c34cb77f84f4f4` |
+| `scripts/publish_blend_gate.py` | `scripts/publish_blend_gate.py` @ `e6cc1d2a338fd9c87ef51cbc1daf6cb1ed5e2b3b` |
+
+Each now delegates its scoring/gate-building logic to the already-extracted package
+(`heatready_downscaling.score`/`gates`/`report`/`contract`) instead of carrying its own copy — see
+each file's own "REFACTORED during the move" docstring note for exactly what changed. One real
+consequence of this refactor: `validate_station_blend.py` had only ever imported private-repo-only
+modules for `downscaling.load_model`/`predict_downscaled` (now `contract.QRFModelAdapter`) and
+`ghcn.koppen_broad_group_letter_from_zone` (now `koppen.koppen_broad_group_letter_from_zone`,
+already present in this package) — with both swapped out, it has **no private-repo-only imports
+left** and is fully runnable/testable standalone in this repo, unlike its two `validate_lagfill_
+downscaling.py`/`validate_forecast_downscaling.py` siblings (still gated on `db`/`heat_calcs`/
+`open_meteo`/`api_call_manager`, see their own "NOT RUNNABLE STANDALONE" docstring note and
+`conftest.py`'s `collect_ignore`).
+
+Tests for `test_validate_lagfill_downscaling.py`/`test_validate_forecast_downscaling.py` were
+ported largely as-is, minus the score_band/fidelity_report-specific test classes now redundant
+with `tests/test_score.py` (which already covers that logic — it was extracted from these same
+scripts in Phase 1.2, before this Phase 1.4 move). `test_publish_band_gate.py` was rewritten as a
+CLI-level test (the private repo's original directly unit-tested `build_gate`, now redundant with
+`tests/test_gates.py`); `test_publish_blend_gate.py` ported as-is, since it was already CLI-level.
+`validate_station_blend.py` had no test file in the private repo to port.
+
 ## A note on the source branch
 
 `origin/feature/downscaling-phase4-model-training` in the private repository is **not merged and
