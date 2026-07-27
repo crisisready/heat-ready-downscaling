@@ -1,5 +1,11 @@
 # Governance
 
+**Status:** this document describes the intended governance model once the automated referee and
+promotion pipeline exist — see `CONTRIBUTING.md`'s own status note. `run_submission.py`,
+`score_forward_eval.py`, `replay_downscaling.py`, and the private repo's `promote_from_public.py`
+have not been built yet. Today, the maintainer role below is real and active; the "automated"
+referee role is aspirational until that code ships.
+
 ## Roles
 
 - **Maintainer (Nishant Kishore / CrisisReady).** Final decision-maker on this repository:

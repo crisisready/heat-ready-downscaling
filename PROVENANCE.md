@@ -133,6 +133,18 @@ CLI-level test (the private repo's original directly unit-tested `build_gate`, n
 `tests/test_gates.py`); `test_publish_blend_gate.py` ported as-is, since it was already CLI-level.
 `validate_station_blend.py` had no test file in the private repo to port.
 
+## Phase 2 — original code, not extracted (2026-07-27)
+
+`scripts/build_band_paired_snapshot.py` and the `write_stations`/`compute_holdout`/`write_holdout`
+additions to `src/heatready_downscaling/snapshot.py` are new code written for this repository,
+not extracted or adapted from the private repo (unlike everything above) — there is no private-
+repo equivalent to port from; `snapshot.py`'s own reader/writer/manifest primitives (Phase 1.2)
+already anticipated this script in their own docstrings ("not yet written -- Phase 2"). The real
+`v2026.07` snapshot in this repository's first GitHub Release was built and verified end-to-end
+with this script against the live, freshly re-exported `ghcn_training` corpus (274,249 rows,
+post pop_density retrain) — see the script's own module docstring and commit message for the
+verification detail (partition counts, manifest checksums, holdout exclusion correctness).
+
 ## A note on the source branch
 
 `origin/feature/downscaling-phase4-model-training` in the private repository is **not merged and

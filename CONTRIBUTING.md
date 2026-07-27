@@ -1,7 +1,21 @@
 # Contributing
 
-Thanks for helping close the dark cells. This document is the actual scoring contract — read it
-before writing a submission, not after a provisional score surprises you.
+Thanks for helping close the dark cells. This document is the scoring contract this program is
+being built around — read it before writing a submission, not after a provisional score surprises
+you.
+
+**Status: the automated submission pipeline described below is not open yet.** The band-paired
+snapshot and the `heatready_downscaling` scoring library (`score.py`, `gates.py`, `contract.py`,
+etc.) are real and installable today — `score_band`'s docstring and `tests/test_score.py` are the
+actual, current scoring behavior, not a plan. But `run_submission.py` (the referee that would
+reproduce a submission's claim and post a provisional score), `score_forward_eval.py` (the monthly
+official cycle), and the `ledger/`/`docs/leaderboard.md` files this document references do not
+exist in this repository yet — that automation is the next phase of this program. Until it ships,
+opening a PR against `submissions/` will not be scored by anything automated. If you want to
+experiment now, you can write a short script against the installed package (`snapshot.
+read_band_partitions` + `score.score_band` + `contract.QRFModelAdapter`) and open a GitHub issue
+with what you find — genuinely useful groundwork, just not yet a credited submission. Watch this
+repository for when automated intake opens.
 
 ## Before you start
 
@@ -15,7 +29,13 @@ before writing a submission, not after a provisional score surprises you.
 
 ## Submission format
 
-Create `submissions/{YYYY-MM}/{NNN}-{your-github-username}-{slug}/manifest.yaml`:
+**This is the target format `run_submission.py` will consume once it exists (see the status note
+above) — not a schema you can submit against today.** `--from-snapshot` in particular is not yet a
+real flag on any script in this repository; the validator's current `--phase score` reads live
+model output against a `--paired-in` JSON file, not a Parquet snapshot partition directly. Wiring a
+snapshot-aware scoring entrypoint is part of what shipping the referee involves.
+
+Once it exists, create `submissions/{YYYY-MM}/{NNN}-{your-github-username}-{slug}/manifest.yaml`:
 
 ```yaml
 schema_version: 1
@@ -28,18 +48,18 @@ author:
 track: serving-ready          # serving-ready | research
 rung: A                       # A | B | C (C is not yet open — see README)
 snapshot:
-  version: "v2026.08"
+  version: "v2026.07"          # the current real snapshot version -- check the latest GitHub Release
   manifest_sha256: "…"        # pins the exact data; mismatch = auto-reject
 claims:
-  - model_version: "ds-2026.07-rf4"
+  - model_version: "ds-2026.07-rf5"
     band_key: "lag_fill"
     targets: ["tmax", "tmin"]
     zones: ["Cfb", "BWk"]     # the (target, zone) cells you're claiming
 method:
   kind: rerun-validator        # rerun-validator (A) | parameters (B) | model (C, not yet open)
   entrypoint: "scripts/validate_lagfill_downscaling.py"
-  args: ["--phase", "score", "--from-snapshot", "snapshots/v2026.08",
-         "--model-version", "ds-2026.07-rf4", "--band-key", "lag_fill"]
+  args: ["--phase", "score", "--from-snapshot", "snapshots/v2026.07",
+         "--model-version", "ds-2026.07-rf5", "--band-key", "lag_fill"]
   package_version: "0.1.0"
   code_ref: null               # rung C only, once opened
   extra_covariates: []         # research track only: {name, source, url, license, global,
@@ -54,11 +74,13 @@ reproducibility:
   runtime_notes: "…"
 ```
 
-`claimed_report.json` must be exactly `_build_report`'s existing shape (the same report
-`validate_lagfill_downscaling.py`/`validate_forecast_downscaling.py` already produce), plus a
-header (`report_schema_version`, `generated_by{tool,version,git_commit}`, `snapshot_version`,
-`band_key`). Do not invent a second report schema — reusing the existing one is what lets
-`publish_band_gate.build_gate` work unchanged on your output.
+`claimed_report.json` must be exactly `heatready_downscaling.report.build_report`'s shape (the same
+report envelope `validate_lagfill_downscaling.py`/`validate_forecast_downscaling.py` already
+produce by calling it) — `report_schema_version`, `generated_by{tool,version,git_commit}`,
+`snapshot_version`, `band_key`, `sample_requested`, `rows_sampled`, `rows_paired`,
+`fidelity_check`, `by_target`. Do not invent a second report schema — reusing the existing one is
+what lets `heatready_downscaling.gates.build_gate` (wrapped by `publish_band_gate.py`'s CLI) work
+unchanged on your output.
 
 Open a pull request with your `submissions/{...}/` directory. `validate-submission.yml` lints the
 manifest and report schema on every push — it executes nothing. `run_submission.py` then
