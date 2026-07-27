@@ -32,14 +32,29 @@ commit `9d8a678c594fbe2878033373b750cc8465a9d80e`, verbatim (`git show <sha>:<pa
 The private repository tagged `archive/downscaling-phase4-model-training` at this same SHA at
 extraction time, specifically so the branch stops looking mergeable to a future reader there.
 
-## What was NOT extracted (written fresh in this repository)
+## `src/heatready_downscaling/` — extracted from `main`, not the branch
 
-Everything under `src/heatready_downscaling/` (the installable package) is new code written for
-this repository, even where it consolidates logic that previously existed only inline in one of
-the extracted scripts (e.g. `score.py`'s `score_band`, deduplicated from
-`validate_lagfill_downscaling.py` and a near-clone in the forecast validator). Where a new module
-is a genuine extraction of existing logic rather than new logic, its own docstring says so and
-names the source file/line range it came from.
+Unlike the section above, these came from `crisisready/heat-risk-data-api`'s **`main`** branch at
+commit `57479e5` (2026-07-27), not from `origin/feature/downscaling-phase4-model-training` — they
+are the already-shipped scoring/inference code, extracted so this package can run standalone
+without importing the private repo's `src/`. Each module's own docstring names its exact source
+file/line range; this table is the index.
+
+| Module | Extracted/adapted from (private repo, `main`) |
+|---|---|
+| `features.py` | `src/downscaling.py` (`FEATURE_ORDER`, `_doy_trig`, `build_feature_matrix`) |
+| `koppen.py` | `src/ghcn.py` (Köppen classification block) |
+| `contract.py` | `src/downscaling.py` (`predict_downscaled`, `_feature_importance_weights`, `_aoa_dissimilarity`, `_confidence_class`, `_not_applied_result`, `derive_zones_passing_cv_gate`, `load_model`/`load_model_metadata`) — restructured into a `ModelAdapter` protocol + `QRFModelAdapter` concrete class rather than a free function taking a raw bundle dict; see the module's own docstring for why |
+| `score.py` | `scripts/validate_lagfill_downscaling.py` (`score_band`, `fidelity_report`, and their constants) — `validate_forecast_downscaling.py` imported this same function rather than cloning it, so there was only ever one implementation to extract |
+| `gates.py` | `scripts/publish_band_gate.py` (`build_gate`) — the blend-gate jsonschema is genuinely new (no `build_gate`-equivalent existed for `publish_blend_gate.py`, which only did an ad-hoc key-presence check) |
+| `report.py` | `scripts/validate_lagfill_downscaling.py` (`_build_report`) — canonicalized against a real inconsistency found between the two validation scripts' report shapes (`rows_nrt_paired` vs `rows_lead_paired`); see the module's own docstring |
+| `snapshot.py` | New. No private-repo equivalent — schema matches the private repo's `docs/plan-2026-07-27-heatready-crowdsourced-model-improvement.md` sections 6.1/6.2 |
+
+Two required changes made during this extraction, not present in the private repo's original code
+(both mandated by the crowdsourced model-improvement program's design, not incidental):
+`score.score_band` takes a required `fold_salt` keyword argument (snapshot-version-salted fold
+assignment, closing a fold-shopping gap), and takes a `contract.ModelAdapter` instead of a raw
+joblib bundle dict.
 
 ## A note on the source branch
 

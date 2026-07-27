@@ -8,7 +8,7 @@ items 11-13, and 4.7 for the AOA method's literature grounding).
 
 Loads ghcn_training (populated by scripts/build_training_set.py), fits two
 quantile_forest.RandomForestQuantileRegressor models (delta_tmax_c,
-delta_tmin_c) on the 14-feature vector from downscaling.FEATURE_ORDER, runs
+delta_tmin_c) on the 14-feature vector from FEATURE_ORDER, runs
 leave-region-out cross-validation (fold key = region -- a country/admin1
 code, never a random split; Roberts et al. 2017), performs split-conformal
 calibration per Koppen climate zone (section 4.4), computes an AOA-style
@@ -44,13 +44,12 @@ import io
 import json
 import math
 import os
-import sys
 from datetime import date, datetime
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
-
-import downscaling
 import numpy as np
+
+from heatready_downscaling.contract import aoa_dissimilarity, feature_importance_weights
+from heatready_downscaling.features import FEATURE_ORDER, build_feature_matrix
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CREDENTIALS_FILE = os.path.join(REPO_ROOT, "credentials.yaml")
@@ -124,7 +123,7 @@ def build_training_feature_matrix(
 ) -> tuple[np.ndarray, np.ndarray, list[str], list[str], np.ndarray, np.ndarray]:
     """
     Build (X, y, regions, zones, lons, lats) for `target` in {"tmax", "tmin"}
-    from ghcn_training rows, reusing downscaling.build_feature_matrix's
+    from ghcn_training rows, reusing build_feature_matrix's
     exact per-row feature construction (same feature order, same log1p/doy
     transforms) so training and inference can never silently diverge on how
     a feature is computed. Rows missing any of the 14 features are dropped
@@ -153,7 +152,7 @@ def build_training_feature_matrix(
         }
         for r in rows
     ]
-    X_all, complete_mask, _ = downscaling.build_feature_matrix(covariate_rows, target)
+    X_all, complete_mask, _ = build_feature_matrix(covariate_rows, target)
     delta_col = "delta_tmax_c" if target == "tmax" else "delta_tmin_c"
 
     def _target_is_finite(i: int) -> bool:
@@ -208,10 +207,10 @@ def _fit_one_qrf_fold(
     model = RandomForestQuantileRegressor(**qrf_params).fit(X[train_mask], y[train_mask])
     preds = model.predict(X[test_mask], quantiles=[0.025, 0.5, 0.975])
 
-    weights = downscaling._feature_importance_weights(model)
+    weights = feature_importance_weights(model)
     train_mean = X[train_mask].mean(axis=0)
     train_std = X[train_mask].std(axis=0)
-    di = downscaling._aoa_dissimilarity(X[test_mask], X[train_mask], weights, train_mean, train_std)
+    di = aoa_dissimilarity(X[test_mask], X[train_mask], weights, train_mean, train_std)
 
     return {
         "region": held_region, "test_mask": test_mask,
@@ -461,7 +460,7 @@ def conformal_q95_by_zone(y: np.ndarray, zones: list[str], cv: dict) -> dict[str
     computed out-of-fold so the calibration never sees a point the model
     was fit on. Takes the 95th percentile of s per Koppen zone; zones with
     too few calibration points fall back to '_default' (all valid points
-    pooled) at inference (downscaling.predict_downscaled already does this
+    pooled) at inference (QRFModelAdapter.predict already does this
     zone.get(..., zone.get("_default", ...)) lookup).
     """
     valid = cv["valid"]
@@ -500,7 +499,7 @@ def conformal_empirical_coverage(y: np.ndarray, zones: list[str], cv: dict, q95_
 def _build_aoa_index(model, X: np.ndarray, target: str, seed: int) -> dict:
     """Feature-importance weights + z-score scaling stats + a (possibly
     subsampled) copy of the training feature matrix, everything
-    downscaling._aoa_dissimilarity needs at inference to score a new
+    aoa_dissimilarity needs at inference to score a new
     polygon-day against the SAME reference distribution the shipped model
     was fit on. Subsampled (not the full multi-million-row table) to bound
     the shipped model.joblib's size -- a random sample is a fair
@@ -523,7 +522,7 @@ def _build_aoa_index(model, X: np.ndarray, target: str, seed: int) -> dict:
         sample = X
     return {
         f"aoa_train_features_{target}": sample,
-        f"aoa_feature_weights_{target}": downscaling._feature_importance_weights(model),
+        f"aoa_feature_weights_{target}": feature_importance_weights(model),
         f"aoa_train_mean_{target}": X.mean(axis=0),
         f"aoa_train_std_{target}": X.std(axis=0),
     }
@@ -608,7 +607,7 @@ def main() -> None:
     metadata = {
         "model_version": args.model_version,
         "trained_at": datetime.utcnow().isoformat() + "Z",
-        "feature_order": list(downscaling.FEATURE_ORDER),
+        "feature_order": list(FEATURE_ORDER),
         "targets": ["delta_tmax_c", "delta_tmin_c"],
         # Conformal calibration is per-target (tmax/tmin fit their own QRF
         # interval widths); predict_downscaled reads whichever target's

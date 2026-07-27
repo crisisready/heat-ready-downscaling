@@ -53,7 +53,7 @@ class TestBuildTrainingFeatureMatrix:
     def test_row_count_and_target_selection(self):
         rows = _make_rows(5, ["US"], {"US": "Cfa"})
         X, y, regions, zones, lons, lats = td.build_training_feature_matrix(rows, "tmax")
-        assert X.shape == (5, len(td.downscaling.FEATURE_ORDER))
+        assert X.shape == (5, len(td.FEATURE_ORDER))
         assert len(y) == 5
         assert set(regions) == {"US"}
         assert set(zones) == {"Cfa"}
@@ -97,7 +97,7 @@ class TestBuildTrainingFeatureMatrix:
         rows = _make_rows(3, ["US"], {"US": "Cfa"})
         for r in rows:
             r["koppen_main_group_code"] = 4
-        with patch("ghcn.koppen_main_group_code") as mock_koppen:
+        with patch("heatready_downscaling.koppen.koppen_main_group_code") as mock_koppen:
             td.build_training_feature_matrix(rows, "tmax")
         mock_koppen.assert_not_called()
 
@@ -406,7 +406,7 @@ class TestMain:
         assert bucket == "test-bucket"
         assert model_version == "ds-test-1"
         assert "model_tmax" in artifact_bundle and "model_tmin" in artifact_bundle
-        assert metadata["feature_order"] == list(td.downscaling.FEATURE_ORDER)
+        assert metadata["feature_order"] == list(td.FEATURE_ORDER)
         assert "conformal_q95_by_zone" in metadata
         assert "conformal_q95_by_zone_tmin" in metadata
         assert metadata["ood_aoa_threshold"] is not None

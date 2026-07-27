@@ -19,6 +19,12 @@ dependencies = [
   "requests",
   "pyyaml",
   "jsonschema",
+  # S3 access for contract.QRFModelAdapter.load (model.joblib/metadata.json)
+  # -- see contract.py's own docstring for the open question about how an
+  # external contributor without private-bucket credentials is meant to
+  # obtain a model artifact at all; boto3 itself is needed regardless of
+  # how that's eventually resolved.
+  "boto3",
   "geopandas==1.0.1",
   "shapely==2.0.6",
   "rasterio==1.3.11",

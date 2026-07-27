@@ -1,6 +1,18 @@
 """
 PROVENANCE: extracted verbatim (not merged) from crisisready/heat-risk-data-api's origin/feature/downscaling-phase4-model-training at tip commit 9d8a678c594fbe2878033373b750cc8465a9d80e on 2026-07-27. See this repository's own PROVENANCE.md for why this branch was extracted rather than merged.
 
+NOT RUNNABLE STANDALONE IN THIS REPO (2026-07-27 note, added during Phase 1
+extraction): this script imports db/era5/ghcn -- private-repo-only modules
+that write directly to the live Aurora ghcn_training table over a VPC-only
+connection. Unlike train_downscaling.py/sweep_*.py (fixed to import from
+heatready_downscaling instead), this script's job is a live DATABASE WRITE
+against infrastructure this public repo has no path to and, by design
+(P0.6/the VPC-isolation architecture), never will. It is landed here
+verbatim for provenance and historical record -- the backfill it describes
+already ran (see below, "8 countries... backfilled") -- not as part of this
+repo's runnable toolkit. Running it again requires checking it out inside
+crisisready/heat-risk-data-api's own environment, with its db.py/era5.py/
+ghcn.py/build_training_set.py and Aurora access, not from here.
 
 One-shot backfill of nighttime_wind_ms for the existing 274,249 ghcn_training
 rows (8 countries, the 2023 training window) -- populates the wind covariate
