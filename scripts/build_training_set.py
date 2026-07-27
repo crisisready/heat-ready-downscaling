@@ -1,6 +1,32 @@
 """
 PROVENANCE: extracted verbatim (not merged) from crisisready/heat-risk-data-api's origin/feature/downscaling-phase4-model-training at tip commit 9d8a678c594fbe2878033373b750cc8465a9d80e on 2026-07-27. See this repository's own PROVENANCE.md for why this branch was extracted rather than merged.
 
+FORWARD-PORTED 2026-07-27 (Phase 1 section 5.3) onto main's current src/
+API: dem.extract_elevation dropped its `bbox` parameter and now returns
+{"status","resume_index","results"} (was a plain dict); vulnerability.
+extract_worldcover's return shape gained the same {"status","resume_index",
+"results"} wrapper. Both call sites below are fixed to the current
+signature/shape -- see each fix's own inline comment for exactly what
+changed and why. lst.compute_warm_season_composite's name_coords/
+reference_radius_km parameters (also branch-only relative to main at
+extraction time) needed no fix here -- they were forward-ported onto main
+separately (Phase 0 P0.2), so this branch's call site already matches.
+
+NOT RUNNABLE STANDALONE IN THIS REPO: like scripts/backfill_wind.py, this
+script imports dem/era5/ghcn/heat_calcs/landscan/lst/vulnerability --
+private-repo-only modules for live CDS/S3/Aurora access this public repo
+has no path to and, by design, never will get (the whole point of the
+export/snapshot split is that contributors never need direct DB/CDS
+access). It is landed here, forward-ported and syntax-verified, because
+the CODE is the reproducible methodology record this program depends on
+being able to audit and re-run -- but actually RUNNING it (the monthly
+regeneration job, or the one-country/one-month smoke-test gate that
+verifies this forward-port) happens from crisisready/heat-risk-data-api's
+own bastion, with its db.py/era5.py/dem.py/ghcn.py/heat_calcs.py/
+landscan.py/lst.py/vulnerability.py and live Aurora/CDS/S3 access, not
+from a checkout of this repo alone. tests/test_build_training_set.py is
+excluded from this repo's own test collection for the same reason (see
+conftest.py).
 
 Offline training-set builder for the downscaling model (downscaling build
 Phase 3 -- see docs/plan-2026-07-18-neighborhood-resolution-downscaling.md
@@ -665,16 +691,30 @@ def snapshot_covariates_for_stations(
     canopy = vulnerability.extract_canopy(
         geojson_obj, bbox, vuln_bucket, project_id=_canopy_resume_project_id(batch_label, stations),
     )
-    worldcover = vulnerability.extract_worldcover(geojson_obj, bbox, vuln_bucket)
+    # FORWARD-PORT FIX (2026-07-27, Phase 1 section 5.3): extract_worldcover
+    # gained chunked/resumable + resolution-scaled behavior (2026-07-22
+    # audit, main only) after this branch diverged -- its return shape is
+    # now {"status", "resume_index", "results"}, not a plain
+    # {polygon: {...}} dict. Unwrap ["results"] -- this call always runs
+    # to completion in one shot here (no vuln_table/resume_index/deadline
+    # passed), so "results" always covers every polygon.
+    worldcover = vulnerability.extract_worldcover(geojson_obj, bbox, vuln_bucket)["results"]
     ghsl = vulnerability.extract_ghsl_smod(geojson_obj, bbox, vuln_bucket)
     # Elevation (dem.extract_elevation) needs the ERA5-Land grid resolution for
     # elevation_rel_to_gridcell_m -- read from era5's own dataset->resolution
     # map (the single source of truth fetch_era5_land_for_stations' download_era5
     # call is keyed against) rather than a second hardcoded literal that could
     # silently drift from it.
+    # FORWARD-PORT FIX (2026-07-27, Phase 1 section 5.3): extract_elevation
+    # gained the identical chunked/resumable treatment (main only) and
+    # DROPPED its `bbox` parameter entirely (tiles are now discovered per
+    # polygon, same reasoning as extract_worldcover's now-unused bbox) --
+    # this branch's call passed bbox positionally where grid_resolution_deg
+    # now lives; fixed to the current 2-positional-arg signature, and
+    # ["results"] unwrapped for the same reason as worldcover above.
     elevation = dem.extract_elevation(
-        geojson_obj, bbox, grid_resolution_deg=era5._DATASET_RESOLUTION["reanalysis-era5-land"],
-    )
+        geojson_obj, grid_resolution_deg=era5._DATASET_RESOLUTION["reanalysis-era5-land"],
+    )["results"]
     pop_density = _population_density_by_station(geojson_obj, landscan_bucket, landscan_key)
     lst_anomaly = _lst_warm_season_anomaly_by_station(geojson_obj, bbox, batch_label, stations)
 

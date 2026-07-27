@@ -14,7 +14,7 @@ just a reading of this document.
 
 ## Files extracted from `crisisready/heat-risk-data-api`
 
-All nine extracted 2026-07-27 from `origin/feature/downscaling-phase4-model-training` at tip
+All ten extracted 2026-07-27 from `origin/feature/downscaling-phase4-model-training` at tip
 commit `9d8a678c594fbe2878033373b750cc8465a9d80e`, verbatim (`git show <sha>:<path>`, no merge).
 
 | File in this repository | Extracted from (private repo path) |
@@ -28,6 +28,7 @@ commit `9d8a678c594fbe2878033373b750cc8465a9d80e`, verbatim (`git show <sha>:<pa
 | `tests/test_sweep_qrf_hyperparams.py` | `tests/test_sweep_qrf_hyperparams.py` |
 | `tests/test_sweep_gbm.py` | `tests/test_sweep_gbm.py` |
 | `tests/test_backfill_wind.py` | `tests/test_backfill_wind.py` |
+| `tests/test_build_training_set.py` | `tests/test_build_training_set.py` — **not in the original plan's section 5.1 file list**; found and extracted separately during the build_training_set.py forward-port, since it exists on the branch with real coverage for the single riskiest file in this port |
 
 The private repository tagged `archive/downscaling-phase4-model-training` at this same SHA at
 extraction time, specifically so the branch stops looking mergeable to a future reader there.
