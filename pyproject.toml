@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "heatready-downscaling"
+version = "0.1.0"
+description = "HeatReady downscaling model — training, validation, and scoring code for the crowdsourced model-improvement program"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+authors = [
+  { name = "CrisisReady" },
+]
+
+dependencies = [
+  "numpy",
+  "pandas",
+  "requests",
+  "pyyaml",
+  "jsonschema",
+  "geopandas==1.0.1",
+  "shapely==2.0.6",
+  "rasterio==1.3.11",
+  "exactextract==0.3.0",
+  "xarray==2024.11.0",
+  "netcdf4==1.7.2",
+  "timezonefinder==5.2.0",
+  "pytz",
+  "kgcpy==1.1.8",
+  # Pinned to the exact versions the shipped model.joblib was trained
+  # against (crisisready/heat-risk-data-api's src/requirements.txt) --
+  # pickle compatibility across scikit-learn versions is fragile, and
+  # heatready_downscaling.score must load the SAME model bytes the
+  # serving Lambda does to score against it faithfully.
+  "scikit-learn==1.9.0",
+  "joblib==1.5.3",
+  "quantile-forest==1.4.2",
+]
+
+[project.optional-dependencies]
+# Training-only comparison baselines (kriging/GBM) -- never needed by the
+# scoring/validation path a contributor or the referee runs, only by
+# scripts/sweep_gbm.py and the offline training pipeline itself.
+train = [
+  "lightgbm",
+  "pykrige",
+]
+# Band-paired snapshot build/read (Phase 2) -- pyarrow only, per the plan's
+# own note that this is the one new dependency the Batch scorer needs on
+# top of what serving already pins.
+snapshot = [
+  "pyarrow",
+]
+dev = [
+  "pytest",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

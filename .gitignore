@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Test / tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Never commit real credentials or downloaded model/data artifacts
+credentials.yaml
+*.tif
+*.nc
+model.joblib
+
+# OS
+.DS_Store

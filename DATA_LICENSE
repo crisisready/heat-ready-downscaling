@@ -1,0 +1,82 @@
+Data License: Creative Commons Attribution 4.0 International (CC BY 4.0)
+=========================================================================
+
+This license covers the DATA in this repository — training snapshots
+(`snapshots/`), sample files, submission artifacts (`submissions/`,
+`artifacts/`), and the append-only ledgers (`ledger/`) — as distinct from the
+SOURCE CODE, which is licensed separately under Apache-2.0 (see `LICENSE`).
+
+Copyright 2026 CrisisReady. This work is licensed under the Creative Commons
+Attribution 4.0 International License. To view a copy of this license, visit
+
+    https://creativecommons.org/licenses/by/4.0/
+
+or send a letter to Creative Commons, PO Box 1866, Mountain View, CA 94042, USA.
+
+You are free to:
+
+  - Share — copy and redistribute the material in any medium or format
+  - Adapt — remix, transform, and build upon the material
+
+for any purpose, even commercially, under the following terms:
+
+  - Attribution — You must give appropriate credit, provide a link to this
+    license, and indicate if changes were made. You may do so in any
+    reasonable manner, but not in any way that suggests the licensor
+    endorses you or your use.
+
+  - No additional restrictions — You may not apply legal terms or
+    technological measures that legally restrict others from doing anything
+    the license permits.
+
+No warranties are given. The license may not give you all of the permissions
+necessary for your intended use — for example, other rights such as
+publicity, privacy, or moral rights may limit how you use the material.
+
+Third-party data attribution
+-----------------------------
+
+This dataset incorporates derived values computed from third-party sources.
+Those sources' own terms apply to the underlying raw data; this repository's
+CC BY 4.0 license covers only the derived/processed values we publish here.
+
+- **Population density (`pop_density_per_km2`).** Computed from **LandScan
+  Global**, produced by Oak Ridge National Laboratory (ORNL), operated by
+  UT-Battelle, LLC, for the U.S. Department of Energy. LandScan Global data
+  are copyright UT-Battelle, LLC, and are made available under ORNL's own
+  LandScan license terms (https://landscan.ornl.gov) — attribution to ORNL
+  is required for any redistribution of LandScan-derived values, which this
+  notice satisfies for this repository's derived `pop_density_per_km2`
+  column.
+
+  **Known train/serve mismatch, disclosed here for exactly this reason:**
+  the value in this dataset is computed over a ~1 km buffer around each
+  GHCN station (`_STATION_BUFFER_DEG = 0.01`) from LandScan Global. The
+  live serving path (crisisready/heat-risk-data-api) computes the
+  equivalent feature differently — `worldpop_pop_total / polygon_area_km2`,
+  sourced from **WorldPop**, not LandScan — meaning the numerator (LandScan
+  vs. WorldPop) and denominator (a fixed station buffer vs. each polygon's
+  own area) both differ between training and serving. This is a real,
+  acknowledged gap: `pop_density_per_km2` in this snapshot means something
+  measurably different from the same-named feature at serving time. It is
+  not being silently normalized away — see the "serving-consistent
+  population density" issue in this repository's issue tracker (research
+  track) for the plan to close it on a future training run. If you are
+  training against this snapshot, know that this feature carries that
+  caveat; do not assume it is bit-identical to what the live model reads.
+
+- **Land surface temperature (`lst_warm_season_anomaly_c` and related
+  columns).** Derived from Landsat 8/9 Collection 2 Level-2 surface
+  temperature products, USGS/NASA public data, no additional attribution
+  restriction beyond standard USGS/Landsat data policy.
+
+- **Station ground truth (`station_tmax_c`, `station_tmin_c`, and related
+  columns).** Derived from NOAA's GHCN-Daily dataset, a public-domain
+  U.S. government data product.
+
+- **ERA5 / ERA5-Land base values (`grid_tmax_c`, `grid_tmin_c`, and
+  related columns).** Derived from Copernicus Climate Change Service
+  (C3S) Climate Data Store products. Generated using Copernicus Climate
+  Change Service information; neither the European Commission nor ECMWF
+  is responsible for any use made of the information this repository
+  derives from it.
