@@ -148,6 +148,73 @@ def read_stations(snapshot_dir: str) -> list[dict]:
     return pq.read_table(path).to_pylist()
 
 
+def write_stations(snapshot_dir: str, rows: list[dict]) -> None:
+    """Write stations.parquet -- one row per station_id. No fixed schema
+    enforced here (unlike write_partition's per-band _pa_schema) -- the
+    caller (build_band_paired_snapshot.py's pack phase) already dedupes a
+    band partition's own per-station-constant columns (identity/fold keys
+    + static covariates from plan section 6.1), so this just persists
+    whatever dict shape it's given via pyarrow's own type inference, the
+    same way read_stations' own test never assumes a fixed column set
+    either. Sorted by station_id for the same reason write_partition sorts
+    its own rows -- deterministic byte-for-byte output given the same
+    input, so re-running pack on unchanged data reproduces an identical
+    sha256."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    sorted_rows = sorted(rows, key=lambda r: r["station_id"])
+    table = pa.Table.from_pylist(sorted_rows)
+    pq.write_table(table, os.path.join(snapshot_dir, "stations.parquet"), compression="zstd")
+
+
+def compute_holdout(stations: list[dict], held_out_fraction: float = 0.15) -> set[str]:
+    """Zone-stratified provisional-scoring holdout (plan section 3.4): per
+    climate_zone, hold out max(1, round(held_out_fraction * n_zone_stations))
+    stations, chosen deterministically by LOWEST md5(station_id) within that
+    zone -- not a flat md5(station_id) % 100 < 15 over the whole corpus,
+    which would let a large zone's stations dominate the cut and could zero
+    out a thin zone entirely. Deliberately NOT salted by snapshot_version
+    (unlike score.score_band's bias-CV fold assignment) -- this is a stable,
+    release-over-release provisional holdout, not a per-submission anti-
+    gaming fold; salting it would let the same station rotate in and out of
+    "public training data" release over release, which is a data-leakage
+    risk of its own kind (a station privately held out in v1 could appear
+    in v2's public partitions with no one having decided that was safe).
+
+    `stations` needs only "station_id" and "climate_zone" per row (e.g. the
+    same rows read_stations returns, or the export's raw per-station rows
+    before dedup). Callers exclude the returned IDs' rows from every public
+    band partition entirely (plan section 3.4: "Holdout rows are excluded
+    from the published snapshot entirely") -- this function only decides
+    WHICH stations, not what to do with their rows."""
+    import hashlib
+
+    by_zone: dict[str, list[str]] = {}
+    for s in stations:
+        by_zone.setdefault(s["climate_zone"], []).append(s["station_id"])
+
+    holdout: set[str] = set()
+    for zone, station_ids in by_zone.items():
+        n_holdout = max(1, round(held_out_fraction * len(station_ids)))
+        ranked = sorted(station_ids, key=lambda sid: hashlib.md5(sid.encode()).hexdigest())
+        holdout.update(ranked[:n_holdout])
+    return holdout
+
+
+def write_holdout(snapshot_dir: str, station_ids: set[str]) -> None:
+    """Write holdout.json to `snapshot_dir` -- the caller is responsible for
+    keeping this file OUT of whatever gets published to the public GitHub
+    Release/Zenodo asset (plan section 6: "published only AFTER the cycle
+    closes"). Writing it into the private S3 working copy alongside the
+    full (including held-out-station) partitions is the intended use --
+    the scoring harness (Phase 3) needs it to know which rows a candidate
+    was never allowed to train against; the public release doesn't get
+    this file (or those stations' rows at all) until a cycle actually closes."""
+    with open(os.path.join(snapshot_dir, "holdout.json"), "w") as f:
+        json.dump(sorted(station_ids), f, indent=2)
+
+
 def read_holdout(snapshot_dir: str) -> set[str] | None:
     """Read holdout.json (withheld station IDs) if it exists -- returns
     None (not an empty set) when the file is absent, since this file is

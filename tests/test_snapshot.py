@@ -87,13 +87,83 @@ class TestReadStations:
         assert {s["station_id"] for s in stations} == {"A", "B"}
 
 
-class TestReadHoldout:
+class TestWriteStations:
+    def test_roundtrip_via_read_stations(self, tmp_path):
+        rows = [
+            {"station_id": "B", "lon": -100.0, "lat": 40.0, "climate_zone": "Dfb"},
+            {"station_id": "A", "lon": -112.0, "lat": 33.4, "climate_zone": "BWh"},
+        ]
+        snapshot.write_stations(str(tmp_path), rows)
+        stations = snapshot.read_stations(str(tmp_path))
+        assert {s["station_id"] for s in stations} == {"A", "B"}
+        assert next(s for s in stations if s["station_id"] == "A")["climate_zone"] == "BWh"
+
+    def test_sorted_by_station_id(self, tmp_path):
+        snapshot.write_stations(str(tmp_path), [
+            {"station_id": "C", "lon": 0.0}, {"station_id": "A", "lon": 0.0}, {"station_id": "B", "lon": 0.0},
+        ])
+        stations = snapshot.read_stations(str(tmp_path))
+        assert [s["station_id"] for s in stations] == ["A", "B", "C"]
+
+
+class TestComputeHoldout:
+    def _stations(self, zone_counts: dict[str, int]) -> list[dict]:
+        stations = []
+        for zone, n in zone_counts.items():
+            stations.extend({"station_id": f"{zone}{i:03d}", "climate_zone": zone} for i in range(n))
+        return stations
+
+    def test_holds_out_15_percent_per_zone(self):
+        stations = self._stations({"Cfb": 100, "BWh": 20})
+        holdout = snapshot.compute_holdout(stations)
+        cfb_held = {sid for sid in holdout if sid.startswith("Cfb")}
+        bwh_held = {sid for sid in holdout if sid.startswith("BWh")}
+        assert len(cfb_held) == 15  # round(0.15 * 100)
+        assert len(bwh_held) == 3  # round(0.15 * 20)
+
+    def test_thin_zone_holds_out_at_least_one(self):
+        """A zone with too few stations for round(0.15 * n) to reach 1 must
+        still hold out exactly 1 -- max(1, ...) in the plan's own rule, so
+        a thin zone is never silently excluded from provisional scoring."""
+        stations = self._stations({"EF": 3})
+        holdout = snapshot.compute_holdout(stations)
+        assert len(holdout) == 1
+
+    def test_deterministic_across_calls(self):
+        stations = self._stations({"Cfb": 50})
+        assert snapshot.compute_holdout(stations) == snapshot.compute_holdout(stations)
+
+    def test_not_salted_by_snapshot_version(self):
+        """Unlike score.score_band's bias-CV fold assignment, the
+        provisional holdout is deliberately stable release-over-release --
+        compute_holdout takes no fold_salt/snapshot_version argument at all."""
+        import inspect
+
+        params = inspect.signature(snapshot.compute_holdout).parameters
+        assert "fold_salt" not in params and "snapshot_version" not in params
+
+    def test_zones_pool_independently(self):
+        """A large zone's stations must not affect a small zone's own cut
+        -- each zone's md5 ranking and holdout count are computed within
+        that zone alone."""
+        small_only = snapshot.compute_holdout(self._stations({"BWh": 20}))
+        combined = snapshot.compute_holdout(self._stations({"Cfb": 100, "BWh": 20}))
+        bwh_small_only = {sid for sid in small_only if sid.startswith("BWh")}
+        bwh_combined = {sid for sid in combined if sid.startswith("BWh")}
+        assert bwh_small_only == bwh_combined
+
+
+class TestWriteHoldoutAndReadHoldout:
     def test_returns_none_when_file_absent(self, tmp_path):
         assert snapshot.read_holdout(str(tmp_path)) is None
 
     def test_reads_holdout_station_ids(self, tmp_path):
         import json
         (tmp_path / "holdout.json").write_text(json.dumps(["A", "B", "C"]))
+        assert snapshot.read_holdout(str(tmp_path)) == {"A", "B", "C"}
+
+    def test_write_then_read_roundtrip(self, tmp_path):
+        snapshot.write_holdout(str(tmp_path), {"A", "B", "C"})
         assert snapshot.read_holdout(str(tmp_path)) == {"A", "B", "C"}
 
 
