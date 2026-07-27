@@ -79,9 +79,20 @@ anything reaches production — a submission's own claimed numbers are never tru
 ## Getting the snapshot
 
 The band-paired training/validation snapshot (GHCN ground truth + every band's base value, paired
-per station-day) is distributed as a GitHub Release asset plus a Zenodo DOI — **not** hosted on
-crisisready.io's own infrastructure, so a citable, versioned copy always exists independent of us.
-See the latest release for the current `snapshot_version` and download link.
+per station-day) is distributed as a [GitHub Release asset](https://github.com/crisisready/heat-ready-downscaling/releases)
+plus a citable Zenodo dataset DOI — **not** hosted on crisisready.io's own infrastructure, so a
+permanent, versioned copy always exists independent of us. Cite the **concept DOI**
+[10.5281/zenodo.21633230](https://doi.org/10.5281/zenodo.21633230) (resolves to the latest
+version) for general reference, or a specific version's own DOI (e.g.
+[10.5281/zenodo.21633231](https://doi.org/10.5281/zenodo.21633231) for `v2026.07`) to pin the
+exact snapshot a result was produced against. See the latest release for the current
+`snapshot_version` and download link.
+
+Note: Zenodo's own GitHub-repository integration (visible on this repo) archives this
+repository's **source code** at each tagged release, not the snapshot data itself — it mints a
+separate DOI that is not the one to cite for the dataset. The dataset DOIs above come from a
+dedicated Zenodo deposition (`scripts/publish_snapshot_to_zenodo.py`) built specifically to
+archive the actual snapshot tarball.
 
 ## Getting started
 
