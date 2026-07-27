@@ -12,7 +12,16 @@ Layout on disk (or after download from a GitHub Release / Zenodo DOI):
     ├── holdout.json              withheld station IDs -- published only
     │                             AFTER the scoring cycle closes
     ├── sample.csv                1 station x 9 bands x 365 days, committed
-    └── paired/band=<band>/month=<YYYY-MM>/part-0.parquet
+    ├── paired/band=<band>/month=<YYYY-MM>/part-0.parquet
+    └── predictions/model=<model_version>/band=<band>/month=<YYYY-MM>/part-0.parquet
+                                  frozen model output -- see contract.FrozenPredictionAdapter's
+                                  own docstring for why this exists (Phase 3, 2026-07-27):
+                                  QRFModelAdapter.load needs private S3 credentials no external
+                                  contributor or CI job has, so scoring in that context reads
+                                  these frozen per-row predictions instead of running live
+                                  inference. Written by the maintainer only (from a machine that
+                                  DOES have the private bucket's credentials), same as every other
+                                  partition here -- contributors only ever read this directory.
 
 Row-dict-in/row-dict-out on the read side (not a DataFrame-returning API)
 is deliberate: it keeps score.py/features.py Parquet-unaware, matching how
@@ -136,6 +145,93 @@ def read_band_partitions(snapshot_dir: str, band: str, months: list[str] | None 
     rows: list[dict] = []
     for path in paths:
         rows.extend(pq.read_table(path).to_pylist())
+    return rows
+
+
+# Frozen model-prediction partitions (Phase 3, 2026-07-27) -- one row per
+# (station_id, date, target), for a specific (model_version, band). Exists
+# so scoring can happen with zero AWS access and zero sklearn/joblib pickle
+# compatibility: contract.QRFModelAdapter.load needs private S3 credentials
+# no external contributor or CI job has -- see contract.FrozenPredictionAdapter's
+# own docstring for the full reasoning. `covariates_missing` is stored as a
+# JSON-encoded string, not a native pyarrow list column -- keeps this
+# partition's schema as uniformly scalar as the paired one above, and the
+# list is only ever a handful of feature names, never large enough for that
+# to matter for size or query performance.
+def _predictions_pa_schema():
+    import pyarrow as pa
+
+    return pa.schema([
+        ("station_id", pa.string()),
+        ("date", pa.date32()),
+        ("target", pa.string()),  # "tmax" | "tmin"
+        ("delta_c", pa.float64()),  # null when not applied
+        ("ci95_c", pa.float64()),  # null when not applied
+        ("confidence", pa.string()),  # "high" | "medium" | "low" -- frozen AS COMPUTED at
+                                        # snapshot-build time, not re-derived later, so a future
+                                        # change to contract._confidence_class's thresholds can
+                                        # never silently reinterpret an already-published snapshot
+        ("applied", pa.bool_()),
+        ("out_of_distribution", pa.bool_()),
+        ("covariates_missing", pa.string()),  # JSON-encoded list[str], e.g. "[]" or '["slope_deg"]'
+        ("cv_gate_passed", pa.bool_()),
+        ("model_version", pa.string()),
+    ])
+
+
+def write_predictions_partition(
+    snapshot_dir: str, model_version: str, band: str, month: str, rows: list[dict],
+) -> tuple[str, str, int]:
+    """Write predictions/model={model_version}/band={band}/month={month}/part-0.parquet.
+    `rows` are the FROZEN per-row prediction dicts -- see contract.
+    FrozenPredictionAdapter's own docstring for the exact contract this
+    freezes (must be QRFModelAdapter.predict's own output, called with
+    extra_zone_gate=None/bias_correction=None -- i.e. the base model's raw,
+    uncorrected result -- never a result that already had a band-specific
+    gate or bias correction baked in)."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    if band not in _BANDS:
+        raise ValueError(f"unrecognized band {band!r} -- must be one of {_BANDS}")
+
+    rel_dir = os.path.join("predictions", f"model={model_version}", f"band={band}", f"month={month}")
+    abs_dir = os.path.join(snapshot_dir, rel_dir)
+    os.makedirs(abs_dir, exist_ok=True)
+    rel_path = os.path.join(rel_dir, "part-0.parquet")
+    abs_path = os.path.join(snapshot_dir, rel_path)
+
+    sorted_rows = sorted(rows, key=lambda r: (r["station_id"], r["date"], r["target"]))
+    table = pa.Table.from_pylist(sorted_rows, schema=_predictions_pa_schema())
+    pq.write_table(table, abs_path, compression="zstd")
+
+    sha256 = _file_sha256(abs_path)
+    return rel_path, sha256, len(sorted_rows)
+
+
+def read_predictions_partitions(
+    snapshot_dir: str, model_version: str, band: str, months: list[str] | None = None,
+) -> list[dict]:
+    """Read and concatenate every predictions/model={model_version}/band={band}/month=*/part-0.parquet
+    (or just the given months). `covariates_missing` is JSON-decoded back
+    into a real list[str] on the way out, mirroring QRFModelAdapter.predict's
+    own return shape exactly."""
+    import glob
+
+    import pyarrow.parquet as pq
+
+    band_dir = os.path.join(snapshot_dir, "predictions", f"model={model_version}", f"band={band}")
+    if months is not None:
+        paths = [os.path.join(band_dir, f"month={m}", "part-0.parquet") for m in months]
+        paths = [p for p in paths if os.path.exists(p)]
+    else:
+        paths = sorted(glob.glob(os.path.join(band_dir, "month=*", "part-0.parquet")))
+
+    rows: list[dict] = []
+    for path in paths:
+        for r in pq.read_table(path).to_pylist():
+            r["covariates_missing"] = json.loads(r["covariates_missing"])
+            rows.append(r)
     return rows
 
 

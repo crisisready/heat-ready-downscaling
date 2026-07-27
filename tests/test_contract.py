@@ -2,6 +2,9 @@
 quantile_forest fits against synthetic data, not mocked internals, so the
 AOA/gate/conformal math is exercised against real model output shapes."""
 
+import json
+from datetime import date
+
 import numpy as np
 import pytest
 from quantile_forest import RandomForestQuantileRegressor
@@ -139,6 +142,97 @@ class TestDeriveZonesPassingCvGate:
         }}}
         gates = contract.derive_zones_passing_cv_gate(metadata)
         assert gates["tmax"]["BWh"] is False
+
+
+class TestFrozenPredictionAdapter:
+    """FrozenPredictionAdapter must replicate QRFModelAdapter.predict's own
+    AND-gate/bias-correction semantics exactly, using frozen (baseline,
+    extra_zone_gate=None/bias_correction=None) results as the "own gate"
+    QRFModelAdapter's zones_passing_cv_gate would otherwise provide."""
+
+    def _frozen(self, applied=True, delta_c=1.2, ci95_c=0.5, confidence="high",
+                out_of_distribution=False, covariates_missing=None, cv_gate_passed=True):
+        return {
+            "applied": applied, "delta_c": delta_c, "ci95_c": ci95_c, "confidence": confidence,
+            "out_of_distribution": out_of_distribution, "covariates_missing": covariates_missing or [],
+            "cv_gate_passed": cv_gate_passed,
+        }
+
+    def _adapter(self, station_id="USW00023183", date_iso="2023-07-01", target="tmax", **frozen_kwargs):
+        return contract.FrozenPredictionAdapter(
+            "ds-test", {(station_id, date_iso, target): self._frozen(**frozen_kwargs)},
+        )
+
+    def _row(self, zone="Cfb"):
+        return {"station_id": "USW00023183", "date": "2023-07-01", "climate_zone": zone}
+
+    def test_applied_row_reproduces_frozen_values_with_no_gates(self):
+        adapter = self._adapter(delta_c=1.2, ci95_c=0.5, confidence="high")
+        preds = adapter.predict([self._row()], "tmax")
+        assert preds[0]["applied"] is True
+        assert preds[0]["delta_c"] == pytest.approx(1.2)
+        assert preds[0]["ci95_c"] == pytest.approx(0.5)
+        assert preds[0]["confidence"] == "high"
+        assert preds[0]["model_version"] == "ds-test"
+
+    def test_frozen_not_applied_stays_not_applied_regardless_of_extra_gate(self):
+        """A row that already failed the base (era5) CV gate, or had
+        incomplete covariates when frozen, can never be rescued by a
+        looser extra_zone_gate -- matches QRFModelAdapter.predict's own
+        AND, which evaluates both gates together."""
+        adapter = self._adapter(applied=False, cv_gate_passed=False, covariates_missing=["slope_deg"])
+        preds = adapter.predict([self._row()], "tmax", extra_zone_gate={"tmax": {"Cfb": True}, "tmin": {}})
+        assert preds[0]["applied"] is False
+        assert preds[0]["delta_c"] is None
+        assert preds[0]["covariates_missing"] == ["slope_deg"]
+
+    def test_extra_zone_gate_denies_a_frozen_applied_row(self):
+        adapter = self._adapter(applied=True, out_of_distribution=True)
+        preds = adapter.predict([self._row("Cfb")], "tmax", extra_zone_gate={"tmax": {}, "tmin": {}})
+        assert preds[0]["applied"] is False
+        assert preds[0]["cv_gate_passed"] is False
+        # out_of_distribution is preserved through the gate-fail transition,
+        # matching QRFModelAdapter.predict's own _not_applied_result call.
+        assert preds[0]["out_of_distribution"] is True
+
+    def test_extra_zone_gate_allows_a_zone_present(self):
+        adapter = self._adapter(applied=True)
+        preds = adapter.predict([self._row("Cfb")], "tmax", extra_zone_gate={"tmax": {"Cfb": True}, "tmin": {}})
+        assert preds[0]["applied"] is True
+
+    def test_bias_correction_added_to_frozen_delta_c(self):
+        adapter = self._adapter(applied=True, delta_c=1.2, ci95_c=0.5)
+        preds = adapter.predict([self._row("Cfb")], "tmax", bias_correction={"tmax": {"Cfb": 0.8}, "tmin": {}})
+        assert preds[0]["delta_c"] == pytest.approx(2.0)
+        # ci95_c is untouched by bias_correction, matching QRFModelAdapter.
+        assert preds[0]["ci95_c"] == pytest.approx(0.5)
+
+    def test_bias_correction_zone_absent_applies_zero(self):
+        adapter = self._adapter(applied=True, delta_c=1.2)
+        preds = adapter.predict([self._row("Cfb")], "tmax", bias_correction={"tmax": {"OtherZone": 5.0}, "tmin": {}})
+        assert preds[0]["delta_c"] == pytest.approx(1.2)
+
+    def test_no_frozen_prediction_for_station_day_fails_closed(self):
+        adapter = contract.FrozenPredictionAdapter("ds-test", {})
+        preds = adapter.predict([self._row()], "tmax")
+        assert preds[0]["applied"] is False
+        assert preds[0]["delta_c"] is None
+        assert preds[0]["model_version"] == "ds-test"
+
+    def test_from_snapshot_roundtrip(self, tmp_path):
+        from heatready_downscaling import snapshot as snap
+
+        rows = [
+            {"station_id": "A", "date": date(2023, 7, 1), "target": "tmax",
+             "delta_c": 1.5, "ci95_c": 0.4, "confidence": "high", "applied": True,
+             "out_of_distribution": False, "covariates_missing": json.dumps([]),
+             "cv_gate_passed": True, "model_version": "ds-2026.07-rf5"},
+        ]
+        snap.write_predictions_partition(str(tmp_path), "ds-2026.07-rf5", "era5", "2023-07", rows)
+        adapter = contract.FrozenPredictionAdapter.from_snapshot(str(tmp_path), "ds-2026.07-rf5", "era5")
+        preds = adapter.predict([{"station_id": "A", "date": "2023-07-01", "climate_zone": "Cfb"}], "tmax")
+        assert preds[0]["applied"] is True
+        assert preds[0]["delta_c"] == pytest.approx(1.5)
 
 
 class TestConfidenceClass:

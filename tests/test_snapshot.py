@@ -2,6 +2,7 @@
 Parquet files to a tmp_path rather than mocking pyarrow, so the actual
 schema/compression/sha256 machinery gets genuine coverage."""
 
+import json
 from datetime import date
 
 import pytest
@@ -165,6 +166,55 @@ class TestWriteHoldoutAndReadHoldout:
     def test_write_then_read_roundtrip(self, tmp_path):
         snapshot.write_holdout(str(tmp_path), {"A", "B", "C"})
         assert snapshot.read_holdout(str(tmp_path)) == {"A", "B", "C"}
+
+
+_PREDICTION_ROW = {
+    "station_id": "USW00023183", "date": date(2023, 7, 1), "target": "tmax",
+    "delta_c": 1.2, "ci95_c": 0.5, "confidence": "high", "applied": True,
+    "out_of_distribution": False, "covariates_missing": "[]",
+    "cv_gate_passed": True, "model_version": "ds-2026.07-rf5",
+}
+
+
+class TestPredictionsPartition:
+    def test_roundtrip_preserves_values(self, tmp_path):
+        snapshot.write_predictions_partition(str(tmp_path), "ds-2026.07-rf5", "era5", "2023-07", [_PREDICTION_ROW])
+        rows = snapshot.read_predictions_partitions(str(tmp_path), "ds-2026.07-rf5", "era5")
+        assert len(rows) == 1
+        assert rows[0]["delta_c"] == pytest.approx(1.2)
+        assert rows[0]["target"] == "tmax"
+
+    def test_covariates_missing_decoded_back_to_a_list(self, tmp_path):
+        row = {**_PREDICTION_ROW, "covariates_missing": json.dumps(["slope_deg", "aspect_deg"])}
+        snapshot.write_predictions_partition(str(tmp_path), "ds-2026.07-rf5", "era5", "2023-07", [row])
+        rows = snapshot.read_predictions_partitions(str(tmp_path), "ds-2026.07-rf5", "era5")
+        assert rows[0]["covariates_missing"] == ["slope_deg", "aspect_deg"]
+
+    def test_unrecognized_band_raises(self, tmp_path):
+        with pytest.raises(ValueError, match="unrecognized band"):
+            snapshot.write_predictions_partition(str(tmp_path), "ds-2026.07-rf5", "not_a_band", "2023-07", [_PREDICTION_ROW])
+
+    def test_different_model_versions_are_isolated(self, tmp_path):
+        snapshot.write_predictions_partition(str(tmp_path), "ds-2026.07-rf5", "era5", "2023-07", [_PREDICTION_ROW])
+        snapshot.write_predictions_partition(
+            str(tmp_path), "ds-2026.07-rf4", "era5", "2023-07",
+            [{**_PREDICTION_ROW, "model_version": "ds-2026.07-rf4"}],
+        )
+        rf5_rows = snapshot.read_predictions_partitions(str(tmp_path), "ds-2026.07-rf5", "era5")
+        rf4_rows = snapshot.read_predictions_partitions(str(tmp_path), "ds-2026.07-rf4", "era5")
+        assert len(rf5_rows) == 1 and len(rf4_rows) == 1
+
+    def test_months_filter_restricts_which_partitions_are_read(self, tmp_path):
+        snapshot.write_predictions_partition(str(tmp_path), "ds-2026.07-rf5", "era5", "2023-07", [_PREDICTION_ROW])
+        snapshot.write_predictions_partition(
+            str(tmp_path), "ds-2026.07-rf5", "era5", "2023-08",
+            [{**_PREDICTION_ROW, "date": date(2023, 8, 1)}],
+        )
+        rows = snapshot.read_predictions_partitions(str(tmp_path), "ds-2026.07-rf5", "era5", months=["2023-07"])
+        assert len(rows) == 1
+
+    def test_no_predictions_for_band_returns_empty_list(self, tmp_path):
+        assert snapshot.read_predictions_partitions(str(tmp_path), "ds-2026.07-rf5", "era5") == []
 
 
 class TestManifest:

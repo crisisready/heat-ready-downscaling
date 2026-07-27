@@ -14,16 +14,21 @@ will eventually have to satisfy, rather than a hardcoded free function with
 the interface bolted on as an afterthought. score.score_band depends on
 ModelAdapter, never on QRFModelAdapter directly.
 
-KNOWN OPEN QUESTION, not resolved here (flagged 2026-07-27, see this
-repository's Phase 1 design consult): QRFModelAdapter.load() reads
-model.joblib/metadata.json from a private S3 bucket the same way the
-serving Lambda does -- correct for the maintainer's own use (dogfooding,
-promote_from_public.py's re-derivation) but NOT a distribution mechanism an
-external contributor without AWS credentials for that bucket can use. How
-contributors actually obtain a model artifact to score against (a public
-mirror? a GitHub Release asset, like the snapshot?) is an open decision for
-whoever opens Rung A submissions to the public, not something this module
-guesses at.
+RESOLVED 2026-07-27 (Phase 3, see FrozenPredictionAdapter below): the open
+question this docstring used to raise -- QRFModelAdapter.load() needs
+private S3 credentials no external contributor or CI job has, so how does
+Rung A/B scoring get model predictions at all? -- is answered by NOT
+distributing the model artifact itself. Instead, the maintainer freezes
+QRFModelAdapter's own per-row predictions (delta_c, ci95_c, confidence,
+etc.) into a new snapshot partition (heatready_downscaling.snapshot.
+write_predictions_partition), and FrozenPredictionAdapter reads that
+partition back as a lookup table satisfying the exact same ModelAdapter
+protocol. This removes AWS access AND the sklearn/joblib pickle-compat
+requirement from the entire contributor/CI scoring path -- reproduction
+becomes a byte-exact lookup, not a re-run of live inference, which is
+actually a STRONGER reproducibility guarantee than shipping the pickle
+would have been (no risk of a contributor's local sklearn/joblib/
+quantile-forest version silently producing different numbers).
 """
 
 import logging
@@ -342,6 +347,120 @@ class QRFModelAdapter:
                 "covariates_missing": [],
                 "cv_gate_passed": True,
                 "model_version": model_version,
+            })
+
+        return results
+
+
+class FrozenPredictionAdapter:
+    """A ModelAdapter backed by a snapshot's frozen predictions partition
+    (heatready_downscaling.snapshot.write_predictions_partition/
+    read_predictions_partitions) instead of a live joblib model -- see this
+    module's own docstring for why this exists.
+
+    The frozen data represents QRFModelAdapter.predict's output called with
+    extra_zone_gate=None and bias_correction=None -- i.e. the base model's
+    raw result, gated ONLY by its own trained-on-ERA5 zones_passing_cv_gate.
+    predict() below re-applies extra_zone_gate/bias_correction at call time
+    against that frozen baseline, replicating QRFModelAdapter.predict's
+    exact AND-gate/addition semantics:
+
+    - A row frozen as NOT applied (incomplete covariates, or failed the
+      base ERA5 CV gate) stays not-applied regardless of extra_zone_gate --
+      extra_zone_gate can only ever ADD a restriction, never rescue a row
+      the base gate already failed, exactly like the live model.
+    - A row frozen as applied, but whose zone extra_zone_gate marks False,
+      becomes not-applied (cv_gate_passed=False) -- the SAME transition
+      QRFModelAdapter.predict makes when the AND of its two gates fails.
+    - A row frozen as applied AND passing extra_zone_gate (or
+      extra_zone_gate is None) keeps its frozen delta_c/ci95_c/confidence,
+      with bias_correction_for_target.get(zone, 0.0) ADDED to delta_c --
+      ci95_c is untouched by bias_correction, matching the live model
+      (ci95_c is derived from conformal quantile width alone, never from
+      the bias correction)."""
+
+    def __init__(self, model_version: str, predictions_by_key: dict[tuple, dict]):
+        self.model_version = model_version
+        self._predictions = predictions_by_key
+
+    @classmethod
+    def from_snapshot(
+        cls, snapshot_dir: str, model_version: str, band: str, months: list[str] | None = None,
+    ) -> "FrozenPredictionAdapter":
+        """Load predictions/model={model_version}/band={band}/month=*/
+        part-0.parquet from `snapshot_dir` and index by
+        (station_id, date_iso, target)."""
+        from heatready_downscaling.snapshot import read_predictions_partitions
+
+        rows = read_predictions_partitions(snapshot_dir, model_version, band, months=months)
+        predictions_by_key: dict[tuple, dict] = {}
+        for r in rows:
+            d = r["date"]
+            date_iso = d.isoformat() if hasattr(d, "isoformat") else str(d)
+            predictions_by_key[(r["station_id"], date_iso, r["target"])] = r
+        return cls(model_version, predictions_by_key)
+
+    def predict(
+        self,
+        rows: list[dict],
+        target: str,
+        extra_zone_gate: dict[str, dict[str, bool]] | None = None,
+        bias_correction: dict[str, dict[str, float]] | None = None,
+    ) -> list[dict]:
+        """See ModelAdapter.predict for the return shape; see this class's
+        own docstring for the exact re-gating/bias-correction semantics."""
+        extra_gate_for_target = extra_zone_gate.get(target, {}) if extra_zone_gate is not None else None
+        bias_correction_for_target = bias_correction.get(target, {}) if bias_correction is not None else {}
+
+        results: list[dict] = []
+        for r in rows:
+            d = r.get("date")
+            date_iso = d.isoformat() if hasattr(d, "isoformat") else str(d)
+            zone = r.get("climate_zone")
+            frozen = self._predictions.get((r.get("station_id"), date_iso, target))
+
+            if frozen is None:
+                # Not in the frozen partition at all -- a real data-shape
+                # mismatch between the paired rows and the predictions
+                # partition being scored against, not an expected "gate
+                # failed" case. Fail closed (not applied) rather than
+                # raising, matching this module's general "a wrong-but-
+                # confident correction is worse than an honest fallback"
+                # posture, but this should never happen for a
+                # correctly-paired (snapshot_version, model_version, band)
+                # combination -- investigate if it does.
+                logger.warning(
+                    "No frozen prediction for station_id=%s date=%s target=%s model_version=%s -- "
+                    "check the predictions partition actually covers this station-day.",
+                    r.get("station_id"), date_iso, target, self.model_version,
+                )
+                results.append(_not_applied_result(self.model_version))
+                continue
+
+            if not frozen["applied"]:
+                results.append(_not_applied_result(
+                    self.model_version,
+                    covariates_missing=frozen["covariates_missing"],
+                    cv_gate_passed=frozen["cv_gate_passed"],
+                    out_of_distribution=frozen["out_of_distribution"],
+                ))
+                continue
+
+            if extra_gate_for_target is not None and not extra_gate_for_target.get(zone, False):
+                results.append(_not_applied_result(
+                    self.model_version, cv_gate_passed=False, out_of_distribution=frozen["out_of_distribution"],
+                ))
+                continue
+
+            results.append({
+                "delta_c": frozen["delta_c"] + bias_correction_for_target.get(zone, 0.0),
+                "ci95_c": frozen["ci95_c"],
+                "confidence": frozen["confidence"],
+                "applied": True,
+                "out_of_distribution": frozen["out_of_distribution"],
+                "covariates_missing": [],
+                "cv_gate_passed": True,
+                "model_version": self.model_version,
             })
 
         return results

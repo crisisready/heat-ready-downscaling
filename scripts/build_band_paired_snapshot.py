@@ -459,11 +459,81 @@ def _phase_pack(args: argparse.Namespace) -> None:
         _write_snapshot(args.public_out_dir, exclude_holdout=True)
 
 
+_ALL_BANDS = ("era5",) + tuple(_FETCH_BAND_CONFIG)
+
+
+def _freeze_predictions_for_band(adapter, rows: list[dict], model_version: str) -> list[dict]:
+    """Run the REAL model (via QRFModelAdapter, loaded with private S3
+    credentials) over one band's rows for both targets, called WITHOUT
+    extra_zone_gate/bias_correction -- i.e. the base model's raw result,
+    gated only by its own trained-on-ERA5 zones_passing_cv_gate. This is
+    the exact contract contract.FrozenPredictionAdapter's own docstring
+    requires: re-gating/bias-correction happen later, at score time,
+    against this frozen baseline -- never bake them in here."""
+    frozen: list[dict] = []
+    for target in ("tmax", "tmin"):
+        preds = adapter.predict(rows, target)
+        for r, p in zip(rows, preds):
+            frozen.append({
+                "station_id": r["station_id"], "date": r["date"], "target": target,
+                "delta_c": p["delta_c"], "ci95_c": p["ci95_c"], "confidence": p["confidence"],
+                "applied": p["applied"], "out_of_distribution": p["out_of_distribution"],
+                "covariates_missing": json.dumps(p["covariates_missing"]),
+                "cv_gate_passed": p["cv_gate_passed"], "model_version": model_version,
+            })
+    return frozen
+
+
+def _phase_predict(args: argparse.Namespace) -> None:
+    """Add a frozen predictions/ subtree to an ALREADY-PACKED snapshot
+    directory (--phase pack must have run first). Needs private S3
+    credentials for contract.QRFModelAdapter.load -- unlike export/fetch/
+    pack, this phase is maintainer-only by necessity, not just by
+    convention. Only boto3/joblib/sklearn/quantile-forest are needed (this
+    package's own pyproject.toml already pins these for exactly this use,
+    per its own comment) -- no db/heat_calcs/open_meteo/api_call_manager."""
+    from heatready_downscaling.contract import QRFModelAdapter
+
+    bucket = args.bucket or os.environ["VULNERABILITY_DATA_BUCKET"]
+    adapter = QRFModelAdapter.load(args.model_version, bucket=bucket)
+
+    manifest = snap.read_manifest(args.snapshot_dir)
+    partitions = list(manifest["partitions"])
+
+    for band in _ALL_BANDS:
+        rows = snap.read_band_partitions(args.snapshot_dir, band)
+        if not rows:
+            logger.warning("No rows for band=%s in %s -- skipping", band, args.snapshot_dir)
+            continue
+        frozen = _freeze_predictions_for_band(adapter, rows, args.model_version)
+        by_month: dict[str, list[dict]] = {}
+        for r in frozen:
+            by_month.setdefault(r["date"].strftime("%Y-%m"), []).append(r)
+        for month, month_rows in by_month.items():
+            rel_path, sha256, row_count = snap.write_predictions_partition(
+                args.snapshot_dir, args.model_version, band, month, month_rows,
+            )
+            partitions.append({"path": rel_path, "sha256": sha256, "row_count": row_count})
+        logger.info("Froze %d prediction row(s) for band=%s, model=%s", len(frozen), band, args.model_version)
+
+    snap.write_manifest(
+        args.snapshot_dir, manifest["snapshot_version"], partitions,
+        generating_commit=manifest["generating_commit"], package_version=manifest["package_version"],
+        license_info=manifest["license"], f7_caveat=manifest["f7_caveat"], f3_disclosure=manifest["f3_disclosure"],
+        release_url=manifest.get("release_url"), doi_url=manifest.get("doi_url"),
+    )
+    logger.info("Updated MANIFEST.json with %d total partition(s)", len(partitions))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--phase", choices=["export", "fetch", "pack"], required=True)
+    parser.add_argument("--phase", choices=["export", "fetch", "pack", "predict"], required=True)
     parser.add_argument("--snapshot-version", default=None, help="required for --phase fetch/pack")
-    parser.add_argument("--bucket", default=None, help="defaults to VULNERABILITY_DATA_BUCKET env var (--phase export)")
+    parser.add_argument("--bucket", default=None,
+                         help="defaults to VULNERABILITY_DATA_BUCKET env var (--phase export/predict)")
+    parser.add_argument("--model-version", default=None, help="--phase predict only")
+    parser.add_argument("--snapshot-dir", default=None,
+                         help="--phase predict: an already-packed snapshot directory (from --phase pack)")
     parser.add_argument("--run-id", default=None, help="export-ghcn-training run_id (--phase export)")
     parser.add_argument("--rows-in", default=None, help="--phase fetch/pack: JSON from a prior --phase export run")
     parser.add_argument("--band", default=None, choices=sorted(_FETCH_BAND_CONFIG), help="--phase fetch only")
@@ -493,6 +563,10 @@ def main() -> None:
         if not args.rows_in or not args.out_dir or not args.snapshot_version:
             raise SystemExit("--phase pack requires --rows-in, --out-dir, --snapshot-version")
         _phase_pack(args)
+    elif args.phase == "predict":
+        if not args.model_version or not args.snapshot_dir:
+            raise SystemExit("--phase predict requires --model-version, --snapshot-dir")
+        _phase_predict(args)
 
 
 if __name__ == "__main__":
