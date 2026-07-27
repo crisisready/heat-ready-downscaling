@@ -57,6 +57,48 @@ Two required changes made during this extraction, not present in the private rep
 assignment, closing a fold-shopping gap), and takes a `contract.ModelAdapter` instead of a raw
 joblib bundle dict.
 
+## Phase 1.3 smoke-test result (2026-07-27)
+
+Ran `snapshot_covariates_for_stations` (the covariate half of `build_training_set.py`'s
+pipeline, called directly to bypass a real CDS cost-ceiling 403 blocking the unrelated
+ERA5-Land fetch) for Nicaragua's 8 active GHCN stations, and diffed the output against the
+live `ghcn_training` table's existing rows for the same stations.
+
+**Exact match, all 8 stations**: `elevation_mean_m`, `slope_deg`, `aspect_deg`, `wc_built_frac`,
+`wc_tree_frac`, `wc_water_frac`, `ghsl_urban_fraction`, `canopy_height_mean_m`,
+`canopy_frac_over_3m` — zero mismatches. This is the strongest available evidence that the
+`dem.extract_elevation`/`vulnerability.extract_worldcover`/`extract_ghsl_smod`/`extract_canopy`
+call-site fixes applied during this forward-port (see this file's own header note on
+`build_training_set.py`, and the file's own inline "FORWARD-PORT FIX" comments) are faithful.
+
+**`pop_density_per_km2` mismatched on all 8 stations**, with no consistent ratio (e.g. 727 vs
+379, 5139 vs 3183, 3888 vs 4049 people/km²) — **not a forward-port defect.** The private repo's
+`src/landscan.py` was modified the day before this smoke test ran, by the LandScan
+population-conservation fix (PR #285, commits `7b3e34d`/`6753944`/`a2ab12d`, merged
+2026-07-26), which specifically corrected the sub-pixel/small-polygon extraction path — the
+exact case a station's ~0.01°(~1km) buffer hits. Section 5.3's plan text ("`_population_density_by_station`
+ports across unchanged, so the training build stays bit-for-bit consistent with what
+`ds-2026.07-rf4` learned") was accurate when written but was invalidated by that same-week fix.
+The live `ghcn_training` rows reflect pre-fix extraction; this smoke run's covariates reflect
+post-fix extraction — both are internally correct, they're just computed by two different
+(one buggy, one fixed) versions of the same function.
+
+**Implication tracked, not resolved here**: `ghcn_training`'s full 907-station corpus — and the
+currently-deployed `ds-2026.07-rf4` model trained on it — likely has a systematically-off
+`pop_density_per_km2` feature for any station whose buffer falls in the small-polygon case PR
+#285 fixed (plausibly most/all of them, given the buffer size). This is a real data-quality
+question independent of the crowdsourced-model-improvement program, tracked as a backlog item
+for a future full-corpus refresh + retrain-impact assessment — deliberately not actioned as
+part of Phase 1, given low current user volume and the value of getting the retrain evaluation
+right rather than fast.
+
+**LST** (`lst_warm_season_anomaly_c`, tolerance-checked per the plan, not exact-match): 7/8
+stations within 1°C; one station (NIM00065271) at 1.42°C, accepted as within the noise the plan
+itself attributes to LST (Landsat scene availability moving between runs).
+
+**One station absent**: `NIM00065082` has zero rows in `ghcn_training` — excluded from the
+original training build (most likely by an activity-date filter at build time), not a diff bug.
+
 ## A note on the source branch
 
 `origin/feature/downscaling-phase4-model-training` in the private repository is **not merged and
