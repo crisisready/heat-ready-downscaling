@@ -511,6 +511,22 @@ def _daily_mean_nighttime_wind(hourly_rows: list[dict], tz_map: dict[str, str]) 
     the completeness guarantee its sibling covariates
     (grid_tmax_c/grid_tmin_c/grid_specific_humidity_kgkg) already have on
     the same row.
+
+    KEEP IN SYNC with crisisready/heat-risk-data-api's src/heat_calcs.py
+    daily_mean_nighttime_wind (this function's own canonical twin, promoted
+    out of an earlier version of this file into heat_calcs.py so training
+    and serving share one implementation -- see that repo's devlog,
+    "Sub-phase 5a"). This copy is necessarily re-inlined here rather than
+    imported, since this package cannot depend on the private repo's src/ --
+    but that means it does NOT automatically pick up future fixes to the
+    canonical version. The `wind_ms_is_fallback` exclusion below was added
+    to heat_calcs.py after this promotion (PR #240, private repo) to skip
+    hours open_meteo._hourly_to_rows fabricated rather than genuinely
+    observed -- currently inert here (this script only ever passes ERA5-
+    sourced hourly rows, which never set that flag), but load-bearing the
+    moment this file (or a descendant) ever aggregates Open-Meteo-sourced
+    hourly rows the way validate_lagfill_downscaling.py/
+    validate_forecast_downscaling.py already do.
     """
     from zoneinfo import ZoneInfo
 
@@ -526,7 +542,7 @@ def _daily_mean_nighttime_wind(hourly_rows: list[dict], tz_map: dict[str, str]) 
         bucket = buckets.setdefault((name, local_day), {"hours": set(), "vals": []})
         bucket["hours"].add(local_hour)
         wind_ms = row.get("wind_ms")
-        if wind_ms is not None and math.isfinite(wind_ms):
+        if wind_ms is not None and math.isfinite(wind_ms) and not row.get("wind_ms_is_fallback", False):
             bucket["vals"].append(wind_ms)
 
     result: dict[str, dict[str, float]] = {}
