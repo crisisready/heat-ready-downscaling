@@ -41,6 +41,19 @@ _SCORE_BAND_METRICS_SCHEMA: dict = {
         "rmse_improvement_pct_debiased_cv": {"type": ["number", "null"]},
         "qrf_beats_grid": {"type": ["boolean", "null"]},
         "qrf_beats_grid_with_margin": {"type": ["boolean", "null"]},
+        # 2026-07-28, score.score_band's delta_scale extension (plan-2026-
+        # 07-28-lagfill-base-mismatch-fix.md section 3.1/8.5) -- no
+        # additionalProperties restriction above means these were always
+        # accepted even before being listed here, but listing them keeps
+        # this schema an accurate description of score_band's real output.
+        "rmse_affine_cv_c": {"type": ["number", "null"]},
+        "bias_affine_cv_c": {"type": ["number", "null"]},
+        "rmse_improvement_pct_affine_cv": {"type": ["number", "null"]},
+        "qrf_beats_grid_with_margin_affine": {"type": ["boolean", "null"]},
+        "delta_scale_c": {
+            "type": ["object", "null"],
+            "properties": {"scale": {"type": "number"}, "offset": {"type": "number"}},
+        },
         "gated_insufficient_n": {"type": "boolean"},
     },
 }

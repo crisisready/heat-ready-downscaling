@@ -216,6 +216,32 @@ class TestValidateGate:
         gate = gates.build_gate({"by_target": {"tmax": {"Cfb": _metrics(True)}, "tmin": {}}})
         gates.validate_gate(gate)  # must not raise
 
+    def test_well_formed_gate_with_delta_scale_passes(self):
+        """The empty-shape case above never exercises delta_scale's own
+        per-zone {scale, offset} schema -- build a gate through the real
+        affine-enable path so the schema is actually checked against a
+        populated entry, not just its empty default."""
+        gate = gates.build_gate({"by_target": {
+            "tmax": {"Cfb": _metrics(
+                False, qrf_beats_grid_with_margin_affine=True,
+                delta_scale_c={"scale": 0.229, "offset": 0.537},
+            )},
+            "tmin": {},
+        }})
+        assert gate["delta_scale"]["tmax"]["Cfb"] == {"scale": 0.229, "offset": 0.537}
+        gates.validate_gate(gate)  # must not raise
+
+    def test_malformed_delta_scale_entry_raises(self):
+        import jsonschema
+        gate = {
+            "tmax": {"Cfb": True}, "tmin": {},
+            "bias_correction": {"tmax": {}, "tmin": {}},
+            "delta_scale": {"tmax": {"Cfb": {"scale": 0.229}}, "tmin": {}},  # missing required "offset"
+            "spatial_skill": {"tmax": {"Cfb": False}, "tmin": {}},
+        }
+        with pytest.raises(jsonschema.ValidationError):
+            gates.validate_gate(gate)
+
     def test_malformed_gate_raises(self):
         import jsonschema
         with pytest.raises(jsonschema.ValidationError):
