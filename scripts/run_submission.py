@@ -57,7 +57,7 @@ import tempfile
 import requests
 import yaml
 
-from heatready_downscaling import contract, report, score, snapshot, submission
+from heatready_downscaling import contract, ledger, report, score, snapshot, submission
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("run_submission")
@@ -149,8 +149,22 @@ def cross_check(manifest: dict, claimed_report: dict, submission_dir: str, pr_au
                 f"manifest author.github {github!r} doesn't match the PR's actual author {pr_author!r}"
             )
 
-    if manifest["rung"] not in ("A", "B"):
-        violations.append(f"rung {manifest['rung']!r} is not yet open -- only A/B accept submissions today")
+    # Rung B (published parameters) is schema-valid but not yet scoreable:
+    # score.score_band has no input for a CONTRIBUTOR-proposed
+    # bias_correction/blend-kernel triple -- extra_zone_gate/bias_correction
+    # are today only ever supplied by the SERVING side (predict_downscaled's
+    # own already-published gate), not something a submission can hand in
+    # for scoring. Restricting intake to Rung A now (rather than accepting
+    # Rung B submissions the referee can't actually score correctly) is a
+    # deliberate, documented v1 scope decision -- design-consult finding,
+    # 2026-07-28 -- not an oversight; extending score_band to accept a
+    # candidate correction is real, not-yet-scoped future work.
+    if manifest["rung"] != "A":
+        violations.append(
+            f"rung {manifest['rung']!r} is not yet open -- only Rung A (evaluation coverage) is "
+            "scoreable by the automated referee today; Rung B needs score_band extended to accept "
+            "a contributor-proposed correction first (see CONTRIBUTING.md)"
+        )
 
     if len(manifest["claims"]) != 1:
         violations.append(
@@ -183,6 +197,27 @@ def cross_check(manifest: dict, claimed_report: dict, submission_dir: str, pr_au
         )
 
     return violations
+
+
+def check_submission_id_unique(submission_id: str, ledger_dir: str = "ledger") -> list[str]:
+    """submission_id must not already exist in ledger/submissions.jsonl --
+    catches a concurrent-PR ID collision at PR TIME (this referee's own
+    checkout already has the ledger as it stood at the PR's base commit),
+    not just at merge time via check-ledger-append.yml's own duplicate
+    check on the eventual bot-authored ledger PR (design-consult finding,
+    2026-07-28: submission_id allocation is racy between two concurrently
+    open PRs). Whichever PR merges FIRST still wins the ID either way --
+    this just gives the second contributor a clear, immediate error
+    instead of a confusing failure days later when their own ledger-append
+    PR collides."""
+    path = os.path.join(ledger_dir, "submissions.jsonl")
+    if not os.path.exists(path):
+        return []
+    with open(path) as f:
+        existing_ids = {line["submission_id"] for line in ledger.parse_jsonl(f.read())}
+    if submission_id in existing_ids:
+        return [f"submission_id {submission_id!r} already exists in ledger/submissions.jsonl -- choose a new one"]
+    return []
 
 
 def download_snapshot(version: str, cache_root: str = ".cache/snapshots") -> str:
@@ -404,6 +439,7 @@ def main() -> None:
     parser.add_argument("--out", default="provisional.json")
     parser.add_argument("--comment-out", default="comment.md")
     parser.add_argument("--ci", action="store_true", help="exit 0 even on a rejected/failed submission (referee-report.yml reads --out for the verdict)")
+    parser.add_argument("--ledger-dir", default="ledger", help="for the submission_id uniqueness check")
     args = parser.parse_args()
 
     submission_dir = find_submission_dir(args.submission_root)
@@ -411,6 +447,7 @@ def main() -> None:
 
     manifest, claimed_report_data = load_submission(submission_dir)
     hard_rejects = cross_check(manifest, claimed_report_data, submission_dir, args.pr_author)
+    hard_rejects.extend(check_submission_id_unique(manifest["submission_id"], args.ledger_dir))
 
     tolerance_result = None
     reproduced_report = None

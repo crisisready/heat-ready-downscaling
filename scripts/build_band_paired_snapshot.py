@@ -450,6 +450,13 @@ def _phase_pack(args: argparse.Namespace) -> None:
             ),
         )
         logger.info("Wrote snapshot to %s (%d partition(s), exclude_holdout=%s)", out_dir, len(partitions), exclude_holdout)
+        # manifest_sha256 (sha256 of the literal MANIFEST.json bytes,
+        # defined in scripts/run_submission.py's own verify_snapshot
+        # docstring) is what a contributor's manifest.yaml must pin -- print
+        # it explicitly rather than making them compute it themselves.
+        with open(os.path.join(out_dir, "MANIFEST.json"), "rb") as f:
+            manifest_sha256 = hashlib.sha256(f.read()).hexdigest()
+        logger.info("manifest_sha256 for %s: %s", out_dir, manifest_sha256)
 
     os.makedirs(args.out_dir, exist_ok=True)
     _write_snapshot(args.out_dir, exclude_holdout=False)
@@ -523,6 +530,13 @@ def _phase_predict(args: argparse.Namespace) -> None:
         release_url=manifest.get("release_url"), doi_url=manifest.get("doi_url"),
     )
     logger.info("Updated MANIFEST.json with %d total partition(s)", len(partitions))
+    # --phase predict rewrites MANIFEST.json (new prediction partitions
+    # added), so ITS manifest_sha256 -- not --phase pack's -- is the one a
+    # contributor's manifest.yaml should actually pin, since predict is the
+    # last step before publishing.
+    with open(os.path.join(args.snapshot_dir, "MANIFEST.json"), "rb") as f:
+        manifest_sha256 = hashlib.sha256(f.read()).hexdigest()
+    logger.info("manifest_sha256 for %s (post-predict, final): %s", args.snapshot_dir, manifest_sha256)
 
 
 def main() -> None:

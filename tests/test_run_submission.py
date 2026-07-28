@@ -101,6 +101,18 @@ class TestCrossCheck:
         violations = rs.cross_check(_manifest(rung="C"), _claimed_report(), self._DIR, "nishkishore")
         assert any("not yet open" in v for v in violations)
 
+    def test_rung_b_rejected(self):
+        """Rung B is schema-valid (submission.py) but not yet scoreable --
+        score_band has no input for a contributor-proposed correction. v1
+        intake is Rung A only, a deliberate scope decision, not an
+        oversight (see cross_check's own comment)."""
+        violations = rs.cross_check(_manifest(rung="B"), _claimed_report(), self._DIR, "nishkishore")
+        assert any("not yet open" in v for v in violations)
+
+    def test_rung_a_accepted(self):
+        violations = rs.cross_check(_manifest(rung="A"), _claimed_report(), self._DIR, "nishkishore")
+        assert not any("not yet open" in v for v in violations)
+
     def test_multiple_claims_rejected(self):
         m = _manifest()
         m["claims"] = m["claims"] * 2
@@ -127,6 +139,30 @@ class TestCrossCheck:
     def test_malformed_directory_path_flagged(self):
         violations = rs.cross_check(_manifest(), _claimed_report(), "not/a/valid/path", "nishkishore")
         assert any("doesn't match" in v for v in violations)
+
+
+class TestCheckSubmissionIdUnique:
+    def test_no_ledger_file_is_fine(self, tmp_path):
+        assert rs.check_submission_id_unique("2026-08-001", str(tmp_path / "ledger")) == []
+
+    def test_empty_ledger_is_fine(self, tmp_path):
+        ledger_dir = tmp_path / "ledger"
+        ledger_dir.mkdir()
+        (ledger_dir / "submissions.jsonl").write_text("")
+        assert rs.check_submission_id_unique("2026-08-001", str(ledger_dir)) == []
+
+    def test_new_id_is_fine(self, tmp_path):
+        ledger_dir = tmp_path / "ledger"
+        ledger_dir.mkdir()
+        (ledger_dir / "submissions.jsonl").write_text(json.dumps({"submission_id": "2026-08-001"}) + "\n")
+        assert rs.check_submission_id_unique("2026-08-002", str(ledger_dir)) == []
+
+    def test_duplicate_id_flagged(self, tmp_path):
+        ledger_dir = tmp_path / "ledger"
+        ledger_dir.mkdir()
+        (ledger_dir / "submissions.jsonl").write_text(json.dumps({"submission_id": "2026-08-001"}) + "\n")
+        violations = rs.check_submission_id_unique("2026-08-001", str(ledger_dir))
+        assert any("already exists" in v for v in violations)
 
 
 class TestFidelityRowsForBand:

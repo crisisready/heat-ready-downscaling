@@ -46,10 +46,12 @@ author:
   orcid: null                # optional; used for credit attribution if present
   affiliation: null
 track: serving-ready          # serving-ready | research
-rung: A                       # A | B | C (C is not yet open — see README)
+rung: A                       # A | B | C -- only A is scoreable by the automated referee today (B needs
+                              # score_band extended to accept a contributor-proposed correction; C is
+                              # not yet open at all — see README)
 snapshot:
   version: "v2026.07"          # the current real snapshot version -- check the latest GitHub Release
-  manifest_sha256: "…"        # pins the exact data; mismatch = auto-reject
+  manifest_sha256: "337c76104198f3cd373745e339180359c6e2bd554bae369050c7f12b91dc7be1"  # v2026.07's real, current value -- pins the exact data; mismatch = auto-reject
 claims:
   - model_version: "ds-2026.07-rf5"
     band_key: "lag_fill"
