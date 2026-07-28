@@ -18,8 +18,13 @@ something the referee gets wrong, open a GitHub issue.
 
 The downscaling model gates corrections per **(target, zone, band)**: 2 targets (`tmax`/`tmin`) ×
 19 Köppen climate zones × 9 bands (base ERA5 + `lag_fill` + `forecast_lead1..7`) = **342 cells**.
-As of this repository's creation, 166 pass validation and 176 are dark, simply because nobody has
-run the validator against those cells with enough data yet to clear the bar.
+As of this repository's creation, 166 pass validation and 176 are dark. Most of those 176 are dark
+simply because nobody has run the validator against them with enough data yet to clear the bar --
+but not all of them. The first real Rung A submission (`2026-07-001`) evaluated all nine of the
+`lag_fill` band's dark zones against the current model and found only one, `BWk`, actually beats
+the grid baseline; the other eight, including `Cfb`, do not clear the gate with the model as it
+stands today (see `CONTRIBUTING.md`'s "What Rung A actually asks of you"). A dark cell is an
+invitation to check, not a guarantee that checking will light it.
 
 The model drifts heterogeneously. There is no single global summer, and every region continuously
 accrues new ground-truth observations (GHCN-Daily, free and public) that could re-validate a dark
