@@ -1,10 +1,11 @@
 # Governance
 
-**Status:** this document describes the intended governance model once the automated referee and
-promotion pipeline exist — see `CONTRIBUTING.md`'s own status note. `run_submission.py`,
-`score_forward_eval.py`, `replay_downscaling.py`, and the private repo's `promote_from_public.py`
-have not been built yet. Today, the maintainer role below is real and active; the "automated"
-referee role is aspirational until that code ships.
+**Status:** `run_submission.py` and `score_forward_eval.py` (the automated referee described below)
+are real, tested, and live in this repository — see `CONTRIBUTING.md`'s own status note.
+`replay_downscaling.py` and the private repo's `promote_from_public.py` (the production-promotion
+side, described further down) have not been built yet — that's still ahead of us. Today, the
+maintainer role below is real and active, and so is the automated referee role; promotion to
+production is the piece still aspirational.
 
 ## Roles
 

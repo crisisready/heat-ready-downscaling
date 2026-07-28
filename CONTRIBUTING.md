@@ -4,18 +4,15 @@ Thanks for helping close the dark cells. This document is the scoring contract t
 being built around — read it before writing a submission, not after a provisional score surprises
 you.
 
-**Status: the automated submission pipeline described below is not open yet.** The band-paired
-snapshot and the `heatready_downscaling` scoring library (`score.py`, `gates.py`, `contract.py`,
-etc.) are real and installable today — `score_band`'s docstring and `tests/test_score.py` are the
-actual, current scoring behavior, not a plan. But `run_submission.py` (the referee that would
-reproduce a submission's claim and post a provisional score), `score_forward_eval.py` (the monthly
-official cycle), and the `ledger/`/`docs/leaderboard.md` files this document references do not
-exist in this repository yet — that automation is the next phase of this program. Until it ships,
-opening a PR against `submissions/` will not be scored by anything automated. If you want to
-experiment now, you can write a short script against the installed package (`snapshot.
-read_band_partitions` + `score.score_band` + `contract.QRFModelAdapter`) and open a GitHub issue
-with what you find — genuinely useful groundwork, just not yet a credited submission. Watch this
-repository for when automated intake opens.
+**Status: the automated submission pipeline described below is built and wired.** The band-paired
+snapshot, the `heatready_downscaling` scoring library (`score.py`, `gates.py`, `contract.py`,
+etc.), `run_submission.py` (the referee, run by `referee.yml` on every submission PR),
+`score_forward_eval.py` (the monthly official cycle, run by `score-forward-eval.yml` on a cron),
+and the `ledger/`/`docs/leaderboard.md` files are all real, tested, and live in this repository.
+Opening a PR against `submissions/` is scored automatically. No real contributor submission has
+gone through the pipeline yet, so treat the first few as shaking out rough edges rather than a
+fully battle-tested process — if the referee gets something wrong, open a GitHub issue with the
+submission ID and what you expected.
 
 ## Before you start
 
@@ -29,13 +26,14 @@ repository for when automated intake opens.
 
 ## Submission format
 
-**This is the target format `run_submission.py` will consume once it exists (see the status note
-above) — not a schema you can submit against today.** `--from-snapshot` in particular is not yet a
-real flag on any script in this repository; the validator's current `--phase score` reads live
-model output against a `--paired-in` JSON file, not a Parquet snapshot partition directly. Wiring a
-snapshot-aware scoring entrypoint is part of what shipping the referee involves.
+This is the real schema `run_submission.py` validates every submission PR against
+(`heatready_downscaling.submission.MANIFEST_SCHEMA`) — a mismatch fails CI immediately. Note that
+`method.entrypoint`/`args` are provenance metadata only: they document what you ran locally to
+produce `claimed_report.json`, but the referee does not execute them. It independently reproduces
+your claim from the snapshot via `score.score_band` + `contract.FrozenPredictionAdapter` and
+compares the two reports within `tolerance` — your own claimed numbers are never trusted directly.
 
-Once it exists, create `submissions/{YYYY-MM}/{NNN}-{your-github-username}-{slug}/manifest.yaml`:
+Create `submissions/{YYYY-MM}/{NNN}-{your-github-username}-{slug}/manifest.yaml`:
 
 ```yaml
 schema_version: 1
@@ -84,8 +82,8 @@ produce by calling it) — `report_schema_version`, `generated_by{tool,version,g
 what lets `heatready_downscaling.gates.build_gate` (wrapped by `publish_band_gate.py`'s CLI) work
 unchanged on your output.
 
-Open a pull request with your `submissions/{...}/` directory. `validate-submission.yml` lints the
-manifest and report schema on every push — it executes nothing. `run_submission.py` then
+Open a pull request with your `submissions/{...}/` directory. `referee.yml` runs on every push:
+schema validation first (manifest + report shape, no code executed), then `run_submission.py`
 reproduces your claim from the public snapshot, scores it against the holdout, and posts a
 provisional score as a PR comment.
 

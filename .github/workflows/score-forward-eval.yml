@@ -1,0 +1,132 @@
+# The monthly official forward-eval cycle (Phase 3.8, plan section 7.2) --
+# scores every active candidate against station-days that did not exist in
+# any snapshot at that candidate's own submission time, using
+# contract.FrozenPredictionAdapter so this job needs the PUBLIC snapshot
+# only -- zero AWS credentials, same posture as referee.yml. This is a
+# deliberate simplification of the original plan (which specced AWS Batch
+# assuming live model inference would be needed): once FrozenPredictionAdapter
+# existed, there was no compute left that a GitHub Actions runner couldn't
+# do itself. See scripts/score_forward_eval.py's own module docstring for
+# the full design reasoning.
+#
+# Writes go through a bot-authored PR, never a direct push to main -- same
+# pattern as ledger-append.yml -- so check-ledger-append.yml's required
+# append-only check still runs against this workflow's own ledger writes
+# like any other change to ledger/*.jsonl.
+name: Score Forward Eval
+
+on:
+  schedule:
+    # 5th of the month, 06:00 UTC -- matches the plan's own cron(0 6 5 * ? *)
+    - cron: "0 6 5 * *"
+  workflow_dispatch:
+    inputs:
+      cycle:
+        description: "Override the cycle month (YYYY-MM). Defaults to the current UTC month."
+        required: false
+      current_snapshot_version:
+        description: "Override the snapshot version to score against (e.g. v2026.10). Defaults to the latest snapshot-* GitHub Release."
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: score-forward-eval
+  cancel-in-progress: false
+
+jobs:
+  score:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -e '.[snapshot]'
+
+      - name: Resolve cycle and current snapshot version
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cycle="${{ github.event.inputs.cycle }}"
+          if [ -z "$cycle" ]; then
+            cycle=$(date -u +%Y-%m)
+          fi
+          echo "cycle=$cycle" >> "$GITHUB_OUTPUT"
+
+          version="${{ github.event.inputs.current_snapshot_version }}"
+          if [ -z "$version" ]; then
+            # The latest snapshot-* tagged release, by publish date -- there
+            # is no separate "current version" file anywhere else in this
+            # repo; the GitHub Release list itself is the source of truth.
+            tag=$(gh api "repos/${{ github.repository }}/releases" --paginate --jq \
+              '[.[] | select(.tag_name | startswith("snapshot-"))] | sort_by(.published_at) | last | .tag_name')
+            if [ -z "$tag" ] || [ "$tag" = "null" ]; then
+              echo "::error::no snapshot-* release found in repos/${{ github.repository }}/releases"
+              exit 1
+            fi
+            version="${tag#snapshot-}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Resolved cycle=$cycle current_snapshot_version=$version"
+
+      - name: Cache downloaded snapshots
+        uses: actions/cache@v4
+        with:
+          path: .cache/snapshots
+          key: snapshots-${{ steps.resolve.outputs.version }}
+          restore-keys: snapshots-
+
+      - name: Run the official forward-eval cycle
+        run: |
+          python scripts/score_forward_eval.py \
+            --cycle "${{ steps.resolve.outputs.cycle }}" \
+            --current-snapshot-version "${{ steps.resolve.outputs.version }}" \
+            --ledger-dir ledger --submissions-root submissions
+
+      - name: Regenerate the derived leaderboard
+        run: python scripts/render_leaderboard.py --ledger-dir ledger --docs-dir docs
+
+      - name: Check for ledger/leaderboard changes
+        id: diff
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- ledger/cycles.jsonl ledger/credit.jsonl docs/leaderboard.json docs/leaderboard.md; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # No new data existed yet for any active candidate's band this cycle
+      # (score_cell returning None for every cell is expected, not an
+      # error -- see its own docstring) -- nothing to open a PR for.
+      - name: No changes this cycle
+        if: steps.diff.outputs.changed == 'false'
+        run: echo "No active candidate had new forward-eval data this cycle -- nothing to append."
+
+      - name: Open a PR with this cycle's ledger + leaderboard updates
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "heatready-ledger-bot"
+          git config user.email "actions@users.noreply.github.com"
+          branch="ledger-bot/cycle-${{ steps.resolve.outputs.cycle }}"
+          git checkout -b "$branch"
+          git add ledger/cycles.jsonl ledger/credit.jsonl docs/leaderboard.json docs/leaderboard.md
+          git commit -m "[ledger-bot] cycle ${{ steps.resolve.outputs.cycle }}: official forward-eval results"
+          git push origin "$branch" --force-with-lease
+          gh pr create \
+            --title "[ledger-bot] cycle ${{ steps.resolve.outputs.cycle }}: official forward-eval results" \
+            --body "Automated monthly forward-eval cycle against snapshot \`${{ steps.resolve.outputs.version }}\`. Appends \`ledger/cycles.jsonl\`/\`ledger/credit.jsonl\` and regenerates \`docs/leaderboard.{json,md}\` -- see \`scripts/score_forward_eval.py\`." \
+            --base main --head "$branch" || echo "PR may already exist for this branch"
