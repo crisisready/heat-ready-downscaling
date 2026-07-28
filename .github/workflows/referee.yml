@@ -1,0 +1,124 @@
+# The referee (Phase 3) -- scores a contributor's submission against the
+# public snapshot. Deliberately holds NO secrets and NO write permissions:
+# `permissions: contents: read` (the default GITHUB_TOKEN for a
+# `pull_request`-triggered job from a fork is already read-only and has no
+# repo secrets attached -- this workflow inherits that, never
+# `pull_request_target`, which would hand a writable token to a job whose
+# entire purpose is processing untrusted, contributor-authored input).
+#
+# See scripts/run_submission.py's own module docstring for the full design
+# reasoning (Phase 3 design consult, 2026-07-28) -- in short: schema
+# validation is folded into this same job rather than a separate lint
+# workflow (run_submission.py already does it as its first real step), and
+# posting the PR comment/check-run happens in a SEPARATE workflow
+# (referee-report.yml, triggered by `workflow_run`) that runs from `main`'s
+# own definition with write permissions -- the only way a writable token
+# and a job that touched contributor-authored input are kept apart.
+name: Referee
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - "submissions/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: referee-${{ github.event.number }}
+  cancel-in-progress: true
+
+jobs:
+  score:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # Fail fast, before installing anything or touching PR content: a
+      # submission PR may ONLY touch its own submissions/{YYYY-MM}/{NNN}-*/
+      # directory. This is what makes "no contributor Python executes
+      # anywhere" (README's own stated v1 design principle) actually true
+      # rather than aspirational -- nothing here ever installs or imports
+      # anything from the PR diff itself.
+      - name: Paths guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          files=$(gh api "repos/${{ github.repository }}/pulls/${{ github.event.number }}/files" --paginate --jq '.[].filename')
+          bad=0
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            if ! [[ "$f" =~ ^submissions/[0-9]{4}-[0-9]{2}/[0-9]{3}-[A-Za-z0-9_-]+/(manifest\.yaml|claimed_report\.json|NOTES\.md)$ ]]; then
+              echo "::error::disallowed path in PR diff: $f"
+              bad=1
+            fi
+          done <<< "$files"
+          if [ "$bad" -eq 1 ]; then
+            echo "This PR touches a path outside its own submissions/{YYYY-MM}/{NNN}-*/ directory -- rejecting."
+            exit 1
+          fi
+
+      # Base sha, NOT the default pull_request merge commit -- installs
+      # only this repo's own already-reviewed code, never anything from
+      # the PR's own diff (which, per the paths guard above, is only ever
+      # submission data files anyway, but this is defense in depth: a
+      # future paths-guard bug must not also mean installing head code).
+      - name: Checkout base commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install heatready_downscaling
+        run: pip install -e '.[snapshot]'
+
+      # Submission files are fetched as DATA via the contents API (pinned
+      # to the PR's head sha), never via a head checkout -- this is the
+      # only place this job ever reads contributor-authored bytes, and it
+      # writes them to disk as plain data files, never executes them.
+      - name: Fetch submission files from PR head
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p submissions
+          gh api "repos/${{ github.repository }}/pulls/${{ github.event.number }}/files" --paginate --jq '.[].filename' \
+            | grep '^submissions/' | while IFS= read -r f; do
+                [ -z "$f" ] && continue
+                mkdir -p "$(dirname "$f")"
+                gh api "repos/${{ github.repository }}/contents/$f?ref=${{ github.event.pull_request.head.sha }}" --jq '.content' \
+                  | base64 -d > "$f"
+              done
+
+      - name: Cache downloaded snapshots
+        uses: actions/cache@v4
+        with:
+          path: .cache/snapshots
+          key: snapshots-${{ hashFiles('submissions/**/manifest.yaml') }}
+          restore-keys: snapshots-
+
+      - name: Run referee
+        run: |
+          python scripts/run_submission.py \
+            --pr-author "${{ github.event.pull_request.user.login }}" \
+            --out provisional.json --comment-out comment.md --ci
+
+      - name: Save PR number (workflow_run has no PR context of its own)
+        if: always()
+        run: echo "${{ github.event.number }}" > pr_number.txt
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: referee-result
+          path: |
+            provisional.json
+            comment.md
+            pr_number.txt
