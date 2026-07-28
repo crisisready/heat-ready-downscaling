@@ -12,6 +12,8 @@ already documents the intended manifest.yaml shape; this module is that
 documentation made enforceable. See PROVENANCE.md.
 """
 
+from heatready_downscaling import snapshot as _snapshot
+
 MANIFEST_SCHEMA_VERSION = 1
 
 # Bounded tolerance values (design-consult finding, 2026-07-27): an
@@ -29,8 +31,6 @@ _TOLERANCE_MAXIMA = {
     "rmse_grid_c": 0.02,
     "rmse_debiased_cv_c": 0.02,
 }
-
-_BAND_KEYS = ("era5", "lag_fill") + tuple(f"forecast_lead{n}" for n in range(1, 8))
 
 MANIFEST_SCHEMA: dict = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -76,7 +76,10 @@ MANIFEST_SCHEMA: dict = {
                 "required": ["model_version", "band_key", "targets", "zones"],
                 "properties": {
                     "model_version": {"type": "string", "minLength": 1},
-                    "band_key": {"enum": list(_BAND_KEYS)},
+                    # Reuses snapshot._BANDS -- the single "all recognized bands"
+                    # list, never redefined here, so this schema can't silently
+                    # drift from what the snapshot itself actually partitions by.
+                    "band_key": {"enum": list(_snapshot._BANDS)},
                     "targets": {
                         "type": "array", "minItems": 1,
                         "items": {"enum": ["tmax", "tmin"]}, "uniqueItems": True,
