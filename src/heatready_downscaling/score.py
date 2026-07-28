@@ -108,7 +108,24 @@ def score_band(adapter, rows: list[dict], target: str, *, fold_salt: str) -> dic
     within one snapshot version but not gameable across versions by
     re-submitting until a favorable split appears. Callers must pass the
     real snapshot_version they're scoring against -- there is no default,
-    deliberately (see this module's own docstring)."""
+    deliberately (see this module's own docstring).
+
+    delta_scale_c (2026-07-28, plan-2026-07-28-lagfill-base-mismatch-fix.md
+    section 3.1, "Option R"): generalizes bias_correction_c from a pure
+    offset (e ~= d + b) to a scale+offset pair (e ~= alpha*d + b), validated
+    out-of-fold via the SAME station-grouped folds used above. Indicated
+    when a model is applied to a base distribution (grid product) it was
+    not trained on: the learned delta can be systematically too large or
+    too small for that base's actual error scale, which no additive
+    constant alone can fix. alpha=1 recovers bias_correction_c's offset-only
+    behavior exactly, so this is a strict superset, never a narrower
+    correction. Computed only when it out-of-fold beats the offset-only fit
+    (rmse_affine_cv_c < rmse_debiased_cv_c) -- see rmse_affine_cv_c/
+    bias_affine_cv_c/qrf_beats_grid_with_margin_affine for the raw numbers
+    either way. Whether to actually PUBLISH delta_scale_c for a zone (does
+    it also clear AUTO_ENABLE_MARGIN) is gates.build_gate's decision, not
+    this function's -- same division of responsibility as bias_correction_c
+    already has."""
     grid_col = "grid_tmax_c" if target == "tmax" else "grid_tmin_c"
     truth_col = "station_tmax_c" if target == "tmax" else "station_tmin_c"
 
@@ -119,7 +136,9 @@ def score_band(adapter, rows: list[dict], target: str, *, fold_salt: str) -> dic
         zone = r.get("climate_zone")
         if zone is None:
             continue
-        b = by_zone.setdefault(zone, {"grid_err": [], "qrf_err": [], "station_ids": []})
+        b = by_zone.setdefault(
+            zone, {"grid_err": [], "qrf_err": [], "station_ids": [], "delta_c": [], "true_err": []},
+        )
         truth = r[truth_col]
         grid_val = r[grid_col]
         b["grid_err"].append(truth - grid_val)
@@ -127,6 +146,13 @@ def score_band(adapter, rows: list[dict], target: str, *, fold_salt: str) -> dic
             corrected = grid_val + p["delta_c"]
             b["qrf_err"].append(truth - corrected)
             b["station_ids"].append(r.get("station_id"))
+            # true_err/delta_c: the two operands of the affine fit below
+            # (e ~= alpha*d + b). true_err duplicates grid_err's per-row
+            # value but restricted to applied rows, kept row-aligned with
+            # delta_c/station_ids -- grid_err itself can't be reused
+            # directly since it also holds non-applied rows.
+            b["delta_c"].append(p["delta_c"])
+            b["true_err"].append(truth - grid_val)
 
     result: dict[str, dict] = {}
     for zone, b in by_zone.items():
@@ -134,6 +160,8 @@ def score_band(adapter, rows: list[dict], target: str, *, fold_salt: str) -> dic
         rmse_grid = float(np.sqrt(np.mean(grid_err ** 2))) if len(grid_err) else None
         n_qrf = len(b["qrf_err"])
         rmse_debiased_cv = bias_debiased_cv = None
+        rmse_affine_cv = bias_affine_cv = None
+        delta_scale_c = None
         if n_qrf:
             qrf_err = np.array(b["qrf_err"])
             # dtype=str (not the default object dtype) -- np.unique/np.sort
@@ -165,6 +193,46 @@ def score_band(adapter, rows: list[dict], target: str, *, fold_salt: str) -> dic
                     oof_err[test_mask] = qrf_err[test_mask] - fold_bias
                 rmse_debiased_cv = float(np.sqrt(np.mean(oof_err ** 2)))
                 bias_debiased_cv = float(np.mean(oof_err))  # should land near 0 -- confirms no leakage
+
+                # Affine generalization of the offset-only correction above:
+                # e ~= alpha*d + b (scale + offset applied to the model's own
+                # predicted delta) instead of e ~= d + b (offset only).
+                # alpha=1 recovers the offset-only correction exactly -- see
+                # docs/plan-2026-07-28-lagfill-base-mismatch-fix.md section 3.1
+                # ("Option R") for why this is indicated: a base-distribution
+                # mismatch (model trained on one grid product, applied to a
+                # different, more/less accurate one) manifests as a delta
+                # that is systematically too large or too small, not merely
+                # offset -- an overshoot/undershoot no single additive
+                # constant can correct. Same station-grouped folds as above,
+                # fit on the OTHER folds' stations only, applied out-of-fold.
+                d = np.array(b["delta_c"])
+                e = np.array(b["true_err"])
+                oof_affine = np.empty(n_qrf)
+                for k in range(BIAS_CV_FOLDS):
+                    train_mask, test_mask = row_folds != k, row_folds == k
+                    if not test_mask.any():
+                        continue
+                    X_train = np.column_stack([d[train_mask], np.ones(int(train_mask.sum()))])
+                    coef, *_ = np.linalg.lstsq(X_train, e[train_mask], rcond=None)
+                    alpha_k, offset_k = float(coef[0]), float(coef[1])
+                    oof_affine[test_mask] = e[test_mask] - (alpha_k * d[test_mask] + offset_k)
+                rmse_affine_cv = float(np.sqrt(np.mean(oof_affine ** 2)))
+                bias_affine_cv = float(np.mean(oof_affine))
+
+                # Published scale+offset (delta_scale_c) is only meaningful,
+                # and only computed, when the affine fit generalizes BETTER
+                # than the offset-only fit above -- publishing a scale term
+                # that doesn't out-of-fold beat the simpler correction would
+                # make delta_scale strictly riskier than today's behavior for
+                # no benefit. gates.build_gate decides, per zone, whether
+                # delta_scale actually clears the auto-enable margin (this
+                # function only reports whether affine generalizes better,
+                # not whether either correction is good enough to ship).
+                if rmse_affine_cv < rmse_debiased_cv:
+                    X_full = np.column_stack([d, np.ones(len(d))])
+                    coef_full, *_ = np.linalg.lstsq(X_full, e, rcond=None)
+                    delta_scale_c = {"scale": float(coef_full[0]), "offset": float(coef_full[1])}
         else:
             rmse_qrf = bias_qrf = se_bias_qrf = None
         has_both = rmse_qrf is not None and rmse_grid is not None
@@ -173,6 +241,10 @@ def score_band(adapter, rows: list[dict], target: str, *, fold_salt: str) -> dic
         margin_pct_debiased_cv = (
             (rmse_grid - rmse_debiased_cv) / rmse_grid
             if (rmse_debiased_cv is not None and rmse_grid and rmse_grid > 0) else None
+        )
+        margin_pct_affine_cv = (
+            (rmse_grid - rmse_affine_cv) / rmse_grid
+            if (rmse_affine_cv is not None and rmse_grid and rmse_grid > 0) else None
         )
         # Fallback ONLY for zones with too few distinct stations to run the
         # CV above (rmse_debiased_cv is None): the correction can't be
@@ -230,6 +302,29 @@ def score_band(adapter, rows: list[dict], target: str, *, fold_salt: str) -> dic
                         and bool(bias_bounded_uncorrected)
                     )
                 )
+                if n_qrf >= MIN_ZONE_N else None
+            ),
+            "rmse_affine_cv_c": rmse_affine_cv,
+            "bias_affine_cv_c": bias_affine_cv,
+            "rmse_improvement_pct_affine_cv": margin_pct_affine_cv,
+            # delta_scale_c generalizes bias_correction_c from an offset to a
+            # (scale, offset) pair -- see docs/plan-2026-07-28-lagfill-base-
+            # mismatch-fix.md section 3.1 ("Option R"). None unless the
+            # affine fit out-of-fold beats the offset-only fit above (set
+            # alongside delta_scale_c, never independently -- see the affine
+            # block above). gates.build_gate is where "does it also clear
+            # AUTO_ENABLE_MARGIN" gets decided; this field only reports that
+            # the shape generalizes better, not that it's good enough to
+            # publish.
+            "delta_scale_c": delta_scale_c,
+            # Mirrors qrf_beats_grid_with_margin's stricter auto-enable bar,
+            # but scored against the affine CV instead of the debiased-only
+            # CV -- lets gates.build_gate enable a zone via EITHER a
+            # generalized offset-only correction OR a generalized affine
+            # one, whichever validates. None when affine wasn't computed at
+            # all (too few distinct stations, or n_qrf < MIN_ZONE_N).
+            "qrf_beats_grid_with_margin_affine": (
+                (margin_pct_affine_cv >= AUTO_ENABLE_MARGIN if margin_pct_affine_cv is not None else None)
                 if n_qrf >= MIN_ZONE_N else None
             ),
             "gated_insufficient_n": n_qrf < MIN_ZONE_N,

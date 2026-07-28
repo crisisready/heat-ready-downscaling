@@ -123,6 +123,48 @@ class TestQRFModelAdapterPredict:
         preds_missing_zone = adapter.predict([_ROW], "tmax", bias_correction={"tmax": {"OtherZone": 5.0}, "tmin": {}})
         assert preds_missing_zone[0]["delta_c"] == pytest.approx(preds_uncorrected[0]["delta_c"])
 
+    def test_delta_scale_applies_scale_and_offset_to_raw_median(self):
+        adapter = contract.QRFModelAdapter(_bundle(np.random.RandomState(0)))
+        preds_uncorrected = adapter.predict([_ROW], "tmax")
+        raw_median = preds_uncorrected[0]["delta_c"]  # bias_correction=None -- this IS the raw median
+        preds_scaled = adapter.predict(
+            [_ROW], "tmax", delta_scale={"tmax": {"BWh": {"scale": 0.229, "offset": 0.537}}, "tmin": {}},
+        )
+        assert preds_scaled[0]["delta_c"] == pytest.approx(raw_median * 0.229 + 0.537)
+
+    def test_delta_scale_takes_priority_over_bias_correction_for_the_same_zone(self):
+        """A zone present in BOTH dicts must use delta_scale's math, not
+        bias_correction's -- never both (that would double-apply an
+        offset)."""
+        adapter = contract.QRFModelAdapter(_bundle(np.random.RandomState(0)))
+        preds_uncorrected = adapter.predict([_ROW], "tmax")
+        raw_median = preds_uncorrected[0]["delta_c"]
+        preds = adapter.predict(
+            [_ROW], "tmax",
+            bias_correction={"tmax": {"BWh": 99.0}, "tmin": {}},  # would be very wrong if applied
+            delta_scale={"tmax": {"BWh": {"scale": 0.229, "offset": 0.537}}, "tmin": {}},
+        )
+        assert preds[0]["delta_c"] == pytest.approx(raw_median * 0.229 + 0.537)
+
+    def test_delta_scale_zone_absent_falls_back_to_bias_correction(self):
+        adapter = contract.QRFModelAdapter(_bundle(np.random.RandomState(0)))
+        preds_bias_only = adapter.predict([_ROW], "tmax", bias_correction={"tmax": {"BWh": 1.5}, "tmin": {}})
+        preds_both = adapter.predict(
+            [_ROW], "tmax",
+            bias_correction={"tmax": {"BWh": 1.5}, "tmin": {}},
+            delta_scale={"tmax": {"OtherZone": {"scale": 0.5, "offset": 0.1}}, "tmin": {}},
+        )
+        assert preds_both[0]["delta_c"] == pytest.approx(preds_bias_only[0]["delta_c"])
+
+    def test_delta_scale_none_is_the_default_and_changes_nothing(self):
+        """The exact backward-compatibility guarantee: an old caller that
+        never passes delta_scale at all gets byte-identical behavior to
+        before this parameter existed."""
+        adapter = contract.QRFModelAdapter(_bundle(np.random.RandomState(0)))
+        preds_a = adapter.predict([_ROW], "tmax", bias_correction={"tmax": {"BWh": 1.5}, "tmin": {}})
+        preds_b = adapter.predict([_ROW], "tmax", bias_correction={"tmax": {"BWh": 1.5}, "tmin": {}}, delta_scale=None)
+        assert preds_a[0]["delta_c"] == pytest.approx(preds_b[0]["delta_c"])
+
 
 class TestDeriveZonesPassingCvGate:
     def test_derives_flat_dict_from_nested_cv_report(self):
@@ -211,6 +253,31 @@ class TestFrozenPredictionAdapter:
         adapter = self._adapter(applied=True, delta_c=1.2)
         preds = adapter.predict([self._row("Cfb")], "tmax", bias_correction={"tmax": {"OtherZone": 5.0}, "tmin": {}})
         assert preds[0]["delta_c"] == pytest.approx(1.2)
+
+    def test_delta_scale_applies_scale_and_offset_to_frozen_delta_c(self):
+        adapter = self._adapter(applied=True, delta_c=2.0)
+        preds = adapter.predict(
+            [self._row("Cfb")], "tmax", delta_scale={"tmax": {"Cfb": {"scale": 0.229, "offset": 0.537}}, "tmin": {}},
+        )
+        assert preds[0]["delta_c"] == pytest.approx(2.0 * 0.229 + 0.537)
+
+    def test_delta_scale_takes_priority_over_bias_correction(self):
+        adapter = self._adapter(applied=True, delta_c=2.0)
+        preds = adapter.predict(
+            [self._row("Cfb")], "tmax",
+            bias_correction={"tmax": {"Cfb": 99.0}, "tmin": {}},
+            delta_scale={"tmax": {"Cfb": {"scale": 0.229, "offset": 0.537}}, "tmin": {}},
+        )
+        assert preds[0]["delta_c"] == pytest.approx(2.0 * 0.229 + 0.537)
+
+    def test_delta_scale_zone_absent_falls_back_to_bias_correction(self):
+        adapter = self._adapter(applied=True, delta_c=1.2)
+        preds = adapter.predict(
+            [self._row("Cfb")], "tmax",
+            bias_correction={"tmax": {"Cfb": 0.8}, "tmin": {}},
+            delta_scale={"tmax": {"OtherZone": {"scale": 0.5, "offset": 0.1}}, "tmin": {}},
+        )
+        assert preds[0]["delta_c"] == pytest.approx(2.0)
 
     def test_no_frozen_prediction_for_station_day_fails_closed(self):
         adapter = contract.FrozenPredictionAdapter("ds-test", {})

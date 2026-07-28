@@ -56,6 +56,7 @@ class ModelAdapter(Protocol):
         target: str,
         extra_zone_gate: dict[str, dict[str, bool]] | None = None,
         bias_correction: dict[str, dict[str, float]] | None = None,
+        delta_scale: dict[str, dict[str, dict[str, float]]] | None = None,
     ) -> list[dict]:
         """Predict downscaled delta_tmax_c/delta_tmin_c (target picks
         which) plus the full uncertainty/provenance block for a batch of
@@ -66,7 +67,13 @@ class ModelAdapter(Protocol):
         delta_c, ci95_c, confidence, applied, out_of_distribution,
         covariates_missing, cv_gate_passed, model_version -- see
         QRFModelAdapter.predict's own docstring for the exact semantics of
-        each, which every implementation of this protocol must preserve."""
+        each, which every implementation of this protocol must preserve.
+
+        delta_scale (2026-07-28, plan-2026-07-28-lagfill-base-mismatch-fix.md
+        section 8.5): an ADDITIONAL {target: {zone: {"scale": float,
+        "offset": float}}} correction, ALONGSIDE bias_correction rather
+        than replacing it -- see QRFModelAdapter.predict's own docstring for
+        the exact precedence when a zone has both."""
         ...
 
 
@@ -260,6 +267,7 @@ class QRFModelAdapter:
         target: str,
         extra_zone_gate: dict[str, dict[str, bool]] | None = None,
         bias_correction: dict[str, dict[str, float]] | None = None,
+        delta_scale: dict[str, dict[str, dict[str, float]]] | None = None,
     ) -> list[dict]:
         """
         See ModelAdapter.predict for the return shape. Full semantics,
@@ -276,6 +284,21 @@ class QRFModelAdapter:
         bias_correction: an ADDITIONAL {target: {zone: float}} constant
         ADDED to delta_c after the model predicts it (MOS-style
         recalibration). None (the default) applies no correction.
+
+        delta_scale (2026-07-28, plan-2026-07-28-lagfill-base-mismatch-fix.md
+        section 8.5): an ADDITIONAL {target: {zone: {"scale": float,
+        "offset": float}}} correction, ALONGSIDE bias_correction. When a
+        zone has a delta_scale entry, it TAKES PRIORITY over that zone's
+        bias_correction entry -- delta_c becomes
+        median*scale + offset, not median + bias_correction + (median*scale
+        + offset), which would double-apply an offset. A zone absent from
+        delta_scale (including every call before this parameter existed,
+        where delta_scale is None) falls back to bias_correction with an
+        implicit scale of 1.0 -- gates.build_gate's own docstring documents
+        the same precedence on the publish side. ci95_c is unaffected by
+        either correction, exactly as bias_correction already was --
+        neither recenters the model's own conformal interval width, only
+        its central estimate.
 
         The CV gate is enforced independently per call (i.e. per target).
         Never derives the downscaled T2m or re-runs heat_calcs itself --
@@ -299,6 +322,7 @@ class QRFModelAdapter:
         gate_for_target = model_bundle.get("zones_passing_cv_gate", {}).get(target, {})
         extra_gate_for_target = extra_zone_gate.get(target, {}) if extra_zone_gate is not None else None
         bias_correction_for_target = bias_correction.get(target, {}) if bias_correction is not None else {}
+        delta_scale_for_target = delta_scale.get(target, {}) if delta_scale is not None else {}
         gate_passed = [
             complete_mask[i]
             and gate_for_target.get(r.get("climate_zone"), False)
@@ -336,7 +360,11 @@ class QRFModelAdapter:
             raw_half_width = (hi - lo) / 2.0
             ood_inflation = (di[i] / ood_threshold) if (ood_threshold and out_of_distribution) else 1.0
             ci95_c = raw_half_width * q95 * ood_inflation
-            delta_c = float(median) + bias_correction_for_target.get(zone, 0.0)
+            scale_info = delta_scale_for_target.get(zone)
+            if scale_info is not None:
+                delta_c = float(median) * scale_info["scale"] + scale_info["offset"]
+            else:
+                delta_c = float(median) + bias_correction_for_target.get(zone, 0.0)
 
             results.append({
                 "delta_c": delta_c,
@@ -377,7 +405,10 @@ class FrozenPredictionAdapter:
       with bias_correction_for_target.get(zone, 0.0) ADDED to delta_c --
       ci95_c is untouched by bias_correction, matching the live model
       (ci95_c is derived from conformal quantile width alone, never from
-      the bias correction)."""
+      the bias correction). If the zone also has a delta_scale entry, that
+      TAKES PRIORITY instead: delta_c becomes frozen["delta_c"]*scale +
+      offset, not the bias_correction path -- same precedence
+      QRFModelAdapter.predict uses, see its own docstring."""
 
     def __init__(self, model_version: str, predictions_by_key: dict[tuple, dict]):
         self.model_version = model_version
@@ -406,11 +437,16 @@ class FrozenPredictionAdapter:
         target: str,
         extra_zone_gate: dict[str, dict[str, bool]] | None = None,
         bias_correction: dict[str, dict[str, float]] | None = None,
+        delta_scale: dict[str, dict[str, dict[str, float]]] | None = None,
     ) -> list[dict]:
         """See ModelAdapter.predict for the return shape; see this class's
-        own docstring for the exact re-gating/bias-correction semantics."""
+        own docstring for the exact re-gating/bias-correction semantics.
+        delta_scale: see QRFModelAdapter.predict's own docstring -- same
+        {target: {zone: {"scale", "offset"}}} shape, same precedence over
+        bias_correction per zone when both are given."""
         extra_gate_for_target = extra_zone_gate.get(target, {}) if extra_zone_gate is not None else None
         bias_correction_for_target = bias_correction.get(target, {}) if bias_correction is not None else {}
+        delta_scale_for_target = delta_scale.get(target, {}) if delta_scale is not None else {}
 
         results: list[dict] = []
         for r in rows:
@@ -452,8 +488,14 @@ class FrozenPredictionAdapter:
                 ))
                 continue
 
+            scale_info = delta_scale_for_target.get(zone)
+            if scale_info is not None:
+                delta_c = frozen["delta_c"] * scale_info["scale"] + scale_info["offset"]
+            else:
+                delta_c = frozen["delta_c"] + bias_correction_for_target.get(zone, 0.0)
+
             results.append({
-                "delta_c": frozen["delta_c"] + bias_correction_for_target.get(zone, 0.0),
+                "delta_c": delta_c,
                 "ci95_c": frozen["ci95_c"],
                 "confidence": frozen["confidence"],
                 "applied": True,

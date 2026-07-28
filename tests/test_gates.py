@@ -8,12 +8,14 @@ from heatready_downscaling import gates
 
 
 def _metrics(qrf_beats_grid_with_margin, rmse_improvement_pct_debiased_cv=None, bias_correction_c=None,
-             qrf_beats_grid=False):
+             qrf_beats_grid=False, qrf_beats_grid_with_margin_affine=None, delta_scale_c=None):
     return {
         "qrf_beats_grid_with_margin": qrf_beats_grid_with_margin,
         "rmse_improvement_pct_debiased_cv": rmse_improvement_pct_debiased_cv,
         "bias_correction_c": bias_correction_c,
         "qrf_beats_grid": qrf_beats_grid,
+        "qrf_beats_grid_with_margin_affine": qrf_beats_grid_with_margin_affine,
+        "delta_scale_c": delta_scale_c,
     }
 
 
@@ -55,6 +57,7 @@ class TestBuildGate:
         assert gate == {
             "tmax": {}, "tmin": {},
             "bias_correction": {"tmax": {}, "tmin": {}},
+            "delta_scale": {"tmax": {}, "tmin": {}},
             "spatial_skill": {"tmax": {}, "tmin": {}},
         }
 
@@ -66,6 +69,93 @@ class TestBuildGate:
         gate = gates.build_gate(report)
         assert gate["tmax"] == {"Cfb": True}
         assert gate["tmin"] == {}
+
+    def test_old_style_metrics_dict_without_affine_keys_behaves_as_before(self):
+        """A metrics dict from before delta_scale existed (no
+        qrf_beats_grid_with_margin_affine/delta_scale_c keys at all, not
+        even set to None) must not raise and must behave exactly as it did
+        pre-extension -- .get() defaults, not direct key access."""
+        report = {"by_target": {
+            "tmax": {"Cfb": {
+                "qrf_beats_grid_with_margin": True, "rmse_improvement_pct_debiased_cv": 0.05,
+                "bias_correction_c": 0.412, "qrf_beats_grid": True,
+            }},
+            "tmin": {},
+        }}
+        gate = gates.build_gate(report)
+        assert gate["tmax"] == {"Cfb": True}
+        assert gate["bias_correction"]["tmax"]["Cfb"] == 0.412
+        assert "Cfb" not in gate["delta_scale"]["tmax"]
+
+
+class TestDeltaScale:
+    """The Cfb case this feature exists for: the offset-only correction
+    fails its own margin (qrf_beats_grid_with_margin False) but its affine
+    generalization clears it (qrf_beats_grid_with_margin_affine True) --
+    the zone must still get enabled, via delta_scale instead of
+    bias_correction."""
+
+    def test_zone_passing_only_via_affine_is_enabled_via_delta_scale(self):
+        report = {"by_target": {
+            "tmax": {"Cfb": _metrics(
+                False, rmse_improvement_pct_debiased_cv=-0.0584, bias_correction_c=-0.333,
+                qrf_beats_grid_with_margin_affine=True,
+                delta_scale_c={"scale": 0.229, "offset": 0.537},
+            )},
+            "tmin": {},
+        }}
+        gate = gates.build_gate(report)
+        assert gate["tmax"]["Cfb"] is True
+        assert gate["delta_scale"]["tmax"]["Cfb"] == {"scale": 0.229, "offset": 0.537}
+        # bias_correction_c was never itself validated (offset-only failed
+        # its own margin) -- must NOT be published as if it had been.
+        assert "Cfb" not in gate["bias_correction"]["tmax"]
+
+    def test_zone_passing_neither_path_stays_excluded(self):
+        report = {"by_target": {
+            "tmax": {"Cfb": _metrics(False, qrf_beats_grid_with_margin_affine=False)},
+            "tmin": {},
+        }}
+        gate = gates.build_gate(report)
+        assert "Cfb" not in gate["tmax"]
+        assert "Cfb" not in gate["delta_scale"]["tmax"]
+        assert "Cfb" not in gate["bias_correction"]["tmax"]
+
+    def test_zone_passing_both_paths_publishes_both_corrections(self):
+        """Not Cfb's case, but a zone where the offset-only correction
+        already clears margin AND the affine generalization is even
+        better -- both get published; delta_scale alongside bias_correction,
+        exactly as the plan specifies, not one replacing the other in the
+        published JSON (serving decides priority, gates.py just publishes
+        both when both validated)."""
+        report = {"by_target": {
+            "tmax": {"BSh": _metrics(
+                True, rmse_improvement_pct_debiased_cv=0.117, bias_correction_c=0.6,
+                qrf_beats_grid_with_margin_affine=True,
+                delta_scale_c={"scale": 0.75, "offset": 0.4},
+            )},
+            "tmin": {},
+        }}
+        gate = gates.build_gate(report)
+        assert gate["tmax"]["BSh"] is True
+        assert gate["bias_correction"]["tmax"]["BSh"] == 0.6
+        assert gate["delta_scale"]["tmax"]["BSh"] == {"scale": 0.75, "offset": 0.4}
+
+    def test_affine_passes_margin_but_no_delta_scale_c_publishes_nothing_new(self):
+        """Defensive: qrf_beats_grid_with_margin_affine True but
+        delta_scale_c None should not happen in practice (score.score_band
+        only sets qrf_beats_grid_with_margin_affine meaningfully alongside
+        delta_scale_c), but build_gate must not crash or publish a
+        placeholder if it does."""
+        report = {"by_target": {
+            "tmax": {"Cfb": _metrics(
+                False, qrf_beats_grid_with_margin_affine=True, delta_scale_c=None,
+            )},
+            "tmin": {},
+        }}
+        gate = gates.build_gate(report)
+        assert gate["tmax"]["Cfb"] is True  # still enabled -- the margin check passed
+        assert "Cfb" not in gate["delta_scale"]["tmax"]  # but nothing to publish
 
 
 class TestSpatialSkill:
@@ -125,6 +215,32 @@ class TestValidateGate:
     def test_well_formed_gate_passes(self):
         gate = gates.build_gate({"by_target": {"tmax": {"Cfb": _metrics(True)}, "tmin": {}}})
         gates.validate_gate(gate)  # must not raise
+
+    def test_well_formed_gate_with_delta_scale_passes(self):
+        """The empty-shape case above never exercises delta_scale's own
+        per-zone {scale, offset} schema -- build a gate through the real
+        affine-enable path so the schema is actually checked against a
+        populated entry, not just its empty default."""
+        gate = gates.build_gate({"by_target": {
+            "tmax": {"Cfb": _metrics(
+                False, qrf_beats_grid_with_margin_affine=True,
+                delta_scale_c={"scale": 0.229, "offset": 0.537},
+            )},
+            "tmin": {},
+        }})
+        assert gate["delta_scale"]["tmax"]["Cfb"] == {"scale": 0.229, "offset": 0.537}
+        gates.validate_gate(gate)  # must not raise
+
+    def test_malformed_delta_scale_entry_raises(self):
+        import jsonschema
+        gate = {
+            "tmax": {"Cfb": True}, "tmin": {},
+            "bias_correction": {"tmax": {}, "tmin": {}},
+            "delta_scale": {"tmax": {"Cfb": {"scale": 0.229}}, "tmin": {}},  # missing required "offset"
+            "spatial_skill": {"tmax": {"Cfb": False}, "tmin": {}},
+        }
+        with pytest.raises(jsonschema.ValidationError):
+            gates.validate_gate(gate)
 
     def test_malformed_gate_raises(self):
         import jsonschema
