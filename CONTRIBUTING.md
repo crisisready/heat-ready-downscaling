@@ -1,37 +1,35 @@
 # Contributing
 
 Thanks for helping close the dark cells. This document is the scoring contract this program is
-being built around — read it before writing a submission, not after a provisional score surprises
-you.
+built around. Read it before writing a submission, not after a provisional score surprises you.
 
-**Status: the automated submission pipeline described below is built and wired.** The band-paired
-snapshot, the `heatready_downscaling` scoring library (`score.py`, `gates.py`, `contract.py`,
-etc.), `run_submission.py` (the referee, run by `referee.yml` on every submission PR),
-`score_forward_eval.py` (the monthly official cycle, run by `score-forward-eval.yml` on a cron),
-and the `ledger/`/`docs/leaderboard.md` files are all real, tested, and live in this repository.
-Opening a PR against `submissions/` is scored automatically. No real contributor submission has
-gone through the pipeline yet, so treat the first few as shaking out rough edges rather than a
-fully battle-tested process — if the referee gets something wrong, open a GitHub issue with the
-submission ID and what you expected.
+**Status: the automated submission pipeline described below is built, wired, and live-verified.**
+The band-paired snapshot, the `heatready_downscaling` scoring library (`score.py`, `gates.py`,
+`contract.py`, etc.), `run_submission.py` (the referee, run by `referee.yml` on every submission
+PR), `score_forward_eval.py` (the monthly official cycle, run by `score-forward-eval.yml` on a
+cron), and the `ledger/`/`docs/leaderboard.md` files are all real, tested, and live in this
+repository. Opening a PR against `submissions/` is scored automatically; the first submission
+(`2026-07-001`) went through the full referee and ledger pipeline end to end. If the referee gets
+something wrong, open a GitHub issue with the submission ID and what you expected.
 
 ## Before you start
 
 1. Read the [README](README.md) for the contribution ladder (Rung A/B/C) and the two tracks
    (serving-ready / research).
-2. Download the current snapshot from this repository's latest GitHub Release (or resolve the
-   Zenodo DOI for a permanent, citable copy). `snapshots/<version>/MANIFEST.json` pins the exact
-   data your submission is scored against — a mismatched `manifest_sha256` is an automatic reject.
+2. Download the current snapshot from this repository's latest GitHub Release, or resolve the
+   Zenodo DOI for a permanent, citable copy. `snapshots/<version>/MANIFEST.json` pins the exact
+   data your submission is scored against. A mismatched `manifest_sha256` is an automatic reject.
 3. `pip install -e .` from a checkout of this repository to get `heatready_downscaling` at the
    version pinned in your target snapshot's manifest.
 
 ## Submission format
 
 This is the real schema `run_submission.py` validates every submission PR against
-(`heatready_downscaling.submission.MANIFEST_SCHEMA`) — a mismatch fails CI immediately. Note that
+(`heatready_downscaling.submission.MANIFEST_SCHEMA`). A mismatch fails CI immediately. Note that
 `method.entrypoint`/`args` are provenance metadata only: they document what you ran locally to
 produce `claimed_report.json`, but the referee does not execute them. It independently reproduces
-your claim from the snapshot via `score.score_band` + `contract.FrozenPredictionAdapter` and
-compares the two reports within `tolerance` — your own claimed numbers are never trusted directly.
+your claim from the snapshot via `score.score_band` and `contract.FrozenPredictionAdapter`, then
+compares the two reports within `tolerance`. Your own claimed numbers are never trusted directly.
 
 Create `submissions/{YYYY-MM}/{NNN}-{your-github-username}-{slug}/manifest.yaml`:
 
@@ -46,10 +44,10 @@ author:
 track: serving-ready          # serving-ready | research
 rung: A                       # A | B | C -- only A is scoreable by the automated referee today (B needs
                               # score_band extended to accept a contributor-proposed correction; C is
-                              # not yet open at all — see README)
+                              # not yet open at all, see README)
 snapshot:
   version: "v2026.07"          # the current real snapshot version -- check the latest GitHub Release
-  manifest_sha256: "e0660fff6397c5e4760927fdeb6f40b4cc241562df82d5cfca2e54f2e084a204"  # v2026.07's real, current value (post --phase predict) -- pins the exact data; mismatch = auto-reject
+  manifest_sha256: "e0660fff6397c5e4760927fdeb6f40b4cc241562df82d5cfca2e54f2e084a204"  # v2026.07's real, current value (post --phase predict); pins the exact data, mismatch = auto-reject
 claims:
   - model_version: "ds-2026.07-rf5"
     band_key: "lag_fill"
@@ -74,87 +72,94 @@ reproducibility:
   runtime_notes: "…"
 ```
 
-`claimed_report.json` must be exactly `heatready_downscaling.report.build_report`'s shape (the same
+`claimed_report.json` must be exactly `heatready_downscaling.report.build_report`'s shape, the same
 report envelope `validate_lagfill_downscaling.py`/`validate_forecast_downscaling.py` already
-produce by calling it) — `report_schema_version`, `generated_by{tool,version,git_commit}`,
+produce by calling it: `report_schema_version`, `generated_by{tool,version,git_commit}`,
 `snapshot_version`, `band_key`, `sample_requested`, `rows_sampled`, `rows_paired`,
-`fidelity_check`, `by_target`. Do not invent a second report schema — reusing the existing one is
+`fidelity_check`, `by_target`. Do not invent a second report schema. Reusing the existing one is
 what lets `heatready_downscaling.gates.build_gate` (wrapped by `publish_band_gate.py`'s CLI) work
 unchanged on your output.
 
 Open a pull request with your `submissions/{...}/` directory. `referee.yml` runs on every push:
-schema validation first (manifest + report shape, no code executed), then `run_submission.py`
+schema validation first (manifest and report shape, no code executed), then `run_submission.py`
 reproduces your claim from the public snapshot, scores it against the holdout, and posts a
 provisional score as a PR comment.
 
-## Hard constraints — read before you argue with a provisional score
+## Hard constraints, read before you argue with a provisional score
 
 **Provisional scores are for ranking and feedback only. They are never a gate decision.** The
 provisional check is a zone-stratified 15% station holdout, computed in minutes so you get fast
 feedback. `_MIN_ZONE_N` (minimum stations per zone) and `_BIAS_CV_MIN_STATIONS` (minimum distinct
-stations for the bias cross-validation) will **not** be met on a 15% slice for thin zones — a thin
-zone can show a promising provisional number that the real (official, monthly, forward-eval) check
-will not confirm. This is expected, not a bug in the provisional check.
+stations for the bias cross-validation) will not be met on a 15% slice for thin zones. A thin zone
+can show a promising provisional number that the real, official, monthly forward-eval check will
+not confirm. This is expected, not a bug in the provisional check.
 
 **Official scoring is monthly and forward-only.** Each cycle scores every active candidate against
-station-days that did not exist in *any* snapshot version at the candidate's submission time
-(verifiable from `snapshot.manifest_sha256`) — the only uncheatable holdout, since GHCN-Daily is a
-free public dataset and a classic hidden test set is structurally impossible here. **A candidate
-must win 2 consecutive official cycles before promotion to production.**
+station-days that did not exist in any snapshot version at the candidate's submission time
+(verifiable from `snapshot.manifest_sha256`). This is the only uncheatable holdout, since GHCN-Daily
+is a free public dataset and a classic hidden test set is structurally impossible here. A candidate
+must win 2 consecutive official cycles before promotion to production.
 
-**Fold assignment is salted per snapshot version**, not fixed — `md5(f"{snapshot_version}:
-{station_id}")`, deterministic within one snapshot but not gameable across snapshot versions by
-re-submitting until a favorable station split appears. This salt, the `_AUTO_ENABLE_MARGIN`
-constant, and `_MIN_ZONE_N` are all public in this repository's own source — that's deliberate,
-not an oversight; the incentives this creates (e.g., "don't bother claiming a zone with <30
-stations") are meant to be visible to contributors, not hidden gatekeeping.
+**Fold assignment is salted per snapshot version, not fixed.**
+`md5(f"{snapshot_version}:{station_id}")` is deterministic within one snapshot but not gameable
+across snapshot versions by re-submitting until a favorable station split appears. This salt, the
+`_AUTO_ENABLE_MARGIN` constant, and `_MIN_ZONE_N` are all public in this repository's own source.
+That is deliberate. The incentives this creates (for example, don't bother claiming a zone with
+fewer than 30 stations) are meant to be visible to contributors, not hidden gatekeeping.
 
-**Per-band cycle lag is real and asymmetric.** CDS `reanalysis-era5-land` lags 2–3 months behind
-present, and GHCN quality-control settles over several weeks. Concretely: **month M's official
-cycle closes at M+2 for Open-Meteo-sourced bands (`lag_fill`, `forecast_lead*`), and at M+4 for the
-`era5` band.** If you claim an `era5`-band cell, expect roughly twice the wait for your first
-official result compared to a lag-fill claim — this is not your submission stalling.
+**Per-band cycle lag is real and asymmetric.** CDS `reanalysis-era5-land` lags 2 to 3 months behind
+present, and GHCN quality control settles over several weeks. Concretely: month M's official cycle
+closes at M+2 for Open-Meteo-sourced bands (`lag_fill`, `forecast_lead*`), and at M+4 for the
+`era5` band. If you claim an `era5`-band cell, expect roughly twice the wait for your first
+official result compared to a lag-fill claim. That is not your submission stalling.
 
-**Zone list and band list are fixed by code you cannot change from a submission.** `_BAND_KEYS`
-is a hardcoded tuple, coupled to `publish_band_gate.py`'s CLI `choices` and to the private serving
-repo's own forecast-lead-days default. Lighting a new **zone** for an existing band is a data
-publish (your submission can do this). Adding a new **lead day** or an entirely new **band** is a
-code change in the private serving repository, out of scope for any submission here — don't submit
-a `forecast_lead8` claim expecting it to be scoreable; it isn't a recognized `band_key` yet.
+**Zone list and band list are fixed by code you cannot change from a submission.** `_BAND_KEYS` is
+a hardcoded tuple, coupled to `publish_band_gate.py`'s CLI `choices` and to the private serving
+repo's own forecast-lead-days default. Lighting a new zone for an existing band is a data publish;
+your submission can do this. Adding a new lead day or an entirely new band is a code change in the
+private serving repository, out of scope for any submission here. Don't submit a `forecast_lead8`
+claim expecting it to be scoreable; it isn't a recognized `band_key` yet.
 
 ## What "Rung A" actually asks of you
 
-Rung A is evaluation coverage: rerun the existing, unmodified validator (`validate_lagfill_downscaling.py`
-or `validate_forecast_downscaling.py`) against a dark `(target, zone, band)` cell, using the
-snapshot to fetch the ground truth and base values our infrastructure would otherwise need a paid
-Open-Meteo key to fetch live. If the cell passes the SAME gate the model's already-live cells
-passed, you've earned credit for lighting it — no new code, no new parameters, just running the
-existing bar against data nobody had gotten to yet.
+Rung A is evaluation coverage: rerun the existing, unmodified validator
+(`validate_lagfill_downscaling.py` or `validate_forecast_downscaling.py`) against a dark (target,
+zone, band) cell, using the snapshot to fetch the ground truth and base values our infrastructure
+would otherwise need a paid Open-Meteo key to fetch live. If the cell passes the same gate the
+model's already-live cells passed, you've earned credit for lighting it. No new code, no new
+parameters, just running the existing bar against data nobody had gotten to yet.
+
+Not every dark cell clears the bar just because you rerun the validator against it. The first real
+submission through this pipeline (`2026-07-001`, `lag_fill`/`BWk`/`tmin`) targeted the `lag_fill`
+band's 9 missing zones and found that only one of the nine, `BWk`, actually beats the grid baseline
+with the current model. The rest, including `Cfb`, do not clear the gate yet. Check the real
+numbers before writing a manifest, not just whether a cell is dark.
 
 ## What "Rung B" actually asks of you
 
 Rung B is a published parameter: a `bias_correction[target][zone]` float (station-grouped-CV
 validated, see `heatready_downscaling.score.score_band`'s own docstring for the exact
 recalibration this represents), or a blend-kernel `(L_km, R_km, tau)` triple for the
-distance-weighted nearby-station residual blend. Same scoring path as Rung A; the difference is
+distance-weighted nearby-station residual blend. Same scoring path as Rung A. The difference is
 what your `manifest.yaml`'s `method` block declares you ran.
 
 ## Research track
 
 New covariates are welcome if they are global (not one-country-specific), reproducibly fetchable
-(a documented, automatable source — not a one-off manual download), and either openly licensed or
+(a documented, automatable source, not a one-off manual download), and either openly licensed or
 licensable by us for redistribution. CI enforces `extra_covariates[].license` against an allowlist
 of SPDX identifiers plus a `proprietary-licensed` escape hatch that requires a named licensor and
 flags the submission for manual review. Research-track wins are advisory: they do not promote to
-production automatically, but they do feed a ranked roadmap and (with your permission) public
+production automatically, but they do feed a ranked roadmap and, with your permission, public
 credit for the finding.
 
 **Seeded first research-track issue: serving-consistent population density.** Training's
-`pop_density_per_km2` comes from LandScan Global over a ~1 km station buffer; the live serving
-path computes the analogous feature from WorldPop over each polygon's own area — a real,
+`pop_density_per_km2` comes from LandScan Global over a roughly 1 km station buffer. The live
+serving path computes the analogous feature from WorldPop over each polygon's own area, a real,
 disclosed mismatch (see `DATA_LICENSE`). Swapping the numerator, denominator, or both, and
-measuring the effect, is a fully self-contained research-track contribution — no new data pipeline
-needed, since WorldPop's rasters are already mirrored and referenced in the relevant GitHub issue.
+measuring the effect, is a fully self-contained research-track contribution. No new data pipeline
+is needed, since WorldPop's rasters are already mirrored and referenced in the relevant GitHub
+issue.
 
 ## Questions
 
