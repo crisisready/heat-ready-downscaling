@@ -49,7 +49,7 @@ rung: A                       # A | B | C -- only A is scoreable by the automate
                               # not yet open at all — see README)
 snapshot:
   version: "v2026.07"          # the current real snapshot version -- check the latest GitHub Release
-  manifest_sha256: "337c76104198f3cd373745e339180359c6e2bd554bae369050c7f12b91dc7be1"  # v2026.07's real, current value -- pins the exact data; mismatch = auto-reject
+  manifest_sha256: "e0660fff6397c5e4760927fdeb6f40b4cc241562df82d5cfca2e54f2e084a204"  # v2026.07's real, current value (post --phase predict) -- pins the exact data; mismatch = auto-reject
 claims:
   - model_version: "ds-2026.07-rf5"
     band_key: "lag_fill"
