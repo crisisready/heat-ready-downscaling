@@ -41,7 +41,7 @@ SUBMISSIONS_LINE_SCHEMA: dict = {
         "reproduced": {"type": "boolean"},
         "max_abs_deviation": {"type": "object"},
         "pr": {"type": "string"},  # "{owner}/{repo}#{number}"
-        "runner_commit": {"type": "string"},
+        "runner_commit": {"type": ["string", "null"]},  # None for a local/dry-run invocation outside CI
     },
 }
 
@@ -78,7 +78,7 @@ CYCLES_LINE_SCHEMA: dict = {
         "status": {"enum": ["win", "loss", "insufficient_n"]},
         "incumbent_submission_id": {"type": ["string", "null"]},
         "snapshot_version": {"type": "string"},
-        "runner_commit": {"type": "string"},
+        "runner_commit": {"type": ["string", "null"]},  # None for a local/dry-run invocation outside CI
         "package_version": {"type": "string"},
     },
 }
