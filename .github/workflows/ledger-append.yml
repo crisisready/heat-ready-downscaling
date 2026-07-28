@@ -1,0 +1,100 @@
+# Appends one line to ledger/submissions.jsonl after a submission PR
+# merges to main -- via a bot-authored PR, never a direct push to main,
+# so the append-only CI check (check-ledger-append.yml) still runs against
+# it like any other change. This is the ONLY place ledger/submissions.jsonl
+# is ever written -- never by the contributor's own submission PR (see
+# scripts/append_ledger_entry.py's own module docstring for why the "pr"
+# field can only be resolved after merge).
+name: Ledger Append
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "submissions/**"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  append:
+    runs-on: ubuntu-latest
+    # This workflow's own bot-authored commits land under ledger/**, which
+    # the `paths` filter above already excludes -- this is defense in
+    # depth against a self-triggering loop, not load-bearing on its own.
+    if: "!contains(github.event.head_commit.message, '[ledger-bot]')"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -e '.[snapshot]'
+
+      - name: Find the submission directory this push added
+        id: find
+        run: |
+          set -euo pipefail
+          dir=$(git diff --name-only "${{ github.event.before }}" "${{ github.event.after }}" -- 'submissions/**' | head -1 | xargs dirname)
+          if [ -z "$dir" ]; then
+            echo "::error::no submissions/** path changed in this push"
+            exit 1
+          fi
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve the merging PR number and its actual author
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          json=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" --jq '.[0]')
+          if [ -z "$json" ] || [ "$json" = "null" ]; then
+            echo "::error::no PR found for commit ${{ github.sha }} -- was this pushed directly to main instead of merged via PR?"
+            exit 1
+          fi
+          echo "number=$(echo "$json" | jq -r .number)" >> "$GITHUB_OUTPUT"
+          echo "author=$(echo "$json" | jq -r .user.login)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache downloaded snapshots
+        uses: actions/cache@v4
+        with:
+          path: .cache/snapshots
+          key: snapshots-${{ hashFiles('submissions/**/manifest.yaml') }}
+          restore-keys: snapshots-
+
+      - name: Re-run the referee and append the ledger entry
+        run: |
+          python scripts/append_ledger_entry.py \
+            --submission-dir "${{ steps.find.outputs.dir }}" \
+            --repo "${{ github.repository }}" \
+            --pr-number "${{ steps.pr.outputs.number }}" \
+            --pr-author "${{ steps.pr.outputs.author }}"
+
+      # A separate, bot-authored PR -- not a direct push to main -- so the
+      # append-only check below still runs against this change like any
+      # other. Left for a human (or the repo's own auto-merge setting, if
+      # enabled) to merge -- this workflow deliberately does not force
+      # auto-merge, since the content is machine-generated but "always
+      # merge automatically" is a repo-level policy decision, not this
+      # workflow's to make.
+      - name: Open a PR with the appended ledger line
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "heatready-ledger-bot"
+          git config user.email "actions@users.noreply.github.com"
+          branch="ledger-bot/$(echo '${{ steps.find.outputs.dir }}' | tr '/' '-')"
+          git checkout -b "$branch"
+          git add ledger/submissions.jsonl
+          git commit -m "[ledger-bot] record submission ${{ steps.find.outputs.dir }} (PR #${{ steps.pr.outputs.number }})"
+          git push origin "$branch" --force-with-lease
+          gh pr create \
+            --title "[ledger-bot] record submission ${{ steps.find.outputs.dir }}" \
+            --body "Automated append to \`ledger/submissions.jsonl\` for the merged submission at \`${{ steps.find.outputs.dir }}\`, originally PR #${{ steps.pr.outputs.number }}. Re-derived independently against the merged commit -- see \`scripts/append_ledger_entry.py\`." \
+            --base main --head "$branch" || echo "PR may already exist for this branch"

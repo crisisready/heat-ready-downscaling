@@ -87,6 +87,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # The base checkout above already contains every PREVIOUSLY merged
+          # submission's directory (submissions/ accumulates forever, like
+          # the ledger) -- clear it first so only THIS PR's own submission
+          # ends up here. Otherwise run_submission.py's find_submission_dir
+          # (which requires exactly one) would find every past submission
+          # too, the moment a second one has ever been merged.
+          rm -rf submissions
           mkdir -p submissions
           gh api "repos/${{ github.repository }}/pulls/${{ github.event.number }}/files" --paginate --jq '.[].filename' \
             | grep '^submissions/' | while IFS= read -r f; do

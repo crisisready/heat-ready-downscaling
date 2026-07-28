@@ -1,0 +1,51 @@
+# Required check (plan section 7.3): a PR's diff to ledger/*.jsonl must be
+# ONLY appended lines -- no edit, no reorder, no deletion. Runs on every
+# PR touching a ledger file, including the ledger-append.yml bot's own PRs
+# (so a bug in that workflow can never silently corrupt the ledger just
+# because the change came from automation) and any future score_forward_
+# eval.py-driven PR touching cycles.jsonl/credit.jsonl.
+name: Check Ledger Append-Only
+
+on:
+  pull_request:
+    paths:
+      - "ledger/*.jsonl"
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -e .
+
+      - name: Determine changed ledger files
+        id: changed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          files=$(gh api "repos/${{ github.repository }}/pulls/${{ github.event.number }}/files" --paginate --jq '.[].filename' \
+            | grep -E '^ledger/[^/]+\.jsonl$' || true)
+          {
+            echo "files<<EOF"
+            echo "$files"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check append-only
+        if: steps.changed.outputs.files != ''
+        run: |
+          python scripts/check_ledger_append_only.py \
+            --base-ref "${{ github.event.pull_request.base.sha }}" \
+            --paths ${{ steps.changed.outputs.files }}
