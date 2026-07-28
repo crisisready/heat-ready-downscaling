@@ -1,0 +1,40 @@
+schema_version: 1
+submission_id: "2026-07-001"
+author:
+  github: nish-kishore
+  name: "Nishant Kishore"
+  orcid: null
+  affiliation: "CrisisReady"
+track: serving-ready
+rung: A
+snapshot:
+  version: "v2026.07"
+  manifest_sha256: "e0660fff6397c5e4760927fdeb6f40b4cc241562df82d5cfca2e54f2e084a204"
+claims:
+  - model_version: "ds-2026.07-rf5"
+    band_key: "lag_fill"
+    targets: ["tmin"]
+    zones: ["BWk"]
+method:
+  kind: rerun-validator
+  entrypoint: "scripts/run_submission.py"
+  args: ["--phase", "score", "--from-snapshot", "snapshots/v2026.07",
+         "--model-version", "ds-2026.07-rf5", "--band-key", "lag_fill"]
+  package_version: "0.1.0"
+  code_ref: null
+  extra_covariates: []
+claimed_report: "claimed_report.json"
+tolerance:
+  rmse_qrf_c: 0.005
+  rmse_grid_c: 0.005
+reproducibility:
+  seed: null
+  runtime_notes: >-
+    First (dogfood) submission through the public contributor flow, closing one of the
+    9 zones missing from the lag_fill gate (see the repo's own lag_fill-gap tracking
+    issue). tmax/BWk and 7 of the other 8 previously-dark zones did not clear the gate
+    with the ds-2026.07-rf5 model in this snapshot's fold -- only tmin/BWk did, via the
+    documented raw-margin-plus-bounded-bias fallback path for zones too thin (2 distinct
+    stations here) to run the debiased station-CV. Scored locally against the public
+    snapshot-v2026.07 release using heatready_downscaling.score.score_band +
+    contract.FrozenPredictionAdapter -- the same call the referee itself makes.
