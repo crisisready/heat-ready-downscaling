@@ -65,16 +65,22 @@ jobs:
 
           version="${{ github.event.inputs.current_snapshot_version }}"
           if [ -z "$version" ]; then
-            # The latest snapshot-* tagged release, by publish date -- there
-            # is no separate "current version" file anywhere else in this
-            # repo; the GitHub Release list itself is the source of truth.
-            tag=$(gh api "repos/${{ github.repository }}/releases" --paginate --jq \
-              '[.[] | select(.tag_name | startswith("snapshot-"))] | sort_by(.published_at) | last | .tag_name')
-            if [ -z "$tag" ] || [ "$tag" = "null" ]; then
-              echo "::error::no snapshot-* release found in repos/${{ github.repository }}/releases"
+            # Derived from the RELEASE ASSET's own filename (snapshot-{version}.tar.gz),
+            # not the release's tag name -- a tag can be re-cut without changing the
+            # underlying data (e.g. snapshot-v2026.07.1 exists purely to retrigger
+            # Zenodo archival for the same v2026.07 data, and still carries the asset
+            # snapshot-v2026.07.tar.gz). Trusting the tag name here would resolve to a
+            # version string with no matching asset and fail download_snapshot()
+            # outright. There is no separate "current version" file anywhere else in
+            # this repo; the GitHub Release asset list is the actual source of truth.
+            asset_name=$(gh api "repos/${{ github.repository }}/releases" --paginate --jq \
+              '[.[] | select(.assets[]?.name | test("^snapshot-.*\\.tar\\.gz$"))] | sort_by(.published_at) | last
+               | .assets[] | select(.name | test("^snapshot-.*\\.tar\\.gz$")) | .name' | head -1)
+            if [ -z "$asset_name" ] || [ "$asset_name" = "null" ]; then
+              echo "::error::no release with a snapshot-*.tar.gz asset found in repos/${{ github.repository }}/releases"
               exit 1
             fi
-            version="${tag#snapshot-}"
+            version=$(echo "$asset_name" | sed -E 's/^snapshot-(.*)\.tar\.gz$/\1/')
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "Resolved cycle=$cycle current_snapshot_version=$version"
