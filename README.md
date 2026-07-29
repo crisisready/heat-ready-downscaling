@@ -22,9 +22,19 @@ As of this repository's creation, 166 pass validation and 176 are dark. Most of 
 simply because nobody has run the validator against them with enough data yet to clear the bar --
 but not all of them. The first real Rung A submission (`2026-07-001`) evaluated all nine of the
 `lag_fill` band's dark zones against the current model and found only one, `BWk`, actually beats
-the grid baseline; the other eight, including `Cfb`, do not clear the gate with the model as it
-stands today (see `CONTRIBUTING.md`'s "What Rung A actually asks of you"). A dark cell is an
-invitation to check, not a guarantee that checking will light it.
+the grid baseline via a station-CV-validated `bias_correction` -- the other eight, including
+`Cfb`, did not clear the gate with the model as it stood at that point (see `CONTRIBUTING.md`'s
+"What Rung A actually asks of you"). A dark cell is an invitation to check, not a guarantee that
+checking will light it.
+
+**Update, same day**: `Cfb`'s specific case was root-caused separately from the Rung A submission
+above -- the `lag_fill` band's base data source doesn't match what the model was trained against,
+so its learned correction overshoots. Fixed via `delta_scale`, a maintainer-side generalization of
+`bias_correction` to a per-zone affine (scale + offset) correction (not a Rung A/B/C contribution
+itself -- a change to the scoring library's own correction vocabulary). `Cfb` now clears the gate
+with real margin on both targets. This is the mechanism a future Rung B submission would use to
+propose the same kind of correction externally, once `score_band` is extended to accept a
+contributor-proposed one (see the Contribution ladder below) -- today it's still maintainer-only.
 
 The model drifts heterogeneously. There is no single global summer, and every region continuously
 accrues new ground-truth observations (GHCN-Daily, free and public) that could re-validate a dark
