@@ -101,6 +101,53 @@ BLEND_GATE_SCHEMA: dict = {
 }
 
 
+SPATIAL_RANKING_SCHEMA: dict = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": ["model_version", "protocol", "by_zone"],
+    "properties": {
+        "model_version": {"type": "string"},
+        "computed_at": {"type": "string"},
+        "protocol": {"type": "object"},
+        "by_zone": {
+            "type": "object",
+            "required": ["tmax", "tmin"],
+            "properties": {
+                target_key: {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "object",
+                        "required": ["class", "n_clusters_used", "n_stations_used"],
+                        "properties": {
+                            "class": {"enum": ["strong", "moderate", "weak", "unproven"]},
+                            "ranking_spearman": {"type": ["number", "null"]},
+                            "ranking_spearman_ci95": {
+                                "type": ["array", "null"],
+                                "items": {"type": "number"}, "minItems": 2, "maxItems": 2,
+                            },
+                            "amplitude_slope": {"type": ["number", "null"]},
+                            "n_clusters_used": {"type": "integer"},
+                            "n_stations_used": {"type": "integer"},
+                            "n_regions": {"type": "integer"},
+                        },
+                    },
+                }
+                for target_key in ("tmax", "tmin")
+            },
+        },
+        "region_scale_secondary": {"type": "object"},
+    },
+}
+
+
+def validate_spatial_ranking(artifact: dict) -> None:
+    """Raises jsonschema.ValidationError if `artifact` doesn't match
+    SPATIAL_RANKING_SCHEMA -- same real-schema-check idiom validate_gate/
+    validate_blend_gate already use, not an ad-hoc presence check."""
+    import jsonschema
+    jsonschema.validate(artifact, SPATIAL_RANKING_SCHEMA)
+
+
 def build_gate(report: dict, band_key: str | None = None) -> dict:
     """band_key, when given, is asserted against report["band_key"] --
     the validation scripts both stamp their own band into every report
@@ -133,8 +180,16 @@ def build_gate(report: dict, band_key: str | None = None) -> dict:
     legitimate, CV-validated, more-accurate-than-grid corrections worth
     serving -- this field exists so nothing downstream represents a
     spatial_skill=False zone as evidence of neighborhood-resolution
-    downscaling working there. Does NOT change serving behavior in any
-    way; purely for honest disclosure/display.
+    downscaling working there. Originally purely informational (never
+    read by any serving path) -- **no longer true as of 2026-07-31**:
+    crisisready/heat-risk-data-api's downscaling.spatial_ranking_for_band
+    now reads this field directly to veto a different, separately-shipped
+    confidence signal (`spatial_ranking`) on non-ERA5 bands whose own gate
+    doesn't show real spatial skill (see that repo's PARIS_CONFIDENCE_
+    ROADMAP.md, "R3 scoping" section, for the full reasoning). This field
+    is now load-bearing for that serving path -- a future change to how
+    qrf_beats_grid is computed here will silently move a served field in
+    that repo, not just a disclosure string in this one.
 
     Only True verdicts are written explicitly; a zone with
     qrf_beats_grid_with_margin (or, since 2026-07-28,

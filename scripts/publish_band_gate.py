@@ -42,9 +42,14 @@ delta contributes nothing (or is net-negative) for that zone. Both are
 legitimate, CV-validated, more-accurate-than-grid corrections worth
 serving -- this field exists so nothing downstream (docs, a model-
 performance page, a public claim) represents a spatial_skill=False zone
-as evidence of neighborhood-resolution downscaling working there. Does
-NOT change serving behavior in any way -- downscaling.predict_downscaled
-never reads this field; it's purely for honest disclosure/display.
+as evidence of neighborhood-resolution downscaling working there.
+Originally did not change serving behavior at all (downscaling.
+predict_downscaled never read it) -- **no longer true as of 2026-07-31**:
+crisisready/heat-risk-data-api's downscaling.spatial_ranking_for_band now
+reads this field to veto a separate confidence signal (spatial_ranking)
+on non-ERA5 bands whose own gate doesn't show real spatial skill (see
+that repo's PARIS_CONFIDENCE_ROADMAP.md, "R3 scoping" section). This
+field is now load-bearing for that serving path, not purely disclosure.
 
 Deliberately a separate, explicit publish step rather than the validation
 script uploading its own result automatically -- a human (or a review-gated
