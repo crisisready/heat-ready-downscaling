@@ -11,6 +11,7 @@ Unit tests for scripts/build_training_set.py — no network, DB, or AWS calls.""
 
 import contextlib
 import fcntl
+import json
 import os
 import sys
 import threading
@@ -514,9 +515,15 @@ class TestSnapshotCovariatesForStations:
 
     def test_maps_extractor_outputs_by_station_id(self):
         canopy = {"USW00023183": {"canopy_height_mean_m": 5.0, "canopy_frac_over_3m": 0.2}}
-        worldcover = {"USW00023183": {"wc_built_frac": 0.6, "wc_tree_frac": 0.1, "wc_water_frac": 0.0}}
+        # extract_worldcover/extract_elevation both return {"status",
+        # "resume_index", "results"} now (2026-07-27 forward-port,
+        # snapshot_covariates_for_stations' own comment) -- these mocks must
+        # match that shape since the production code unwraps ["results"].
+        worldcover = {"status": "complete", "resume_index": None,
+                      "results": {"USW00023183": {"wc_built_frac": 0.6, "wc_tree_frac": 0.1, "wc_water_frac": 0.0}}}
         ghsl = {"USW00023183": {"ghsl_urban_fraction": 0.8}}
-        elevation = {"USW00023183": {"elevation_rel_to_gridcell_m": 12.5}}
+        elevation = {"status": "complete", "resume_index": None,
+                     "results": {"USW00023183": {"elevation_rel_to_gridcell_m": 12.5}}}
         p3, p4 = self._patch_pop_and_lst(
             pop_density={"USW00023183": 1500.0}, lst_anomaly={"USW00023183": 2.1},
         )
@@ -551,9 +558,9 @@ class TestSnapshotCovariatesForStations:
     def test_missing_station_in_extractor_output_degrades_to_none(self):
         p3, p4 = self._patch_pop_and_lst()
         with patch.object(bts.vulnerability, "extract_canopy", return_value={}), \
-             patch.object(bts.vulnerability, "extract_worldcover", return_value={}), \
+             patch.object(bts.vulnerability, "extract_worldcover", return_value={"status": "complete", "resume_index": None, "results": {}}), \
              patch.object(bts.vulnerability, "extract_ghsl_smod", return_value={}), \
-             patch.object(bts.dem, "extract_elevation", return_value={}), \
+             patch.object(bts.dem, "extract_elevation", return_value={"status": "complete", "resume_index": None, "results": {}}), \
              p3, p4:
             result = bts.snapshot_covariates_for_stations(
                 _STATIONS[:1], "some-bucket", batch_label="US",
@@ -647,7 +654,11 @@ class TestBuildRowsForCountry:
         humidity_by_station = humidity_by_station if humidity_by_station is not None else {}
         nighttime_wind_by_station = nighttime_wind_by_station if nighttime_wind_by_station is not None else {}
         covariates = covariates if covariates is not None else {}
-        station_series = station_series if station_series is not None else []
+        # _STATIONS[:1]'s single station_id, keyed as fetch_ghcn_daily_bulk_
+        # concurrent's real return shape does -- absent entirely (not an
+        # empty-list value) for "no data", matching that function's own
+        # documented contract.
+        ghcn_by_station = {"USW00023183": station_series} if station_series else {}
         return patch.multiple(
             bts,
             fetch_era5_land_for_stations=MagicMock(
@@ -656,7 +667,7 @@ class TestBuildRowsForCountry:
             snapshot_covariates_for_stations=MagicMock(return_value=covariates),
         ), patch.multiple(
             bts.ghcn,
-            fetch_ghcn_daily_bulk=MagicMock(return_value=station_series),
+            fetch_ghcn_daily_bulk_concurrent=MagicMock(return_value=ghcn_by_station),
             align_obs_window=MagicMock(return_value=shift),
             region_from_station_id=MagicMock(return_value="US"),
             koppen_climate_zone=MagicMock(return_value=climate_zone),
@@ -690,20 +701,22 @@ class TestBuildRowsForCountry:
         assert row["nighttime_wind_ms"] == 2.7
         assert row["canopy_height_mean_m"] == 5.0
 
-    def test_era5_fetch_and_covariate_snapshot_run_concurrently(self):
-        """Regression coverage for the concurrency fix (2026-07-18): the two
-        independent calls must actually be able to make progress at the same
-        time, not just be wrapped in a ThreadPoolExecutor that happens to run
-        them one after the other on a single reused worker thread (which a
-        naive "different thread ident" check can't rule out for instant
-        mocks -- the pool is free to dispatch two instant calls to the same
-        idle thread). A shared Barrier(2) proves it properly: if the two
-        calls were ever serialized onto one thread, the first would block on
-        the barrier forever waiting for a second party that can never arrive
-        (it's queued behind the first), and the test would hang/timeout."""
+    def test_era5_covariate_and_ghcn_fetch_run_concurrently(self):
+        """Regression coverage for the concurrency fix (2026-07-18, extended
+        2026-08-03 to 3-way when the GHCN fetch joined the same pool): all
+        three independent calls must actually be able to make progress at
+        the same time, not just be wrapped in a ThreadPoolExecutor that
+        happens to run them one after another on a single reused worker
+        thread (which a naive "different thread ident" check can't rule out
+        for instant mocks -- the pool is free to dispatch instant calls to
+        the same idle thread). A shared Barrier(3) proves it properly: if
+        any call were ever serialized onto one thread instead of getting
+        its own, the first would block on the barrier forever waiting for
+        parties that can never arrive (queued behind it), and the test
+        would hang/timeout."""
         import threading
 
-        barrier = threading.Barrier(2, timeout=5)
+        barrier = threading.Barrier(3, timeout=5)
 
         def _sync_era5(*args, **kwargs):
             barrier.wait()
@@ -713,19 +726,66 @@ class TestBuildRowsForCountry:
             barrier.wait()
             return {}
 
+        def _sync_ghcn(*args, **kwargs):
+            barrier.wait()
+            return {}
+
         with patch.multiple(
             bts,
             fetch_era5_land_for_stations=MagicMock(side_effect=_sync_era5),
             snapshot_covariates_for_stations=MagicMock(side_effect=_sync_covariates),
         ), patch.multiple(
             bts.ghcn,
-            fetch_ghcn_daily_bulk=MagicMock(return_value=[]),
+            fetch_ghcn_daily_bulk_concurrent=MagicMock(side_effect=_sync_ghcn),
         ):
             # Raises threading.BrokenBarrierError (via the executor future)
-            # if the two calls were ever actually serialized onto one thread.
+            # if any of the three calls were ever actually serialized onto
+            # one thread.
             bts.build_rows_for_country(
                 "US", _STATIONS[:1], date(2016, 6, 15), date(2016, 6, 15), "bucket", "ls-bucket", "ls-key",
             )
+
+    def test_ghcn_fetch_called_with_all_station_ids_and_passthrough_params(self):
+        p1, _ = self._patch_all()
+        with p1, \
+             patch.object(bts.ghcn, "fetch_ghcn_daily_bulk_concurrent", return_value={}) as mock_fetch, \
+             patch.object(bts.ghcn, "align_obs_window", return_value=0), \
+             patch.object(bts.ghcn, "region_from_station_id", return_value="US"), \
+             patch.object(bts.ghcn, "koppen_climate_zone", return_value="BWh"):
+            bts.build_rows_for_country(
+                "US", _STATIONS, date(2016, 6, 15), date(2016, 6, 16), "bucket", "ls-bucket", "ls-key",
+                ghcn_max_workers=16, ghcn_checkpoint_path="/tmp/some_checkpoint.jsonl",
+            )
+        mock_fetch.assert_called_once_with(
+            ["USW00023183", "USW00003812"], date(2016, 6, 15), date(2016, 6, 16),
+            max_workers=16, checkpoint_path="/tmp/some_checkpoint.jsonl",
+        )
+
+    def test_station_missing_from_ghcn_result_contributes_no_rows_others_unaffected(self):
+        """One station absent from fetch_ghcn_daily_bulk_concurrent's
+        returned dict (no data, matching that function's own documented
+        contract) must not affect a sibling station that DID return rows in
+        the same batch."""
+        p1, p2 = self._patch_all(
+            grid_by_station={
+                "USW00023183": {"2016-06-15": {"tmax": 37.0, "tmin": 22.0}},
+                "USW00003812": {"2016-06-15": {"tmax": 36.0, "tmin": 21.0}},
+            },
+        )
+        with p1, patch.multiple(
+            bts.ghcn,
+            fetch_ghcn_daily_bulk_concurrent=MagicMock(return_value={
+                "USW00003812": [{"date": "2016-06-15", "station_tmax_c": 35.0, "station_tmin_c": 20.0}],
+            }),
+            align_obs_window=MagicMock(return_value=0),
+            region_from_station_id=MagicMock(return_value="US"),
+            koppen_climate_zone=MagicMock(return_value="BWh"),
+        ):
+            rows = bts.build_rows_for_country(
+                "US", _STATIONS, date(2016, 6, 15), date(2016, 6, 15), "bucket", "ls-bucket", "ls-key",
+            )
+        assert len(rows) == 1
+        assert rows[0]["station_id"] == "USW00003812"
 
     def test_logs_phase_timing_for_era5_and_covariates(self, caplog):
         import logging as _logging
@@ -889,3 +949,167 @@ class TestCanopyResumeProjectId:
 
     def test_different_country_label_differs_even_with_same_stations(self):
         assert bts._canopy_resume_project_id("US", _STATIONS[:1]) != bts._canopy_resume_project_id("GM", _STATIONS[:1])
+
+
+# ---------------------------------------------------------------------------
+# _covariate_completeness_summary
+# ---------------------------------------------------------------------------
+
+
+class TestCovariateCompletenessSummary:
+    def test_empty_rows_returns_no_rows(self):
+        assert bts._covariate_completeness_summary([]) == "no rows"
+
+    def test_reports_non_null_fraction_per_column(self):
+        rows = [
+            {"elevation_mean_m": 100.0, "slope_deg": None},
+            {"elevation_mean_m": None, "slope_deg": 2.0},
+        ]
+        summary = bts._covariate_completeness_summary(rows)
+        assert "elevation_mean_m=1/2" in summary
+        assert "slope_deg=1/2" in summary
+
+    def test_koppen_main_group_code_always_shown_even_though_never_computed(self):
+        """This script never computes koppen_main_group_code (only
+        climate_zone) -- it should still appear in the summary, always at
+        0/N, as a standing reminder of that separate gap rather than being
+        silently absent from the printout."""
+        summary = bts._covariate_completeness_summary([{"climate_zone": "Cfa"}])
+        assert "koppen_main_group_code=0/1" in summary
+
+
+# ---------------------------------------------------------------------------
+# main() -- --station-ids-file / --dry-run
+# ---------------------------------------------------------------------------
+
+
+_US_STATION = {"station_id": "USW00023183", "lon": -112.0036, "lat": 33.4278, "elevation_m": 339.2, "name": "PHOENIX AP"}
+_MX_STATION = {"station_id": "MXM00076040", "lon": -115.1833, "lat": 32.4, "elevation_m": 10.0, "name": "EJIDO NUEVO LEON"}
+_UNRELATED_US_STATION = {"station_id": "USW00003812", "lon": -111.98, "lat": 33.45, "elevation_m": 350.0, "name": "TEMPE"}
+
+
+class TestMainStationIdsFileAndDryRun:
+    def _patch_common(self, list_ghcn_stations_return, active_ids, build_rows_return=None):
+        """Common set of mocks every main() test needs -- credentials/DB-
+        table-creation/inventory-fetch/active-filter/row-building/upsert,
+        none of which touch real network/AWS/DB."""
+        build_rows_return = build_rows_return if build_rows_return is not None else []
+        return (
+            patch.object(bts, "_bucket_from_credentials", return_value="vuln-bucket"),
+            patch.object(bts, "_landscan_from_credentials", return_value=("ls-bucket", "ls-key")),
+            patch.object(bts.ghcn, "create_ghcn_training_table"),
+            patch.object(bts.ghcn, "list_ghcn_stations", return_value=list_ghcn_stations_return),
+            patch.object(bts.ghcn, "active_station_ids", return_value=active_ids),
+            patch.object(bts, "build_rows_for_country",
+                         side_effect=lambda country, stations, *a, **k: list(build_rows_return)),
+            patch.object(bts.ghcn, "upsert_ghcn_training_rows"),
+        )
+
+    def test_countries_and_station_ids_file_are_mutually_exclusive(self, monkeypatch, tmp_path, capsys):
+        f = tmp_path / "ids.json"
+        f.write_text(json.dumps({"station_ids": ["USW00023183"]}))
+        monkeypatch.setattr(sys, "argv", [
+            "build_training_set.py", "--countries", "US", "--station-ids-file", str(f),
+            "--start-date", "2016-06-01", "--end-date", "2016-06-30",
+        ])
+        with pytest.raises(SystemExit):
+            bts.main()
+        assert "exactly one of --countries or --station-ids-file" in capsys.readouterr().err
+
+    def test_requires_one_of_countries_or_station_ids_file(self, monkeypatch, capsys):
+        monkeypatch.setattr(sys, "argv", [
+            "build_training_set.py", "--start-date", "2016-06-01", "--end-date", "2016-06-30",
+        ])
+        with pytest.raises(SystemExit):
+            bts.main()
+        assert "exactly one of --countries or --station-ids-file" in capsys.readouterr().err
+
+    def test_max_stations_per_country_rejected_with_station_ids_file(self, monkeypatch, tmp_path, capsys):
+        f = tmp_path / "ids.json"
+        f.write_text(json.dumps({"station_ids": ["USW00023183"]}))
+        monkeypatch.setattr(sys, "argv", [
+            "build_training_set.py", "--station-ids-file", str(f), "--max-stations-per-country", "5",
+            "--start-date", "2016-06-01", "--end-date", "2016-06-30",
+        ])
+        with pytest.raises(SystemExit):
+            bts.main()
+        assert "not compatible with --station-ids-file" in capsys.readouterr().err
+
+    def test_station_ids_file_derives_countries_and_filters_to_requested_ids(self, monkeypatch, tmp_path):
+        """Pooled US+MX file: countries must be derived from the IDs'
+        FIPS prefixes (not require --countries), list_ghcn_stations must be
+        called with exactly those derived countries, and a station present
+        in the inventory but NOT requested (_UNRELATED_US_STATION) must be
+        excluded even though it shares the US country code."""
+        f = tmp_path / "ids.json"
+        f.write_text(json.dumps({"station_ids": ["USW00023183", "MXM00076040"]}))
+        monkeypatch.setattr(sys, "argv", [
+            "build_training_set.py", "--station-ids-file", str(f),
+            "--start-date", "2016-06-01", "--end-date", "2016-06-30",
+        ])
+        mocks = self._patch_common(
+            list_ghcn_stations_return=[_US_STATION, _UNRELATED_US_STATION, _MX_STATION],
+            active_ids={"USW00023183", "MXM00076040", "USW00003812"},
+        )
+        with mocks[0], mocks[1], mocks[2], mocks[3] as mock_list, mocks[4], mocks[5] as mock_build, mocks[6] as mock_upsert:
+            bts.main()
+
+        mock_list.assert_called_once_with(["MX", "US"])
+        built_station_ids = {
+            s["station_id"] for call in mock_build.call_args_list for s in call.args[1]
+        }
+        assert built_station_ids == {"USW00023183", "MXM00076040"}
+        assert mock_upsert.call_count == 0  # build_rows_for_country returned [] in this fixture
+
+    def test_station_ids_file_warns_on_ids_missing_from_inventory(self, monkeypatch, tmp_path, capsys):
+        f = tmp_path / "ids.json"
+        f.write_text(json.dumps({"station_ids": ["USW00023183", "USW00099999"]}))
+        monkeypatch.setattr(sys, "argv", [
+            "build_training_set.py", "--station-ids-file", str(f),
+            "--start-date", "2016-06-01", "--end-date", "2016-06-30",
+        ])
+        mocks = self._patch_common(
+            list_ghcn_stations_return=[_US_STATION], active_ids={"USW00023183"},
+        )
+        with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], mocks[5], mocks[6]:
+            bts.main()
+
+        stdout = capsys.readouterr().out
+        assert "WARNING" in stdout and "USW00099999" in stdout
+
+    def test_dry_run_skips_upsert_but_still_builds_rows(self, monkeypatch, tmp_path, capsys):
+        f = tmp_path / "ids.json"
+        f.write_text(json.dumps({"station_ids": ["USW00023183"]}))
+        monkeypatch.setattr(sys, "argv", [
+            "build_training_set.py", "--station-ids-file", str(f),
+            "--start-date", "2016-06-01", "--end-date", "2016-06-30", "--dry-run",
+        ])
+        mocks = self._patch_common(
+            list_ghcn_stations_return=[_US_STATION], active_ids={"USW00023183"},
+            build_rows_return=[{"station_id": "USW00023183", "elevation_mean_m": 100.0}],
+        )
+        with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], mocks[5] as mock_build, mocks[6] as mock_upsert:
+            bts.main()
+
+        mock_build.assert_called_once()
+        mock_upsert.assert_not_called()
+        out = capsys.readouterr().out
+        assert "--dry-run: would write 1 row(s)" in out
+        assert "--dry-run: not uploading" in out
+
+    def test_normal_run_calls_upsert_with_the_built_rows(self, monkeypatch, tmp_path):
+        f = tmp_path / "ids.json"
+        f.write_text(json.dumps({"station_ids": ["USW00023183"]}))
+        monkeypatch.setattr(sys, "argv", [
+            "build_training_set.py", "--station-ids-file", str(f),
+            "--start-date", "2016-06-01", "--end-date", "2016-06-30",
+        ])
+        fake_rows = [{"station_id": "USW00023183", "date": "2016-06-15"}]
+        mocks = self._patch_common(
+            list_ghcn_stations_return=[_US_STATION], active_ids={"USW00023183"},
+            build_rows_return=fake_rows,
+        )
+        with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], mocks[5], mocks[6] as mock_upsert:
+            bts.main()
+
+        mock_upsert.assert_called_once_with(fake_rows)
