@@ -117,6 +117,7 @@ import logging
 import math
 import os
 import re
+import shutil
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -366,9 +367,26 @@ def _date_chunks(start_date: date, end_date: date, chunk_days: int = _ERA5_CHUNK
     return chunks
 
 
+def _era5_segment_cache_path(
+    cache_dir: str, batch_label: str, padded_start: date, padded_end: date,
+    bbox: str, dataset: str, variables: list[str],
+) -> str:
+    """Stable on-disk path for one (bbox, padded date window, dataset,
+    variables) ERA5 segment -- lets a killed-and-relaunched build skip
+    segments it already downloaded instead of re-paying every CDS
+    round-trip from scratch. batch_label is cosmetic (readable filename
+    only); the hash of the actual request parameters is what makes this
+    collision-safe across zones/batches, not the label."""
+    key_material = f"{bbox}|{dataset}|{sorted(variables)}|{padded_start.isoformat()}|{padded_end.isoformat()}"
+    digest = hashlib.sha256(key_material.encode()).hexdigest()[:16]
+    fname = f"{batch_label}_{padded_start.isoformat()}_{padded_end.isoformat()}_{digest}.nc"
+    return os.path.join(cache_dir, fname)
+
+
 def fetch_era5_land_for_stations(
     stations: list[dict], start_date: date, end_date: date,
-    bbox: str | None = None, geojson_obj: dict | None = None,
+    bbox: str | None = None, geojson_obj: dict | None = None, *,
+    chunk_days: int | None = None, cache_dir: str | None = None, batch_label: str = "batch",
 ) -> tuple[dict[str, dict[str, float]], dict[str, dict[str, float]], dict[str, dict[str, float]]]:
     """
     Download ERA5-Land for the bbox covering all given stations, chunked into
@@ -393,6 +411,26 @@ def fetch_era5_land_for_stations(
     rather than each recomputing the identical structure from the same
     station list); computed from `stations` if omitted, for standalone use.
 
+    chunk_days overrides _ERA5_CHUNK_DAYS -- matters when several zone/
+    country batches run as concurrent OS processes sharing only 3 CDS
+    account slots (_era5_download_lock): a batch holds its acquired slot
+    for every internal calendar-month segment download_era5 does within
+    ONE chunk (confirmed live 2026-08-03 -- a full-year range at the
+    400-day default is a single chunk, so one batch can monopolize a slot
+    for all 12 of a year's segments, starving every other batch queued
+    behind it for the run's entire duration). Pass a chunk_days close to
+    one calendar month (e.g. 32) for a multi-batch run so the lock is
+    released and re-contended after roughly one segment, letting waiting
+    batches interleave instead of queuing behind a single monopolizer.
+
+    cache_dir, if given, persists each downloaded segment to a stable path
+    keyed by (bbox, padded date window, dataset, variables) via
+    _era5_segment_cache_path and reuses it on a cache hit instead of
+    re-acquiring the lock and re-downloading -- makes a killed/relaunched
+    batch resume from wherever it left off rather than re-paying every
+    CDS round-trip already completed. batch_label is used only for the
+    cache filename's readability.
+
     Returns (daily_tmax_tmin_by_station, humidity_by_station, nighttime_wind_by_station):
       - daily_tmax_tmin_by_station: {station_id: {date_iso: {"tmax": .., "tmin": ..}}}
       - humidity_by_station: {station_id: {date_iso: specific_humidity_kgkg}}
@@ -401,6 +439,14 @@ def fetch_era5_land_for_stations(
     bbox = bbox if bbox is not None else stations_bbox(stations)
     geojson_obj = geojson_obj if geojson_obj is not None else stations_to_geojson(stations)
     tz_map = _timezones_for_stations(stations)
+    # Resolved here, not as a bound default parameter -- same reason the
+    # loop below passes chunk_days explicitly to _date_chunks rather than
+    # relying on ITS default: a bare `chunk_days: int = _ERA5_CHUNK_DAYS`
+    # parameter would bind the module constant's value once at function-
+    # DEFINITION time, so a caller/test patching bts._ERA5_CHUNK_DAYS
+    # afterward would silently have no effect unless chunk_days is passed
+    # explicitly every time.
+    chunk_days = chunk_days if chunk_days is not None else _ERA5_CHUNK_DAYS
 
     daily_by_station: dict[str, dict[str, dict]] = {}
     humidity_by_station: dict[str, dict[str, float]] = {}
@@ -411,7 +457,7 @@ def fetch_era5_land_for_stations(
     # time -- a bare default argument is bound once at function-definition
     # time in Python, so patching the module constant afterward would
     # silently have no effect on an already-defined default.
-    for chunk_start, chunk_end in _date_chunks(start_date, end_date, chunk_days=_ERA5_CHUNK_DAYS):
+    for chunk_start, chunk_end in _date_chunks(start_date, end_date, chunk_days=chunk_days):
         # aggregate_hourly_to_daily only returns days with all 24 local hours present.
         # A local day can span into the adjacent UTC calendar day in either direction
         # depending on the station's UTC offset sign (confirmed live: a single-day
@@ -420,22 +466,44 @@ def fetch_era5_land_for_stations(
         # at the edges of the requested window -- a shift=+1 lookup for obs_day=
         # chunk_end needs local day chunk_end+1 to be complete, which itself needs
         # ERA5-Land UTC data through chunk_end+2.
-        #
-        # _era5_download_lock serializes ONLY this call across concurrent
-        # build_training_set.py processes (CDS's own per-account concurrency
-        # cap -- see the lock's own docstring); the acquired slot's
-        # account_index is threaded into download_era5 so it actually
-        # downloads under that slot's CDS credential.
-        with _era5_download_lock() as account_index:
-            nc_path = era5.download_era5(
-                bbox, chunk_start - timedelta(days=2), chunk_end + timedelta(days=2),
-                dataset="reanalysis-era5-land", variables=_TRAINING_ERA5_VARIABLES,
-                account_index=account_index,
-            )
+        padded_start, padded_end = chunk_start - timedelta(days=2), chunk_end + timedelta(days=2)
+
+        cache_path = (
+            _era5_segment_cache_path(cache_dir, batch_label, padded_start, padded_end, bbox,
+                                      "reanalysis-era5-land", _TRAINING_ERA5_VARIABLES)
+            if cache_dir else None
+        )
+        if cache_path and os.path.exists(cache_path):
+            logger.info("[%s] ERA5 cache hit for %s..%s -- skipping CDS download",
+                        batch_label, padded_start, padded_end)
+            nc_path, owns_nc_path = cache_path, False
+        else:
+            # _era5_download_lock serializes ONLY this call across concurrent
+            # build_training_set.py processes (CDS's own per-account concurrency
+            # cap -- see the lock's own docstring); the acquired slot's
+            # account_index is threaded into download_era5 so it actually
+            # downloads under that slot's CDS credential.
+            with _era5_download_lock() as account_index:
+                nc_path = era5.download_era5(
+                    bbox, padded_start, padded_end,
+                    dataset="reanalysis-era5-land", variables=_TRAINING_ERA5_VARIABLES,
+                    account_index=account_index,
+                )
+            owns_nc_path = True
+            if cache_path:
+                # Write-to-tmp-then-rename so a process killed mid-copy never
+                # leaves a partial file at cache_path that a relaunch would
+                # wrongly treat as a complete cache hit (os.rename is atomic
+                # within the same filesystem).
+                os.makedirs(cache_dir, exist_ok=True)
+                tmp_cache_path = cache_path + ".tmp"
+                shutil.copy2(nc_path, tmp_cache_path)
+                os.rename(tmp_cache_path, cache_path)
         try:
             hourly = era5.extract_era5_means(nc_path, geojson_obj)
         finally:
-            os.unlink(nc_path)
+            if owns_nc_path:
+                os.unlink(nc_path)
 
         daily = heat_calcs.aggregate_hourly_to_daily(hourly, tz_map)
         for row in daily:
@@ -779,11 +847,16 @@ def build_rows_for_country(
     country: str, stations: list[dict], start_date: date, end_date: date, vuln_bucket: str,
     landscan_bucket: str, landscan_key: str, *,
     ghcn_max_workers: int = 8, ghcn_checkpoint_path: str | None = None,
+    era5_chunk_days: int | None = None, era5_cache_dir: str | None = None,
 ) -> list[dict]:
     """Assemble ghcn_training rows for every station in one country/batch:
     fetch GHCN + ERA5-Land + covariates once per batch, align each
     station's obs window empirically, compute the regression target
     (delta_tmax_c/delta_tmin_c), and label region/climate_zone.
+
+    era5_chunk_days/era5_cache_dir pass straight through to
+    fetch_era5_land_for_stations (see that function's own docstring) --
+    fair-scheduling and crash-resume for multi-batch concurrent runs.
 
     ghcn_max_workers/ghcn_checkpoint_path pass straight through to
     ghcn.fetch_ghcn_daily_bulk_concurrent (adaptive-concurrency GHCN fetch,
@@ -817,7 +890,10 @@ def build_rows_for_country(
     def _timed_era5():
         t0 = time.monotonic()
         logger.info("[%s] ERA5 fetch starting", country)
-        result = fetch_era5_land_for_stations(stations, start_date, end_date, bbox=bbox, geojson_obj=geojson_obj)
+        result = fetch_era5_land_for_stations(
+            stations, start_date, end_date, bbox=bbox, geojson_obj=geojson_obj,
+            chunk_days=era5_chunk_days, cache_dir=era5_cache_dir, batch_label=country,
+        )
         logger.info("[%s] ERA5 fetch finished in %.1fs", country, time.monotonic() - t0)
         return result
 
@@ -1178,6 +1254,22 @@ def main() -> None:
                               "chunks bounded by this (see _chunk_stations_by_extent). Lower this if CDS "
                               "still rejects a request as too large; a single climate zone is not always "
                               "small enough on its own (confirmed live 2026-08-03).")
+    parser.add_argument("--era5-chunk-days", type=int, default=_ERA5_CHUNK_DAYS,
+                         help="Max days per ERA5 date-chunk (default %(default)s, matching the single-"
+                              "batch/single-country case). Lower this (e.g. 32, ~one calendar month) for "
+                              "a multi-batch run where several zone/country processes share only 3 CDS "
+                              "account slots via _era5_download_lock -- the lock is held for every "
+                              "segment download_era5 does within ONE chunk, so a large chunk_days lets "
+                              "one batch monopolize a slot for its entire date range and starve every "
+                              "other batch queued behind it (confirmed live 2026-08-03: a full-year "
+                              "7-zone run at the 400-day default left 4 of 7 zones with zero ERA5 "
+                              "progress for the whole run). A smaller chunk_days releases and re-contends "
+                              "the lock roughly once per segment instead.")
+    parser.add_argument("--era5-cache-dir", default=None,
+                         help="Directory to persist each downloaded ERA5 segment, keyed by (bbox, padded "
+                              "date window, dataset, variables) -- a killed/relaunched run reuses a "
+                              "cached segment instead of re-acquiring the lock and re-downloading it from "
+                              "CDS. Omit for no cross-run resume (fine for a small/test run).")
     parser.add_argument("--dry-run", action="store_true",
                          help="Run the full fetch/covariate/row-build pipeline exactly as a real build "
                               "would, but skip the final ghcn.upsert_ghcn_training_rows call -- print a "
@@ -1280,6 +1372,7 @@ def main() -> None:
                 rows = build_rows_for_country(
                     batch_label, chunk_stations, start_date, end_date, vuln_bucket, landscan_bucket, landscan_key,
                     ghcn_max_workers=args.ghcn_max_workers, ghcn_checkpoint_path=ghcn_checkpoint_path,
+                    era5_chunk_days=args.era5_chunk_days, era5_cache_dir=args.era5_cache_dir,
                 )
                 if rows and not args.dry_run:
                     ghcn.upsert_ghcn_training_rows(rows)

@@ -230,6 +230,105 @@ class TestFetchEra5LandForStations:
         assert "2016-06-15" in humidity["USW00023183"]
 
 
+class TestFetchEra5LandForStationsChunkDaysParam:
+    def test_chunk_days_param_overrides_module_default_without_patching_it(self):
+        """chunk_days must be threaded straight into _date_chunks at call
+        time (2026-08-03 fair-lock fix) -- a caller (build_training_set.py's
+        --era5-chunk-days CLI flag) needs to override this per-run without
+        mutating the module constant other callers still rely on."""
+        with patch.object(bts.era5, "download_era5", return_value="/tmp/fake.nc") as mock_dl, \
+             patch.object(bts.era5, "extract_era5_means", return_value=[]), \
+             patch("os.unlink"):
+            bts.fetch_era5_land_for_stations(
+                _STATIONS[:1], date(2016, 1, 1), date(2016, 12, 31), chunk_days=90,
+            )
+
+        assert mock_dl.call_count == len(bts._date_chunks(date(2016, 1, 1), date(2016, 12, 31), chunk_days=90))
+        assert mock_dl.call_count > 1
+
+
+class TestFetchEra5LandForStationsCache:
+    def test_cache_miss_downloads_and_persists_a_copy(self, tmp_path):
+        """A fresh cache_dir has no file yet -- must download normally
+        (through the lock) and leave a persisted copy behind for a future
+        relaunch to reuse."""
+        cache_dir = str(tmp_path / "era5_cache")
+        real_file = tmp_path / "fake.nc"
+        real_file.write_bytes(b"fake netcdf bytes")
+
+        with patch.object(bts.era5, "download_era5", return_value=str(real_file)) as mock_dl, \
+             patch.object(bts.era5, "extract_era5_means", return_value=[]):
+            bts.fetch_era5_land_for_stations(
+                _STATIONS, date(2016, 6, 15), date(2016, 6, 16),
+                cache_dir=cache_dir, batch_label="US_test",
+            )
+
+        mock_dl.assert_called_once()
+        cached_files = list(os.scandir(cache_dir))
+        assert len(cached_files) == 1
+        assert cached_files[0].name.startswith("US_test_2016-06-13_2016-06-18_")
+        assert open(cached_files[0].path, "rb").read() == b"fake netcdf bytes"
+        # the original downloaded tmp file is still cleaned up as before
+        assert not real_file.exists()
+
+    def test_cache_hit_skips_lock_and_download_entirely(self, tmp_path):
+        """A relaunched run must not re-acquire the lock or re-download a
+        segment it already has cached -- this is the entire point of
+        cache_dir (resuming a killed multi-hour pooled write without
+        re-paying every CDS round-trip)."""
+        cache_dir = str(tmp_path / "era5_cache")
+        os.makedirs(cache_dir)
+        bbox = bts.stations_bbox(_STATIONS)
+        cache_path = bts._era5_segment_cache_path(
+            cache_dir, "US_test", date(2016, 6, 13), date(2016, 6, 18),
+            bbox, "reanalysis-era5-land", bts._TRAINING_ERA5_VARIABLES,
+        )
+        with open(cache_path, "wb") as f:
+            f.write(b"cached netcdf bytes")
+
+        with patch.object(bts, "_era5_download_lock") as mock_lock, \
+             patch.object(bts.era5, "download_era5") as mock_dl, \
+             patch.object(bts.era5, "extract_era5_means", return_value=[]) as mock_extract, \
+             patch("os.unlink") as mock_unlink:
+            bts.fetch_era5_land_for_stations(
+                _STATIONS, date(2016, 6, 15), date(2016, 6, 16),
+                cache_dir=cache_dir, batch_label="US_test",
+            )
+
+        mock_lock.assert_not_called()
+        mock_dl.assert_not_called()
+        mock_extract.assert_called_once()
+        assert mock_extract.call_args[0][0] == cache_path
+        # a cache hit's file must survive for the next call/relaunch -- never unlinked
+        mock_unlink.assert_not_called()
+
+    def test_cache_key_differs_across_zones_sharing_the_same_padded_window(self, tmp_path):
+        """Two different zones/batches downloading the same calendar window
+        must never collide on one cache file -- bbox is part of the key,
+        batch_label alone (cosmetic) is not relied on for uniqueness."""
+        cache_dir = str(tmp_path / "era5_cache")
+        path_a = bts._era5_segment_cache_path(
+            cache_dir, "US_BSk", date(2023, 1, 1), date(2023, 2, 1),
+            "-115,30,-110,35", "reanalysis-era5-land", bts._TRAINING_ERA5_VARIABLES,
+        )
+        path_b = bts._era5_segment_cache_path(
+            cache_dir, "US_BWh", date(2023, 1, 1), date(2023, 2, 1),
+            "-100,20,-95,25", "reanalysis-era5-land", bts._TRAINING_ERA5_VARIABLES,
+        )
+        assert path_a != path_b
+
+    def test_no_cache_dir_means_no_persistence_and_no_lookup(self):
+        """Default (cache_dir=None) behavior must be unchanged from before
+        this fix -- always downloads, never touches a cache path."""
+        with patch.object(bts.era5, "download_era5", return_value="/tmp/fake.nc") as mock_dl, \
+             patch.object(bts.era5, "extract_era5_means", return_value=[]), \
+             patch("os.unlink") as mock_unlink:
+            bts.fetch_era5_land_for_stations(_STATIONS, date(2016, 6, 15), date(2016, 6, 16))
+
+        mock_dl.assert_called_once()
+        mock_unlink.assert_called_once_with("/tmp/fake.nc")
+
+
 class TestDateChunks:
     def test_splits_long_window_into_bounded_chunks(self):
         chunks = bts._date_chunks(date(2016, 1, 1), date(2016, 12, 31), chunk_days=90)
