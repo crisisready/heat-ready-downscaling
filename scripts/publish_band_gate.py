@@ -57,6 +57,19 @@ CI step) reads the validation report and decides whether to publish before
 anything in production can start reading it: a wrong-but-confident
 correction should never ship without a human decision.
 
+Fail-closed on zone drops (2026-08-03): before uploading, this script GETs
+whatever gate is CURRENTLY published at the target key and refuses to
+proceed (no S3 write, non-zero exit) if the new gate would drop any zone
+(per target, tmax/tmin separately) present in that current gate but absent
+from the new one. --variant scoping already prevents the *cross-key*
+version of this landmine (a variant-fitted report can never silently
+overwrite the default key -- see build_gate's own docstring), but says
+nothing about a same-key publish that simply omits a zone the current gate
+has -- e.g. a validation run scoped to fewer zones, or a zone that failed
+this time. --confirm-drops opts out of the refusal for an intentional
+drop, matching this script's own "human decision required" idiom above
+rather than a silent auto-publish.
+
 Only True verdicts are written explicitly; a zone with qrf_beats_grid_with_
 margin False OR None (insufficient n, or gate-failed already at the ERA5
 level) is simply omitted -- downscaling.load_band_gate's own .get(zone,
@@ -77,8 +90,49 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 
 from heatready_downscaling.gates import build_gate, validate_gate
+
+
+def _refuse_if_zones_would_be_dropped(client, bucket, key, new_gate, confirm_drops):
+    """GET the gate currently published at (bucket, key) and compare its
+    tmax/tmin zone sets against new_gate's. Raises SystemExit(1) (no caller
+    side effect yet -- this must run before put_object) if any zone present
+    in the current gate is absent from new_gate, unless confirm_drops is
+    True. No prior gate (NoSuchKey/404) means nothing to drop, so this
+    always proceeds on a first-ever publish to a key. Any other S3 error
+    is re-raised rather than silently treated as "nothing to drop" --
+    fail-closed applies to the safety check itself too."""
+    from botocore.exceptions import ClientError
+
+    try:
+        existing_obj = client.get_object(Bucket=bucket, Key=key)
+        existing_gate = json.loads(existing_obj["Body"].read())
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") in ("NoSuchKey", "404"):
+            return
+        raise
+
+    dropped = {}
+    for target in ("tmax", "tmin"):
+        removed = sorted(set(existing_gate.get(target, {})) - set(new_gate.get(target, {})))
+        if removed:
+            dropped[target] = removed
+    if not dropped:
+        return
+
+    if confirm_drops:
+        for target, zones in dropped.items():
+            print(f"--confirm-drops set: publishing anyway, dropping {target} zone(s) {zones} "
+                  f"that are currently published at s3://{bucket}/{key}")
+        return
+
+    for target, zones in dropped.items():
+        print(f"REFUSING to publish: would drop {target} zone(s) {zones} that are currently "
+              f"published at s3://{bucket}/{key} but absent from the new gate. "
+              f"Pass --confirm-drops if this is intentional.", file=sys.stderr)
+    raise SystemExit(1)
 
 
 def main() -> None:
@@ -102,6 +156,10 @@ def main() -> None:
                               "instead of the default (no-variant) key -- for a gate fitted under an "
                               "alternate base distribution (e.g. --elevation-nan on the validation harness). "
                               "Must match the --report's own stamped base_variant exactly.")
+    parser.add_argument("--confirm-drops", action="store_true",
+                         help="required to proceed if the new gate would drop a zone (tmax or tmin) "
+                              "that is present in the gate currently published at the target key. "
+                              "Omit unless you specifically intend to remove a zone.")
     args = parser.parse_args()
 
     if args.profile:
@@ -137,6 +195,9 @@ def main() -> None:
     key_band = f"{args.band_key}__{args.variant}" if args.variant else args.band_key
     key = f"downscaling/band_gates/{args.model_version}/{key_band}.json"
     client = boto3.client("s3")
+
+    _refuse_if_zones_would_be_dropped(client, bucket, key, gate, args.confirm_drops)
+
     client.put_object(
         Bucket=bucket, Key=key,
         Body=json.dumps(gate, indent=2).encode(), ContentType="application/json",
