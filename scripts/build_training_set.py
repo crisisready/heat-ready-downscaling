@@ -50,10 +50,17 @@ cgroup OOM documented in feedback_use_aws_for_heavy_jobs.md before for
 similarly-sized jobs. A small-scale run (one country, a short window, a
 handful of stations) is fine locally for testing.
 
-Batches by country: one ERA5-Land pull and one covariate-extraction pass
-per country (bbox covering that country's selected stations), not one pull
-per station -- the same amortization era5.py/vulnerability.py already rely
-on for per-project extraction.
+Batches by country, sub-batched by Koppen climate zone (2026-08-03): one
+ERA5-Land pull and one covariate-extraction pass per zone within a country
+(bbox covering that zone's stations only), not one pull per station -- the
+same amortization era5.py/vulnerability.py already rely on for per-project
+extraction. Sub-batching by zone (not just one bbox per country) matters
+most for --station-ids-file: a curated station set can span multiple zones
+across a country, and a single country-wide bbox for a geographically
+dispersed set can exceed CDS's own per-request cost limit (confirmed live
+2026-08-03) -- zones are naturally compact by construction, so this keeps
+every request's bbox small regardless of how spread out the country's full
+station set is.
 
 Usage:
     # Small test run, one country, short window, tight geographic cluster
@@ -1000,6 +1007,32 @@ def _group_stations_by_country(stations: list[dict]) -> dict[str, list[dict]]:
     return result
 
 
+def _group_stations_by_zone(stations: list[dict]) -> dict[str, list[dict]]:
+    """Group stations by Koppen climate zone (ghcn.koppen_climate_zone) --
+    used to sub-batch build_rows_for_country's ERA5-Land fetch so each
+    request's bounding box stays geographically tight, instead of one
+    country-wide bbox spanning every zone a curated station set happens to
+    touch. Confirmed live 2026-08-03 smoke-testing the pooled US+Mexicali
+    write: a country-wide bbox for a geographically dispersed station set
+    (the --station-ids-file path has no --max-bbox-extent-deg bounding at
+    all, by design -- it uses the curated list as-is) exceeded CDS's own
+    per-request cost limit ("cost limits exceeded... reduce your
+    selection"), even for as few as 2 widely-separated stations. Climate
+    zones are naturally geographically compact by construction (that's
+    what a zone boundary means) and are already the unit the curated
+    station lists themselves were assembled by, so batching by zone keeps
+    every request's bbox small regardless of how spread out the country's
+    full station set is. koppen_climate_zone is a local raster lookup (no
+    network call), so recomputing it here even though build_rows_for_
+    country's own per-station loop computes it again per row is cheap and
+    not worth threading through as a precomputed value."""
+    result: dict[str, list[dict]] = {}
+    for s in stations:
+        zone = ghcn.koppen_climate_zone(s["lat"], s["lon"])
+        result.setdefault(zone, []).append(s)
+    return result
+
+
 # Covariates most worth eyeballing before committing to a real write: the 4
 # columns ghcn.upsert_ghcn_training_rows was fixed (2026-08-03) to stop
 # silently dropping from every upsert, plus the other real-extraction-cost
@@ -1181,23 +1214,31 @@ def main() -> None:
             print(f"[{country}] no active stations found, skipping")
             continue
 
-        ghcn_checkpoint_path = (
-            os.path.join(args.ghcn_checkpoint_dir, f"ghcn_daily_{country}.jsonl")
-            if args.ghcn_checkpoint_dir else None
-        )
-        print(f"[{country}] building training rows for {len(stations)} station(s)...")
-        rows = build_rows_for_country(
-            country, stations, start_date, end_date, vuln_bucket, landscan_bucket, landscan_key,
-            ghcn_max_workers=args.ghcn_max_workers, ghcn_checkpoint_path=ghcn_checkpoint_path,
-        )
-        if rows and not args.dry_run:
-            ghcn.upsert_ghcn_training_rows(rows)
-        total_rows += len(rows)
-        if args.dry_run:
-            print(f"[{country}] --dry-run: would write {len(rows)} row(s), not uploading. "
-                  f"{_covariate_completeness_summary(rows)}")
-        else:
-            print(f"[{country}] wrote {len(rows)} row(s)")
+        # Sub-batch by climate zone, not one country-wide batch -- see
+        # _group_stations_by_zone's own docstring for why (a country-wide
+        # bbox for a geographically dispersed station set can exceed CDS's
+        # per-request cost limit, confirmed live 2026-08-03).
+        zone_batches = _group_stations_by_zone(stations)
+        for zone in sorted(zone_batches):
+            zone_stations = zone_batches[zone]
+            batch_label = f"{country}_{zone}"
+            ghcn_checkpoint_path = (
+                os.path.join(args.ghcn_checkpoint_dir, f"ghcn_daily_{batch_label}.jsonl")
+                if args.ghcn_checkpoint_dir else None
+            )
+            print(f"[{batch_label}] building training rows for {len(zone_stations)} station(s)...")
+            rows = build_rows_for_country(
+                batch_label, zone_stations, start_date, end_date, vuln_bucket, landscan_bucket, landscan_key,
+                ghcn_max_workers=args.ghcn_max_workers, ghcn_checkpoint_path=ghcn_checkpoint_path,
+            )
+            if rows and not args.dry_run:
+                ghcn.upsert_ghcn_training_rows(rows)
+            total_rows += len(rows)
+            if args.dry_run:
+                print(f"[{batch_label}] --dry-run: would write {len(rows)} row(s), not uploading. "
+                      f"{_covariate_completeness_summary(rows)}")
+            else:
+                print(f"[{batch_label}] wrote {len(rows)} row(s)")
 
     if args.dry_run:
         print(f"--dry-run: not uploading. {total_rows} total ghcn_training row(s) would be written "

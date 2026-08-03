@@ -933,6 +933,30 @@ class TestGroupStationsByCountry:
         assert bts._group_stations_by_country([]) == {}
 
 
+class TestGroupStationsByZone:
+    def test_groups_by_the_zone_koppen_climate_zone_returns(self):
+        stations = [
+            {"station_id": "A", "lat": 1.0, "lon": 1.0},
+            {"station_id": "B", "lat": 2.0, "lon": 2.0},
+            {"station_id": "C", "lat": 3.0, "lon": 3.0},
+        ]
+        zone_by_coords = {(1.0, 1.0): "Cfa", (2.0, 2.0): "Cfa", (3.0, 3.0): "BWh"}
+        with patch.object(bts.ghcn, "koppen_climate_zone",
+                          side_effect=lambda lat, lon: zone_by_coords[(lat, lon)]):
+            grouped = bts._group_stations_by_zone(stations)
+        assert {s["station_id"] for s in grouped["Cfa"]} == {"A", "B"}
+        assert {s["station_id"] for s in grouped["BWh"]} == {"C"}
+
+    def test_empty_input_returns_empty_dict(self):
+        assert bts._group_stations_by_zone([]) == {}
+
+    def test_calls_koppen_climate_zone_with_lat_then_lon(self):
+        stations = [{"station_id": "A", "lat": 33.4, "lon": -112.0}]
+        with patch.object(bts.ghcn, "koppen_climate_zone", return_value="BWh") as mock_zone:
+            bts._group_stations_by_zone(stations)
+        mock_zone.assert_called_once_with(33.4, -112.0)
+
+
 class TestCanopyResumeProjectId:
     def test_different_station_counts_get_different_project_ids(self):
         """A small test run (e.g. --max-stations-per-country 5) must not
@@ -1003,6 +1027,12 @@ class TestMainStationIdsFileAndDryRun:
             patch.object(bts, "build_rows_for_country",
                          side_effect=lambda country, stations, *a, **k: list(build_rows_return)),
             patch.object(bts.ghcn, "upsert_ghcn_training_rows"),
+            # Deterministic zone for every fixture station -- _group_stations_by_zone
+            # (2026-08-03) would otherwise call the REAL koppen_climate_zone,
+            # making these tests depend on real geographic raster data for a
+            # behavior (call-count/pass-through) that has nothing to do with
+            # which actual zone a station falls in.
+            patch.object(bts.ghcn, "koppen_climate_zone", return_value="BWh"),
         )
 
     def test_countries_and_station_ids_file_are_mutually_exclusive(self, monkeypatch, tmp_path, capsys):
@@ -1051,7 +1081,7 @@ class TestMainStationIdsFileAndDryRun:
             list_ghcn_stations_return=[_US_STATION, _UNRELATED_US_STATION, _MX_STATION],
             active_ids={"USW00023183", "MXM00076040", "USW00003812"},
         )
-        with mocks[0], mocks[1], mocks[2], mocks[3] as mock_list, mocks[4], mocks[5] as mock_build, mocks[6] as mock_upsert:
+        with mocks[0], mocks[1], mocks[2], mocks[3] as mock_list, mocks[4], mocks[5] as mock_build, mocks[6] as mock_upsert, mocks[7]:
             bts.main()
 
         mock_list.assert_called_once_with(["MX", "US"])
@@ -1071,7 +1101,7 @@ class TestMainStationIdsFileAndDryRun:
         mocks = self._patch_common(
             list_ghcn_stations_return=[_US_STATION], active_ids={"USW00023183"},
         )
-        with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], mocks[5], mocks[6]:
+        with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], mocks[5], mocks[6], mocks[7]:
             bts.main()
 
         stdout = capsys.readouterr().out
@@ -1088,7 +1118,7 @@ class TestMainStationIdsFileAndDryRun:
             list_ghcn_stations_return=[_US_STATION], active_ids={"USW00023183"},
             build_rows_return=[{"station_id": "USW00023183", "elevation_mean_m": 100.0}],
         )
-        with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], mocks[5] as mock_build, mocks[6] as mock_upsert:
+        with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], mocks[5] as mock_build, mocks[6] as mock_upsert, mocks[7]:
             bts.main()
 
         mock_build.assert_called_once()
@@ -1109,7 +1139,37 @@ class TestMainStationIdsFileAndDryRun:
             list_ghcn_stations_return=[_US_STATION], active_ids={"USW00023183"},
             build_rows_return=fake_rows,
         )
-        with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], mocks[5], mocks[6] as mock_upsert:
+        with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], mocks[5], mocks[6] as mock_upsert, mocks[7]:
             bts.main()
 
         mock_upsert.assert_called_once_with(fake_rows)
+
+    def test_stations_spanning_multiple_zones_in_one_country_get_separate_batches(self, monkeypatch, tmp_path):
+        """Regression test for the 2026-08-03 CDS 'cost limits exceeded'
+        finding: a single country-wide bbox for a geographically dispersed
+        --station-ids-file set can exceed CDS's per-request cost limit.
+        Two US stations in different zones must produce two separate
+        build_rows_for_country calls (one per zone-batch), each with its
+        own zone-scoped batch_label -- never one combined US-wide call."""
+        f = tmp_path / "ids.json"
+        f.write_text(json.dumps({"station_ids": ["USW00023183", "USW00003812"]}))
+        monkeypatch.setattr(sys, "argv", [
+            "build_training_set.py", "--station-ids-file", str(f),
+            "--start-date", "2016-06-01", "--end-date", "2016-06-30",
+        ])
+        mocks = self._patch_common(
+            list_ghcn_stations_return=[_US_STATION, _UNRELATED_US_STATION],
+            active_ids={"USW00023183", "USW00003812"},
+        )
+        zone_by_id = {"USW00023183": "BWh", "USW00003812": "Csa"}
+        with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], \
+             mocks[5] as mock_build, mocks[6], \
+             patch.object(bts.ghcn, "koppen_climate_zone",
+                          side_effect=lambda lat, lon: zone_by_id[
+                              "USW00023183" if (lat, lon) == (_US_STATION["lat"], _US_STATION["lon"]) else "USW00003812"
+                          ]):
+            bts.main()
+
+        assert mock_build.call_count == 2
+        batch_labels = sorted(call.args[0] for call in mock_build.call_args_list)
+        assert batch_labels == ["US_BWh", "US_Csa"]
