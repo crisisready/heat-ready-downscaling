@@ -1017,20 +1017,60 @@ def _group_stations_by_zone(stations: list[dict]) -> dict[str, list[dict]]:
     (the --station-ids-file path has no --max-bbox-extent-deg bounding at
     all, by design -- it uses the curated list as-is) exceeded CDS's own
     per-request cost limit ("cost limits exceeded... reduce your
-    selection"), even for as few as 2 widely-separated stations. Climate
-    zones are naturally geographically compact by construction (that's
-    what a zone boundary means) and are already the unit the curated
-    station lists themselves were assembled by, so batching by zone keeps
-    every request's bbox small regardless of how spread out the country's
-    full station set is. koppen_climate_zone is a local raster lookup (no
-    network call), so recomputing it here even though build_rows_for_
-    country's own per-station loop computes it again per row is cheap and
-    not worth threading through as a precomputed value."""
+    selection"). Climate zones are naturally geographically compact by
+    construction and are already the unit the curated station lists
+    themselves were assembled by, so batching by zone reduces every
+    request's bbox versus one country-wide batch -- but zone alone turned
+    out NOT to be sufficient on its own (a single Koppen zone like BWh can
+    still span a wide real area): _chunk_stations_by_extent runs on top of
+    this, per zone, for the actual bbox-size guarantee. koppen_climate_zone
+    is a local raster lookup (no network call), so recomputing it here even
+    though build_rows_for_country's own per-station loop computes it again
+    per row is cheap and not worth threading through as a precomputed
+    value."""
     result: dict[str, list[dict]] = {}
     for s in stations:
         zone = ghcn.koppen_climate_zone(s["lat"], s["lon"])
         result.setdefault(zone, []).append(s)
     return result
+
+
+# Default max raw station spread (in degrees, before stations_bbox's own
+# _BBOX_PAD_DEG padding) per ERA5-Land request chunk. Deliberately smaller
+# than _BBOX_PAD_DEG*2 -- confirmed live 2026-08-03 that _group_stations_by_
+# zone alone is NOT sufficient: 2 same-zone, same-50km-cluster Mexicali
+# stations (raw spread ~1.4deg lat x 0.33deg lon) still tripped CDS's
+# "cost limits exceeded" rejection once padded to a 2.37deg x 1.33deg bbox
+# -- padding, not station spread, was doing most of that damage (0.5deg pad
+# on each side alone contributes 1.0deg of the final extent in any
+# dimension). This constant bounds the RAW station spread going into
+# stations_bbox, not the final padded bbox -- see _chunk_stations_by_extent.
+_ERA5_MAX_CHUNK_EXTENT_DEG = 0.5
+
+
+def _chunk_stations_by_extent(stations: list[dict], max_extent_deg: float) -> list[list[dict]]:
+    """Partition stations into geographically-bounded groups, each spanning
+    at most ~max_extent_deg of raw lon/lat spread -- unlike
+    _select_geographically_stratified (which CAPS a station count, dropping
+    the rest), every station is kept here; this only controls how many
+    separate ERA5-Land requests they get split across. Needed alongside
+    _group_stations_by_zone: a climate zone alone is not reliably small
+    enough (confirmed live 2026-08-03 -- see _ERA5_MAX_CHUNK_EXTENT_DEG's
+    own comment), so this bounds the actual station spread directly,
+    independent of zone.
+
+    Grid-based: stations are bucketed into max_extent_deg x max_extent_deg
+    cells -- cheap, deterministic, and every group's raw spread is bounded
+    by construction (a cell's own width), not by iteratively measuring and
+    re-splitting an oversized group."""
+    if not stations:
+        return []
+    cells: dict[tuple[int, int], list[dict]] = {}
+    for s in stations:
+        cx = int(s["lon"] // max_extent_deg)
+        cy = int(s["lat"] // max_extent_deg)
+        cells.setdefault((cx, cy), []).append(s)
+    return list(cells.values())
 
 
 # Covariates most worth eyeballing before committing to a real write: the 4
@@ -1132,6 +1172,12 @@ def main() -> None:
                               "a killed process restarts only the stations not yet fetched, rather than "
                               "re-paying every NOAA round-trip. Omit for no cross-run resume (fine for a "
                               "small/test run).")
+    parser.add_argument("--era5-max-chunk-extent-deg", type=float, default=_ERA5_MAX_CHUNK_EXTENT_DEG,
+                         help="Max raw lon/lat spread (degrees, before stations_bbox's own padding) of "
+                              "stations in one ERA5-Land request -- each zone-batch is further split into "
+                              "chunks bounded by this (see _chunk_stations_by_extent). Lower this if CDS "
+                              "still rejects a request as too large; a single climate zone is not always "
+                              "small enough on its own (confirmed live 2026-08-03).")
     parser.add_argument("--dry-run", action="store_true",
                          help="Run the full fetch/covariate/row-build pipeline exactly as a real build "
                               "would, but skip the final ghcn.upsert_ghcn_training_rows call -- print a "
@@ -1214,31 +1260,35 @@ def main() -> None:
             print(f"[{country}] no active stations found, skipping")
             continue
 
-        # Sub-batch by climate zone, not one country-wide batch -- see
-        # _group_stations_by_zone's own docstring for why (a country-wide
-        # bbox for a geographically dispersed station set can exceed CDS's
-        # per-request cost limit, confirmed live 2026-08-03).
+        # Sub-batch by climate zone, then further by raw geographic spread --
+        # see _group_stations_by_zone's and _chunk_stations_by_extent's own
+        # docstrings for why both are needed (a country-wide, or even a
+        # single-zone, bbox can exceed CDS's per-request cost limit,
+        # confirmed live 2026-08-03).
         zone_batches = _group_stations_by_zone(stations)
         for zone in sorted(zone_batches):
-            zone_stations = zone_batches[zone]
-            batch_label = f"{country}_{zone}"
-            ghcn_checkpoint_path = (
-                os.path.join(args.ghcn_checkpoint_dir, f"ghcn_daily_{batch_label}.jsonl")
-                if args.ghcn_checkpoint_dir else None
-            )
-            print(f"[{batch_label}] building training rows for {len(zone_stations)} station(s)...")
-            rows = build_rows_for_country(
-                batch_label, zone_stations, start_date, end_date, vuln_bucket, landscan_bucket, landscan_key,
-                ghcn_max_workers=args.ghcn_max_workers, ghcn_checkpoint_path=ghcn_checkpoint_path,
-            )
-            if rows and not args.dry_run:
-                ghcn.upsert_ghcn_training_rows(rows)
-            total_rows += len(rows)
-            if args.dry_run:
-                print(f"[{batch_label}] --dry-run: would write {len(rows)} row(s), not uploading. "
-                      f"{_covariate_completeness_summary(rows)}")
-            else:
-                print(f"[{batch_label}] wrote {len(rows)} row(s)")
+            extent_chunks = _chunk_stations_by_extent(zone_batches[zone], args.era5_max_chunk_extent_deg)
+            for chunk_i, chunk_stations in enumerate(extent_chunks):
+                batch_label = (
+                    f"{country}_{zone}" if len(extent_chunks) == 1 else f"{country}_{zone}_c{chunk_i}"
+                )
+                ghcn_checkpoint_path = (
+                    os.path.join(args.ghcn_checkpoint_dir, f"ghcn_daily_{batch_label}.jsonl")
+                    if args.ghcn_checkpoint_dir else None
+                )
+                print(f"[{batch_label}] building training rows for {len(chunk_stations)} station(s)...")
+                rows = build_rows_for_country(
+                    batch_label, chunk_stations, start_date, end_date, vuln_bucket, landscan_bucket, landscan_key,
+                    ghcn_max_workers=args.ghcn_max_workers, ghcn_checkpoint_path=ghcn_checkpoint_path,
+                )
+                if rows and not args.dry_run:
+                    ghcn.upsert_ghcn_training_rows(rows)
+                total_rows += len(rows)
+                if args.dry_run:
+                    print(f"[{batch_label}] --dry-run: would write {len(rows)} row(s), not uploading. "
+                          f"{_covariate_completeness_summary(rows)}")
+                else:
+                    print(f"[{batch_label}] wrote {len(rows)} row(s)")
 
     if args.dry_run:
         print(f"--dry-run: not uploading. {total_rows} total ghcn_training row(s) would be written "
