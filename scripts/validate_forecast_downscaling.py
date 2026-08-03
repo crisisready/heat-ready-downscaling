@@ -403,10 +403,17 @@ def main() -> None:
     # identical --elevation-nan/--zones args for the full reasoning.
     parser.add_argument("--elevation-nan", action="store_true",
                          help="disable Open-Meteo's elevation lapse-rate correction on every request. "
-                              "Stamps base_variant='native_noelev' into the report. NOTE: this endpoint is "
-                              "already pinned to models=gfs_seamless, not production's best_match/ICON-D2 -- "
-                              "see fetch_lead_daily_for_station's own docstring for what this variant does "
+                              "Stamps base_variant='native_noelev' into the report by default (override "
+                              "with --base-variant). NOTE: this endpoint is already pinned to "
+                              "models=gfs_seamless, not production's best_match/ICON-D2 -- see "
+                              "fetch_lead_daily_for_station's own docstring for what this variant does "
                               "and doesn't cover.")
+    parser.add_argument("--base-variant", default=None,
+                         help="override the base_variant string stamped into the report -- see "
+                              "validate_lagfill_downscaling.py's identical flag for the full reasoning "
+                              "(required whenever fitting a base distribution other than the ones already "
+                              "using 'native_noelev', e.g. Madrid's coarser native resolution). Ignored "
+                              "(must not be set) without --elevation-nan.")
     parser.add_argument("--zones", default=None,
                          help="comma-separated Koppen climate_zone(s) to restrict validation to (e.g. Cfb) -- "
                               "default is unscoped, every zone with data.")
@@ -417,7 +424,10 @@ def main() -> None:
     if args.zones and not zones:
         raise SystemExit(f"--zones {args.zones!r} parsed to an empty zone list -- refusing to "
                           "silently fall back to an unscoped (global) run")
-    base_variant = "native_noelev" if args.elevation_nan else None
+    if args.base_variant and not args.elevation_nan:
+        raise SystemExit("--base-variant requires --elevation-nan -- base_variant only applies to "
+                          "the elevation-nan request-config path")
+    base_variant = (args.base_variant or "native_noelev") if args.elevation_nan else None
 
     if not (1 <= args.lead_days <= 7):
         raise SystemExit("--lead-days must be 1-7 (production's FORECAST_DAYS horizon)")

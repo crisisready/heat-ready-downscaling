@@ -467,7 +467,18 @@ def main() -> None:
                          help="disable Open-Meteo's elevation lapse-rate correction on every NRT request "
                               "(single-point requests, so a bare elevation=nan is correct -- see "
                               "_fetch_nrt_daily_for_station_tz's own docstring). Stamps base_variant="
-                              "'native_noelev' into the report.")
+                              "'native_noelev' into the report by default (override with --base-variant).")
+    parser.add_argument("--base-variant", default=None,
+                         help="override the base_variant string stamped into the report (default "
+                              "'native_noelev' when --elevation-nan is set). REQUIRED whenever this run "
+                              "is fitting a base distribution that differs from the ones already using "
+                              "'native_noelev' -- e.g. a different measured native resolution for a "
+                              "different region (2026-08-03: Madrid's ~0.0625deg vs Paris/London's "
+                              "~0.02deg, which is why manager.py's override dict gives Madrid its own "
+                              "'native_0063_noelev' string). Reusing 'native_noelev' for a genuinely "
+                              "different base would let publish_band_gate.py publish a wrong-base gate "
+                              "under a name that matches, defeating the entire point of the variant "
+                              "check. Ignored (must not be set) without --elevation-nan.")
     parser.add_argument("--zones", default=None,
                          help="comma-separated Koppen climate_zone(s) to restrict validation to (e.g. Cfb) -- "
                               "default is unscoped, every zone with data. Use with --elevation-nan to refit "
@@ -481,7 +492,10 @@ def main() -> None:
     if args.zones and not zones:
         raise SystemExit(f"--zones {args.zones!r} parsed to an empty zone list -- refusing to "
                           "silently fall back to an unscoped (global) run")
-    base_variant = "native_noelev" if args.elevation_nan else None
+    if args.base_variant and not args.elevation_nan:
+        raise SystemExit("--base-variant requires --elevation-nan -- base_variant only applies to "
+                          "the elevation-nan request-config path")
+    base_variant = (args.base_variant or "native_noelev") if args.elevation_nan else None
 
     if args.phase == "dump-rows":
         rows = load_validation_rows(args.sample or None, args.seed, zones=zones)
