@@ -81,6 +81,42 @@ class TestPublishBandGateCli:
         assert result.returncode != 0
         assert "lag_fill" in result.stderr and "forecast_lead3" in result.stderr
 
+    def test_matching_variant_proceeds_and_prints_it(self, tmp_path):
+        """2026-08-03, gate-variant scoping."""
+        variant_report = {**_VALID_REPORT, "base_variant": "native_noelev"}
+        report_path = _write_report(tmp_path, variant_report)
+        result = subprocess.run(
+            [sys.executable, _SCRIPT, "--report", report_path, "--model-version", "ds-test-1",
+             "--band-key", "lag_fill", "--variant", "native_noelev", "--dry-run"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "variant=native_noelev" in result.stdout
+
+    def test_variant_fitted_report_without_variant_flag_fails_fast(self, tmp_path):
+        """The dangerous direction (see gates.build_gate's own docstring):
+        a native_noelev-fitted report must not silently publish to the
+        default (no-variant) key."""
+        variant_report = {**_VALID_REPORT, "base_variant": "native_noelev"}
+        report_path = _write_report(tmp_path, variant_report)
+        result = subprocess.run(
+            [sys.executable, _SCRIPT, "--report", report_path, "--model-version", "ds-test-1",
+             "--band-key", "lag_fill", "--dry-run"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode != 0
+        assert "native_noelev" in result.stderr
+
+    def test_default_report_with_variant_flag_fails_fast(self, tmp_path):
+        report_path = _write_report(tmp_path, _VALID_REPORT)
+        result = subprocess.run(
+            [sys.executable, _SCRIPT, "--report", report_path, "--model-version", "ds-test-1",
+             "--band-key", "lag_fill", "--variant", "native_noelev", "--dry-run"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode != 0
+        assert "native_noelev" in result.stderr
+
     def test_malformed_report_fails_validate_gate(self, tmp_path):
         """A report whose by_target values aren't real score_band metrics
         shapes still produces SOME gate dict from build_gate, but
