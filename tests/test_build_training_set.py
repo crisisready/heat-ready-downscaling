@@ -957,6 +957,58 @@ class TestGroupStationsByZone:
         mock_zone.assert_called_once_with(33.4, -112.0)
 
 
+class TestChunkStationsByExtent:
+    def test_empty_input_returns_empty_list(self):
+        assert bts._chunk_stations_by_extent([], 0.5) == []
+
+    def test_tightly_clustered_stations_stay_in_one_chunk(self):
+        stations = [
+            {"station_id": "A", "lat": 32.40, "lon": -115.10},
+            {"station_id": "B", "lat": 32.41, "lon": -115.11},
+        ]
+        chunks = bts._chunk_stations_by_extent(stations, 0.5)
+        assert len(chunks) == 1
+        assert {s["station_id"] for s in chunks[0]} == {"A", "B"}
+
+    def test_widely_separated_stations_split_into_different_chunks(self):
+        """Regression test for the real 2026-08-03 finding: two same-zone
+        Mexicali stations ~150km apart (raw spread ~1.4deg lat) still
+        tripped CDS's cost limit once padded -- a bound tighter than their
+        actual separation must put them in separate chunks."""
+        stations = [
+            {"station_id": "MXM00076040", "lat": 32.4, "lon": -115.1833},
+            {"station_id": "MXM00076055", "lat": 31.033, "lon": -114.85},
+        ]
+        chunks = bts._chunk_stations_by_extent(stations, 0.5)
+        assert len(chunks) == 2
+        all_ids = {s["station_id"] for chunk in chunks for s in chunk}
+        assert all_ids == {"MXM00076040", "MXM00076055"}  # every station kept, none dropped
+
+    def test_every_station_is_kept_never_dropped(self):
+        """Unlike _select_geographically_stratified/_compact (which cap and
+        drop), chunking must never lose a station -- it only controls how
+        many separate ERA5 requests they're split across."""
+        stations = [{"station_id": f"S{i}", "lat": float(i), "lon": float(i)} for i in range(10)]
+        chunks = bts._chunk_stations_by_extent(stations, 0.5)
+        all_ids = {s["station_id"] for chunk in chunks for s in chunk}
+        assert all_ids == {f"S{i}" for i in range(10)}
+
+    def test_each_chunk_bbox_stays_within_the_extent_bound(self):
+        import random
+        random.seed(20260803)
+        stations = [
+            {"station_id": f"S{i}", "lat": random.uniform(0, 5), "lon": random.uniform(0, 5)}
+            for i in range(50)
+        ]
+        max_extent = 0.5
+        chunks = bts._chunk_stations_by_extent(stations, max_extent)
+        for chunk in chunks:
+            lats = [s["lat"] for s in chunk]
+            lons = [s["lon"] for s in chunk]
+            assert max(lats) - min(lats) <= max_extent
+            assert max(lons) - min(lons) <= max_extent
+
+
 class TestCanopyResumeProjectId:
     def test_different_station_counts_get_different_project_ids(self):
         """A small test run (e.g. --max-stations-per-country 5) must not
@@ -1173,3 +1225,37 @@ class TestMainStationIdsFileAndDryRun:
         assert mock_build.call_count == 2
         batch_labels = sorted(call.args[0] for call in mock_build.call_args_list)
         assert batch_labels == ["US_BWh", "US_Csa"]
+
+    def test_widely_separated_stations_in_the_same_zone_get_separate_extent_chunks(self, monkeypatch, tmp_path):
+        """Regression test for the real 2026-08-03 finding: same-zone
+        stations that are still geographically far apart (modeled on the
+        actual Mexicali pair -- ~1.4deg lat apart, ~150km) must NOT be
+        combined into one ERA5 batch just because they share a Koppen zone
+        -- _chunk_stations_by_extent must split them, with batch labels
+        gaining a _cN suffix once a zone splits. Deliberately uses stations
+        genuinely far apart (not just incidentally on opposite sides of a
+        grid boundary) so this test's outcome doesn't depend on exact grid
+        alignment."""
+        far_station_1 = {"station_id": "USW00090001", "lon": -115.1833, "lat": 32.4, "elevation_m": 10.0, "name": "FAR1"}
+        far_station_2 = {"station_id": "USW00090002", "lon": -114.85, "lat": 31.033, "elevation_m": 10.0, "name": "FAR2"}
+        f = tmp_path / "ids.json"
+        f.write_text(json.dumps({"station_ids": ["USW00090001", "USW00090002"]}))
+        monkeypatch.setattr(sys, "argv", [
+            "build_training_set.py", "--station-ids-file", str(f),
+            "--start-date", "2016-06-01", "--end-date", "2016-06-30",
+            "--era5-max-chunk-extent-deg", "0.5",
+        ])
+        mocks = self._patch_common(
+            list_ghcn_stations_return=[far_station_1, far_station_2],
+            active_ids={"USW00090001", "USW00090002"},
+        )
+        with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], \
+             mocks[5] as mock_build, mocks[6], mocks[7]:
+            # _patch_common's mocks[7] returns "BWh" for every station regardless
+            # of coordinates -- both fixture stations land in the same zone here,
+            # so any split must come from _chunk_stations_by_extent, not zone.
+            bts.main()
+
+        assert mock_build.call_count == 2
+        batch_labels = sorted(call.args[0] for call in mock_build.call_args_list)
+        assert batch_labels == ["US_BWh_c0", "US_BWh_c1"]
