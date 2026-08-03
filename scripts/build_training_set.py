@@ -85,6 +85,18 @@ Usage:
     # (_era5_download_lock) -- CDS's own account-level concurrency limit
     # means simultaneous submissions risk queuing or rejection, not a real
     # speedup, so parallelizing that specific step buys nothing anyway.
+
+    # An explicit, pre-curated station set (2026-08-03) -- e.g. a
+    # downscaling-confidence gap-fill analysis that already picked exactly
+    # which stations to add, across one or more countries in a single pooled
+    # write. Bypasses --countries/--max-stations-per-country/--selection-mode/
+    # --max-bbox-extent-deg entirely; countries are derived from the IDs'
+    # own FIPS prefixes and still batch ERA5/covariate fetches per country.
+    # --dry-run runs the identical pipeline (same real CDS/S3 cost) but
+    # skips the final ghcn_training write, printing a per-country row count
+    # and covariate-completeness summary instead -- always run this first.
+    python scripts/build_training_set.py --station-ids-file /tmp/pooled_station_ids.json \
+        --start-date 2016-06-01 --end-date 2023-12-31 --profile nish-climateverse --dry-run
 """
 
 from __future__ import annotations
@@ -93,6 +105,7 @@ import argparse
 import contextlib
 import fcntl
 import hashlib
+import json
 import logging
 import math
 import os
@@ -757,34 +770,43 @@ def snapshot_covariates_for_stations(
 
 def build_rows_for_country(
     country: str, stations: list[dict], start_date: date, end_date: date, vuln_bucket: str,
-    landscan_bucket: str, landscan_key: str,
+    landscan_bucket: str, landscan_key: str, *,
+    ghcn_max_workers: int = 8, ghcn_checkpoint_path: str | None = None,
 ) -> list[dict]:
     """Assemble ghcn_training rows for every station in one country/batch:
     fetch GHCN + ERA5-Land + covariates once per batch, align each
     station's obs window empirically, compute the regression target
-    (delta_tmax_c/delta_tmin_c), and label region/climate_zone."""
+    (delta_tmax_c/delta_tmin_c), and label region/climate_zone.
+
+    ghcn_max_workers/ghcn_checkpoint_path pass straight through to
+    ghcn.fetch_ghcn_daily_bulk_concurrent (adaptive-concurrency GHCN fetch,
+    2026-08-03 -- see that function's own docstring)."""
     # Computed once here and shared with both calls below -- they'd otherwise
     # each independently rebuild the identical bbox/GeoJSON from this same
     # station list.
     bbox = stations_bbox(stations)
     geojson_obj = stations_to_geojson(stations)
 
-    # Run concurrently, not sequentially -- these two calls are completely
-    # independent (covariates/LST need no ERA5 output, ERA5 needs no
-    # covariate output), but running them one after the other means a
-    # country spends its ENTIRE ERA5 wait (which, serialized with every
-    # other country through _era5_download_lock, is a real, large chunk of
-    # wall-clock time -- confirmed live 2026-07-18 via py-spy: 4 of 5
-    # concurrent country processes sat 100% idle blocked on that lock,
-    # doing no covariate/LST work they could have started immediately)
-    # unable to make ANY progress on the CPU-bound covariate/LST work that
-    # has nothing to do with ERA5 at all. A 2-worker thread pool lets one
-    # thread sit in ERA5's blocking network wait (which releases the GIL)
-    # while the other does real covariate/LST work, cutting a country's
-    # own wall-clock time toward max(era5_wait, covariate_wait) instead of
-    # their sum -- and, combined across all 5 concurrent country
-    # processes, means the shared ERA5 lock's queue no longer stalls
-    # everyone's covariate/LST work along with it.
+    # Run all three concurrently, not sequentially -- ERA5, covariates/LST,
+    # and the per-station GHCN fetch are completely independent of each
+    # other (none needs another's output), but running them one after
+    # another means a country spends its ENTIRE ERA5 wait (which,
+    # serialized with every other country through _era5_download_lock, is a
+    # real, large chunk of wall-clock time -- confirmed live 2026-07-18 via
+    # py-spy: 4 of 5 concurrent country processes sat 100% idle blocked on
+    # that lock, doing no covariate/LST work they could have started
+    # immediately) unable to make ANY progress on the CPU-bound covariate/
+    # LST work or the (equally independent) GHCN fetch. A 3-worker thread
+    # pool lets one thread sit in ERA5's blocking network wait (which
+    # releases the GIL) while another does real covariate/LST work and a
+    # third runs the GHCN fetch's OWN internal thread pool (fetch_all,
+    # bounded by ghcn_max_workers) -- cutting a country's own wall-clock
+    # time toward max(era5_wait, covariate_wait, ghcn_wait) instead of their
+    # sum. Added 2026-08-03 alongside fetch_ghcn_daily_bulk_concurrent --
+    # the GHCN fetch used to be a separate, fully sequential (one station at
+    # a time) loop after this block, which for a large pooled station set
+    # (679 US+Mexicali stations) meant real wall-clock time nothing else in
+    # this function could overlap with.
     def _timed_era5():
         t0 = time.monotonic()
         logger.info("[%s] ERA5 fetch starting", country)
@@ -802,16 +824,30 @@ def build_rows_for_country(
         logger.info("[%s] covariate/LST snapshot finished in %.1fs", country, time.monotonic() - t0)
         return result
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    def _timed_ghcn():
+        t0 = time.monotonic()
+        logger.info("[%s] GHCN daily fetch starting (%d station(s), max_workers=%d)",
+                    country, len(stations), ghcn_max_workers)
+        result = ghcn.fetch_ghcn_daily_bulk_concurrent(
+            [s["station_id"] for s in stations], start_date, end_date,
+            max_workers=ghcn_max_workers, checkpoint_path=ghcn_checkpoint_path,
+        )
+        logger.info("[%s] GHCN daily fetch finished in %.1fs (%d/%d station(s) returned rows)",
+                    country, time.monotonic() - t0, len(result), len(stations))
+        return result
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
         era5_future = executor.submit(_timed_era5)
         covariates_future = executor.submit(_timed_covariates)
+        ghcn_future = executor.submit(_timed_ghcn)
         grid_by_station, humidity_by_station, nighttime_wind_by_station = era5_future.result()
         covariates_by_station = covariates_future.result()
+        ghcn_by_station = ghcn_future.result()
 
     rows = []
     for s in stations:
         sid = s["station_id"]
-        station_series = ghcn.fetch_ghcn_daily_bulk(sid, start_date, end_date)
+        station_series = ghcn_by_station.get(sid, [])
         if not station_series:
             continue
 
@@ -964,6 +1000,36 @@ def _group_stations_by_country(stations: list[dict]) -> dict[str, list[dict]]:
     return result
 
 
+# Covariates most worth eyeballing before committing to a real write: the 4
+# columns ghcn.upsert_ghcn_training_rows was fixed (2026-08-03) to stop
+# silently dropping from every upsert, plus the other real-extraction-cost
+# covariates most likely to be silently sparse for a new station set.
+# koppen_main_group_code is deliberately included even though this script
+# never computes it (build_rows_for_country only computes climate_zone) --
+# it will always show 0/N here, a standing reminder of that known,
+# separate gap rather than a silent omission from the summary.
+_COVARIATE_COMPLETENESS_COLUMNS = (
+    "elevation_mean_m", "slope_deg", "aspect_deg", "koppen_main_group_code",
+    "lst_warm_season_anomaly_c", "pop_density_per_km2", "nighttime_wind_ms",
+    "grid_specific_humidity_kgkg",
+)
+
+
+def _covariate_completeness_summary(rows: list[dict]) -> str:
+    """One-line %-non-null summary per covariate, for --dry-run's preview --
+    lets a human eyeball data quality before committing to the actual
+    write, the same role the printed gate/zone summary plays for
+    publish_band_gate.py's own --dry-run."""
+    if not rows:
+        return "no rows"
+    n = len(rows)
+    parts = [
+        f"{col}={sum(1 for r in rows if r.get(col) is not None)}/{n}"
+        for col in _COVARIATE_COMPLETENESS_COLUMNS
+    ]
+    return "covariate completeness: " + ", ".join(parts)
+
+
 def main() -> None:
     # This module and every extractor it calls (era5.py, lst.py, vulnerability.py,
     # ghcn.py) use the standard logging module, but nothing in the plain-script
@@ -979,7 +1045,24 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--countries", required=True, help="Comma-separated FIPS country codes (e.g. US,GM,FR,AS).")
+    parser.add_argument("--countries", default=None,
+                         help="Comma-separated FIPS country codes (e.g. US,GM,FR,AS) -- this script "
+                              "selects its own stations per country. Exactly one of --countries or "
+                              "--station-ids-file is required.")
+    parser.add_argument("--station-ids-file", default=None,
+                         help="JSON file with a top-level \"station_ids\" list of bare GHCN station-id "
+                              "strings -- an explicit, pre-curated station set to build/write (e.g. one "
+                              "assembled by a downscaling-confidence gap-fill analysis), bypassing this "
+                              "script's own per-country selection entirely. Countries are derived from "
+                              "the IDs' own FIPS prefixes (ghcn.region_from_station_id) -- multiple "
+                              "countries in one file is fine and still batches ERA5/covariate fetches "
+                              "per country exactly as --countries does. Station metadata (lon/lat/"
+                              "elevation_m/name) is looked up fresh from ghcn.list_ghcn_stations for the "
+                              "derived countries, not read from this file -- the file is only "
+                              "the *which stations*, never a second source of truth for their location "
+                              "data. Exactly one of --countries or --station-ids-file is required. "
+                              "Not compatible with --max-stations-per-country/--max-bbox-extent-deg "
+                              "(the file's station list is used in full, not re-selected/re-capped).")
     parser.add_argument("--start-date", required=True, help="YYYY-MM-DD")
     parser.add_argument("--end-date", required=True, help="YYYY-MM-DD")
     parser.add_argument("--max-stations-per-country", type=int, default=None,
@@ -1003,7 +1086,35 @@ def main() -> None:
                               "anyway. Confirmed live 2026-07-18: 3 stations with no recent data wasted "
                               "a full ERA5-Land pull before returning 0 rows.")
     parser.add_argument("--profile", default=None, help="Named AWS profile (omit on EC2 with an attached IAM role).")
+    parser.add_argument("--ghcn-max-workers", type=int, default=8,
+                         help="Concurrent NOAA Access Data Service requests per country batch "
+                              "(ghcn.fetch_ghcn_daily_bulk_concurrent's adaptive-concurrency pool -- see "
+                              "that function's own docstring). Default 8. Raise this for a large pooled "
+                              "run on a big enough instance; the throttle backs off on its own if NOAA "
+                              "starts rejecting/slowing requests, so a too-high value degrades rather "
+                              "than fails outright.")
+    parser.add_argument("--ghcn-checkpoint-dir", default=None,
+                         help="Directory for a per-country GHCN-fetch checkpoint file "
+                              "(ghcn_daily_{country}.jsonl) -- makes a large pooled run crash-resumable: "
+                              "a killed process restarts only the stations not yet fetched, rather than "
+                              "re-paying every NOAA round-trip. Omit for no cross-run resume (fine for a "
+                              "small/test run).")
+    parser.add_argument("--dry-run", action="store_true",
+                         help="Run the full fetch/covariate/row-build pipeline exactly as a real build "
+                              "would, but skip the final ghcn.upsert_ghcn_training_rows call -- print a "
+                              "per-country row count and covariate-completeness summary instead of "
+                              "writing anything. Costs the same real CDS/S3/network time as a real run "
+                              "(there is no cheap way to preview rows without actually fetching/"
+                              "computing them) -- this only gates the DB write itself, matching "
+                              "publish_band_gate.py's own dry-run/human-decision idiom for the one step "
+                              "that actually commits something.")
     args = parser.parse_args()
+
+    if bool(args.countries) == bool(args.station_ids_file):
+        parser.error("exactly one of --countries or --station-ids-file is required")
+    if args.station_ids_file and (args.max_stations_per_country is not None or args.max_bbox_extent_deg is not None):
+        parser.error("--max-stations-per-country/--max-bbox-extent-deg are not compatible with "
+                      "--station-ids-file (the file's station list is used in full)")
 
     if args.profile:
         # Unconditional override, not setdefault -- matches scripts/deploy.py's
@@ -1015,7 +1126,17 @@ def main() -> None:
 
     start_date = datetime.strptime(args.start_date, "%Y-%m-%d").date()
     end_date = datetime.strptime(args.end_date, "%Y-%m-%d").date()
-    countries = [c.strip().upper() for c in args.countries.split(",") if c.strip()]
+
+    requested_ids = None
+    if args.station_ids_file:
+        with open(args.station_ids_file) as f:
+            requested_ids = set(json.load(f)["station_ids"])
+        countries = sorted({ghcn.region_from_station_id(sid) for sid in requested_ids})
+        print(f"--station-ids-file: {len(requested_ids)} requested station(s) across {len(countries)} "
+              f"countr(y/ies) ({','.join(countries)})")
+    else:
+        countries = [c.strip().upper() for c in args.countries.split(",") if c.strip()]
+
     vuln_bucket = _bucket_from_credentials()
     landscan_bucket, landscan_key = _landscan_from_credentials()
 
@@ -1027,6 +1148,15 @@ def main() -> None:
     # once per country in this loop would redundantly re-download/re-parse
     # the same multi-MB file N times for an N-country build.
     all_stations = ghcn.list_ghcn_stations(countries)
+
+    if requested_ids is not None:
+        found_ids = {s["station_id"] for s in all_stations}
+        missing = requested_ids - found_ids
+        if missing:
+            print(f"WARNING: {len(missing)} requested station_id(s) not found in NOAA's inventory for "
+                  f"{countries}, skipping: {sorted(missing)}")
+        all_stations = [s for s in all_stations if s["station_id"] in requested_ids]
+
     stations_by_country = _group_stations_by_country(all_stations)
 
     min_last_year = args.min_last_year if args.min_last_year is not None else end_date.year
@@ -1051,16 +1181,29 @@ def main() -> None:
             print(f"[{country}] no active stations found, skipping")
             continue
 
+        ghcn_checkpoint_path = (
+            os.path.join(args.ghcn_checkpoint_dir, f"ghcn_daily_{country}.jsonl")
+            if args.ghcn_checkpoint_dir else None
+        )
         print(f"[{country}] building training rows for {len(stations)} station(s)...")
         rows = build_rows_for_country(
             country, stations, start_date, end_date, vuln_bucket, landscan_bucket, landscan_key,
+            ghcn_max_workers=args.ghcn_max_workers, ghcn_checkpoint_path=ghcn_checkpoint_path,
         )
-        if rows:
+        if rows and not args.dry_run:
             ghcn.upsert_ghcn_training_rows(rows)
         total_rows += len(rows)
-        print(f"[{country}] wrote {len(rows)} row(s)")
+        if args.dry_run:
+            print(f"[{country}] --dry-run: would write {len(rows)} row(s), not uploading. "
+                  f"{_covariate_completeness_summary(rows)}")
+        else:
+            print(f"[{country}] wrote {len(rows)} row(s)")
 
-    print(f"Done. {total_rows} total ghcn_training row(s) across {len(countries)} countr(y/ies).")
+    if args.dry_run:
+        print(f"--dry-run: not uploading. {total_rows} total ghcn_training row(s) would be written "
+              f"across {len(countries)} countr(y/ies).")
+    else:
+        print(f"Done. {total_rows} total ghcn_training row(s) across {len(countries)} countr(y/ies).")
 
 
 if __name__ == "__main__":
