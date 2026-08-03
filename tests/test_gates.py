@@ -211,6 +211,81 @@ class TestBuildGateBandKeyMismatch:
         assert gate["tmax"] == {"Cfb": True}
 
 
+class TestBuildGateVariantMismatch:
+    """2026-08-03, gate-variant scoping. UNLIKE band_key, this check is
+    NOT skippable by omission -- both directions of mismatch are checked
+    unconditionally (see build_gate's own docstring for why the
+    variant-fitted-report-to-default-key direction is the dangerous one)."""
+
+    def test_matching_variant_proceeds(self):
+        report = {"base_variant": "native_noelev", "by_target": {"tmax": {"Cfb": _metrics(True)}, "tmin": {}}}
+        gate = gates.build_gate(report, variant="native_noelev")
+        assert gate["tmax"] == {"Cfb": True}
+
+    def test_default_report_with_no_variant_arg_proceeds(self):
+        report = {"by_target": {"tmax": {"Cfb": _metrics(True)}, "tmin": {}}}
+        gate = gates.build_gate(report, variant=None)
+        assert gate["tmax"] == {"Cfb": True}
+
+    def test_variant_fitted_report_published_without_variant_arg_raises(self):
+        """The dangerous direction: a native_noelev-fitted report must NOT
+        silently land at the default (no-variant) key, which every other
+        project in the same zone(s) reads under their unchanged, default
+        Open-Meteo config."""
+        report = {"base_variant": "native_noelev", "by_target": {"tmax": {"Cfb": _metrics(True)}, "tmin": {}}}
+        with pytest.raises(ValueError, match="native_noelev"):
+            gates.build_gate(report, variant=None)
+
+    def test_default_report_published_with_variant_arg_raises(self):
+        report = {"by_target": {"tmax": {"Cfb": _metrics(True)}, "tmin": {}}}
+        with pytest.raises(ValueError, match="native_noelev"):
+            gates.build_gate(report, variant="native_noelev")
+
+    def test_mismatched_variant_names_raise(self):
+        report = {"base_variant": "native_noelev", "by_target": {"tmax": {"Cfb": _metrics(True)}, "tmin": {}}}
+        with pytest.raises(ValueError):
+            gates.build_gate(report, variant="some_other_variant")
+
+
+class TestBuildGateZonesScopedReportRefusesDefaultKey:
+    """2026-08-03, adversarial review finding: a --zones-scoped validation
+    run with no --elevation-nan produces a report with base_variant=None,
+    which the variant check above passes cleanly (None matches --variant
+    omitted). Without this separate check, that report would silently
+    replace the ENTIRE default gate with only the scoped zone(s)' data --
+    build_gate has no merge step, it constructs the gate fresh from the
+    report alone every time."""
+
+    def test_zones_scoped_report_without_variant_raises(self):
+        report = {"zones": ["Cfb"], "by_target": {"tmax": {"Cfb": _metrics(True)}, "tmin": {}}}
+        with pytest.raises(ValueError, match="Cfb"):
+            gates.build_gate(report, variant=None)
+
+    def test_zones_scoped_report_with_matching_variant_proceeds(self):
+        """A zones-scoped report IS safe to publish, as long as it's going
+        to a variant-suffixed key, never the shared default -- variant
+        being non-None is the actual safety property, not the absence of
+        a zones scope."""
+        report = {
+            "zones": ["Cfb"], "base_variant": "native_noelev",
+            "by_target": {"tmax": {"Cfb": _metrics(True)}, "tmin": {}},
+        }
+        gate = gates.build_gate(report, variant="native_noelev")
+        assert gate["tmax"] == {"Cfb": True}
+
+    def test_unscoped_report_without_variant_still_proceeds(self):
+        """The new check must not affect a normal, unscoped, default-key
+        publish -- only reports carrying a real zones scope."""
+        report = {"by_target": {"tmax": {"Cfb": _metrics(True)}, "tmin": {}}}
+        gate = gates.build_gate(report, variant=None)
+        assert gate["tmax"] == {"Cfb": True}
+
+    def test_empty_zones_list_does_not_trigger_the_check(self):
+        report = {"zones": [], "by_target": {"tmax": {"Cfb": _metrics(True)}, "tmin": {}}}
+        gate = gates.build_gate(report, variant=None)
+        assert gate["tmax"] == {"Cfb": True}
+
+
 class TestValidateGate:
     def test_well_formed_gate_passes(self):
         gate = gates.build_gate({"by_target": {"tmax": {"Cfb": _metrics(True)}, "tmin": {}}})

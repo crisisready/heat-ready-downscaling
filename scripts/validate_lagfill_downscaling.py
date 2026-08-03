@@ -147,12 +147,19 @@ def _open_meteo_api_key() -> str | None:
     return (creds.get("open_meteo") or {}).get("api_key")
 
 
-def load_validation_rows(sample: int | None, seed: int) -> list[dict]:
+def load_validation_rows(sample: int | None, seed: int, zones: list[str] | None = None) -> list[dict]:
     """A random sample of ghcn_training rows with everything
     heatready_downscaling.features.build_feature_matrix needs (static
     covariates), plus the raw station_id/lat/lon/date needed to fetch and
     re-bucket an NRT reconstruction the same way production's Open-Meteo
-    band would."""
+    band would.
+
+    zones (2026-08-03, gate-variant scoping): restrict to specific Koppen
+    climate_zone(s) -- lets a variant rerun (e.g. elevation-nan, fitting a
+    gate for a SINGLE project's actual serving zone) validate only the
+    zone(s) that project needs, rather than refitting the entire global
+    fleet under a base distribution most projects don't use. None (default)
+    is the original, unscoped, every-zone behavior."""
     import db
 
     query = """
@@ -167,12 +174,21 @@ def load_validation_rows(sample: int | None, seed: int) -> list[dict]:
         WHERE region IS NOT NULL AND climate_zone IS NOT NULL
           AND station_tmax_c IS NOT NULL AND station_tmin_c IS NOT NULL
     """
-    params: tuple = ()
+    params: list = []
+    if zones:
+        # IN (...) with individual placeholders, not = ANY(%s) -- this
+        # project's db.py uses pg8000, whose array-parameter binding has
+        # been driver-version-fragile historically; a plain IN clause has
+        # no such ambiguity and needs no special-casing in db.execute.
+        placeholders = ",".join(["%s"] * len(zones))
+        query += f" AND climate_zone IN ({placeholders})"
+        params.extend(zones)
     if sample:
         query += " ORDER BY random() LIMIT %s"
-        params = (int(sample),)
-    rows = db.execute(query, params)
-    logger.info("Loaded %d ghcn_training row(s) for validation", len(rows))
+        params.append(int(sample))
+    rows = db.execute(query, tuple(params))
+    logger.info("Loaded %d ghcn_training row(s) for validation%s", len(rows),
+                f" (zones={sorted(zones)})" if zones else "")
     return rows
 
 
@@ -209,10 +225,17 @@ def _endpoint_url(api_key: str | None) -> str:
 
 def _fetch_nrt_daily_for_station_tz(
     station_id: str, lat: float, lon: float, dates: list[date], session: HttpSession, tz: str, url: str,
+    disable_elevation_correction: bool = False,
 ) -> dict[str, dict]:
     """One HTTP call (one calendar year of hourly data) via the shared,
     throttled HttpSession -- threads the station's real timezone through to
-    aggregate_hourly_to_daily instead of the module-level UTC placeholder."""
+    aggregate_hourly_to_daily instead of the module-level UTC placeholder.
+
+    disable_elevation_correction (2026-08-03): a single-station request, so
+    (unlike production's batched multi-point requests -- see
+    heat-risk-data-api's own open_meteo.py fix for why a batch needs one
+    "nan" per point) a bare "nan" scalar is correct here without any
+    per-point expansion."""
     start = min(dates) - timedelta(days=_FETCH_PAD_DAYS)
     end = max(dates) + timedelta(days=_FETCH_PAD_DAYS)
     params = {
@@ -227,6 +250,8 @@ def _fetch_nrt_daily_for_station_tz(
         # already m/s, ~3.6x too high.
         "wind_speed_unit": "ms",
     }
+    if disable_elevation_correction:
+        params["elevation"] = "nan"
 
     hourly_data = session.get_json(url, params)
     if hourly_data is NO_RESULT or "hourly" not in hourly_data:
@@ -261,6 +286,7 @@ def _process_one_station(station: dict, session: HttpSession) -> dict:
     station_rows = station["rows"]
     tz = station["tz"]
     url = station["url"]
+    disable_elevation_correction = station.get("disable_elevation_correction", False)
     lat, lon = station_rows[0]["lat"], station_rows[0]["lon"]
     dates = [r["date"] if isinstance(r["date"], date) else date.fromisoformat(r["date"]) for r in station_rows]
 
@@ -273,7 +299,10 @@ def _process_one_station(station: dict, session: HttpSession) -> dict:
 
     daily_by_date: dict[str, dict] = {}
     for year, year_dates in by_year.items():
-        chunk = _fetch_nrt_daily_for_station_tz(station_id, lat, lon, year_dates, session, tz, url)
+        chunk = _fetch_nrt_daily_for_station_tz(
+            station_id, lat, lon, year_dates, session, tz, url,
+            disable_elevation_correction=disable_elevation_correction,
+        )
         daily_by_date.update(chunk)
 
     nrt_rows: list[dict] = []
@@ -324,6 +353,7 @@ def _process_one_station(station: dict, session: HttpSession) -> dict:
 def build_paired_rows(
     rows: list[dict], tz_by_station: dict[str, str], api_key: str | None,
     max_workers: int | None = None, checkpoint_path: str | None = None,
+    disable_elevation_correction: bool = False,
 ) -> tuple[list[dict], list[dict]]:
     """
     Returns (nrt_rows, fidelity_rows) -- see _process_one_station's
@@ -353,7 +383,10 @@ def build_paired_rows(
 
     url = _endpoint_url(api_key)
     stations = [
-        {"station_id": sid, "rows": station_rows, "tz": tz_by_station.get(sid, "UTC"), "url": url}
+        {
+            "station_id": sid, "rows": station_rows, "tz": tz_by_station.get(sid, "UTC"), "url": url,
+            "disable_elevation_correction": disable_elevation_correction,
+        }
         for sid, station_rows in by_station.items()
     ]
 
@@ -420,10 +453,38 @@ def main() -> None:
     )
     parser.add_argument("--rows-in", default=None, help="phase=fetch: JSON from a prior --phase dump-rows run")
     parser.add_argument("--paired-in", default=None, help="phase=score: JSON from a prior --phase fetch run")
+    # 2026-08-03, gate-variant scoping (see downscaling.load_band_gate's own
+    # docstring in heat-risk-data-api): a project whose Open-Meteo requests
+    # disable elevation correction is served under a DIFFERENT base
+    # distribution than the one this harness's published gate was fitted
+    # against. --elevation-nan refits under that base; --zones scopes the
+    # (expensive, global-by-default) refit to only the zone(s) that project
+    # actually needs, rather than the whole fleet. Passing --elevation-nan
+    # stamps "base_variant": "native_noelev" into the report (see
+    # _build_report) so publish_band_gate.py can refuse a report published
+    # under the wrong --variant.
+    parser.add_argument("--elevation-nan", action="store_true",
+                         help="disable Open-Meteo's elevation lapse-rate correction on every NRT request "
+                              "(single-point requests, so a bare elevation=nan is correct -- see "
+                              "_fetch_nrt_daily_for_station_tz's own docstring). Stamps base_variant="
+                              "'native_noelev' into the report.")
+    parser.add_argument("--zones", default=None,
+                         help="comma-separated Koppen climate_zone(s) to restrict validation to (e.g. Cfb) -- "
+                              "default is unscoped, every zone with data. Use with --elevation-nan to refit "
+                              "only the zone(s) a specific project's variant override actually needs.")
     args = parser.parse_args()
+    zones = [z.strip() for z in args.zones.split(",") if z.strip()] if args.zones else None
+    # 2026-08-03, adversarial review finding: --zones "," or --zones ""
+    # parses to an empty list, which the `if zones:` guards elsewhere in
+    # this file treat as "no filter" -- silently turning an intended
+    # single-zone run into a full global refit. Raise rather than guess.
+    if args.zones and not zones:
+        raise SystemExit(f"--zones {args.zones!r} parsed to an empty zone list -- refusing to "
+                          "silently fall back to an unscoped (global) run")
+    base_variant = "native_noelev" if args.elevation_nan else None
 
     if args.phase == "dump-rows":
-        rows = load_validation_rows(args.sample or None, args.seed)
+        rows = load_validation_rows(args.sample or None, args.seed, zones=zones)
         if not rows:
             logger.error("No ghcn_training rows returned -- nothing to validate")
             raise SystemExit(1)
@@ -432,10 +493,17 @@ def main() -> None:
         # whatever phase happens to read it later) -- score's own --sample
         # CLI value has no relation to what dump-rows actually used, and
         # could silently mismatch the real rows_sampled count in the final
-        # report.
+        # report. base_variant/zones travel the same way (2026-08-03) --
+        # score's report stamp must reflect what THIS run's data actually
+        # is, not whatever --elevation-nan/--zones happen to be set to on a
+        # later, possibly different, score invocation.
         with open(out_path, "w") as f:
-            json.dump({"sample_requested": args.sample, "rows": rows}, f, default=str)
-        logger.info("Dumped %d ghcn_training row(s) to %s", len(rows), out_path)
+            json.dump(
+                {"sample_requested": args.sample, "rows": rows, "base_variant": base_variant, "zones": zones},
+                f, default=str,
+            )
+        logger.info("Dumped %d ghcn_training row(s) to %s%s", len(rows), out_path,
+                    f" (zones={zones})" if zones else "")
         return
 
     if args.phase == "fetch":
@@ -450,23 +518,39 @@ def main() -> None:
         if not rows:
             logger.error("Input file %s has no rows -- nothing to fetch", args.rows_in)
             raise SystemExit(1)
+        # base_variant/zones travel with the dumped rows (see dump-rows'
+        # own comment) -- NOT re-read from this invocation's own
+        # --elevation-nan/--zones, which could silently disagree with what
+        # dump-rows actually queried/is about to be fetched under.
+        dumped_variant = dumped.get("base_variant")
+        dumped_zones = dumped.get("zones")
         tz_by_station = _station_timezones(rows)
         logger.info("Resolved timezones for %d distinct station(s)", len(tz_by_station))
         # Default path includes the input config (sample_requested + actual
-        # row count) -- a FIXED default path across different
-        # --sample/--rows-in configs would silently reuse a prior run's
-        # per-station payloads as if they were current for a totally
-        # different dataset, with no error. Explicit --checkpoint still
-        # overrides this whenever real resumption across configs is
-        # actually intended.
-        checkpoint_path = args.checkpoint or f"/tmp/lagfill_fetch_checkpoint_s{dumped['sample_requested']}_n{len(rows)}.jsonl"
-        nrt_rows, fidelity_rows = build_paired_rows(rows, tz_by_station, api_key, args.max_workers, checkpoint_path)
+        # row count + base_variant) -- a FIXED default path across
+        # different --sample/--rows-in/--elevation-nan configs would
+        # silently reuse a prior run's per-station payloads as if they were
+        # current for a totally different base distribution, with no
+        # error (2026-08-03: this is exactly the class of bug this comment
+        # already warned about for sample/rows_in -- elevation mode is the
+        # same risk, not a new one). Explicit --checkpoint still overrides
+        # this whenever real resumption across configs is actually intended.
+        variant_tag = dumped_variant or "default"
+        checkpoint_path = (
+            args.checkpoint
+            or f"/tmp/lagfill_fetch_checkpoint_s{dumped['sample_requested']}_n{len(rows)}_{variant_tag}.jsonl"
+        )
+        nrt_rows, fidelity_rows = build_paired_rows(
+            rows, tz_by_station, api_key, args.max_workers, checkpoint_path,
+            disable_elevation_correction=bool(dumped_variant),
+        )
         logger.info("Built %d NRT-paired row(s) from %d sampled row(s) (%.1f%% coverage)",
                     len(nrt_rows), len(rows), 100.0 * len(nrt_rows) / len(rows) if rows else 0.0)
         out_path = args.out or "/tmp/lagfill_paired.json"
         with open(out_path, "w") as f:
             json.dump({
-                "sample_requested": dumped["sample_requested"],
+                "sample_requested": dumped["sample_requested"], "base_variant": dumped_variant,
+                "zones": dumped_zones,
                 "rows_sampled": len(rows), "nrt_rows": nrt_rows, "fidelity_rows": fidelity_rows,
             }, f)
         logger.info("Wrote %d paired row(s) to %s", len(nrt_rows), out_path)
@@ -484,7 +568,8 @@ def main() -> None:
         nrt_rows, fidelity_rows = paired["nrt_rows"], paired["fidelity_rows"]
         report = _build_report(
             args.model_version, paired["sample_requested"], paired["rows_sampled"],
-            nrt_rows, fidelity_rows, adapter,
+            nrt_rows, fidelity_rows, adapter, base_variant=paired.get("base_variant"),
+            zones=paired.get("zones"),
         )
         out_path = args.out or os.path.join("/tmp", f"lagfill_validation_{args.model_version}.json")
         with open(out_path, "w") as f:
@@ -503,7 +588,7 @@ def main() -> None:
     bucket = args.bucket or os.environ["VULNERABILITY_DATA_BUCKET"]
     adapter = QRFModelAdapter.load(args.model_version, bucket=bucket)
 
-    rows = load_validation_rows(args.sample or None, args.seed)
+    rows = load_validation_rows(args.sample or None, args.seed, zones=zones)
     if not rows:
         logger.error("No ghcn_training rows returned -- nothing to validate")
         return
@@ -511,12 +596,26 @@ def main() -> None:
     tz_by_station = _station_timezones(rows)
     logger.info("Resolved timezones for %d distinct station(s)", len(tz_by_station))
 
-    checkpoint_path = args.checkpoint or f"/tmp/lagfill_fetch_checkpoint_s{args.sample}_seed{args.seed}.jsonl"
-    nrt_rows, fidelity_rows = build_paired_rows(rows, tz_by_station, api_key, args.max_workers, checkpoint_path)
+    # variant_tag in the default path (2026-08-03): a FIXED default across
+    # different --elevation-nan configs would silently reuse a prior run's
+    # per-station payloads as if they were current for a different base
+    # distribution, no error -- same risk this comment already covers for
+    # sample/seed.
+    variant_tag = base_variant or "default"
+    checkpoint_path = (
+        args.checkpoint or f"/tmp/lagfill_fetch_checkpoint_s{args.sample}_seed{args.seed}_{variant_tag}.jsonl"
+    )
+    nrt_rows, fidelity_rows = build_paired_rows(
+        rows, tz_by_station, api_key, args.max_workers, checkpoint_path,
+        disable_elevation_correction=args.elevation_nan,
+    )
     logger.info("Built %d NRT-paired row(s) from %d sampled row(s) (%.1f%% coverage)",
                 len(nrt_rows), len(rows), 100.0 * len(nrt_rows) / len(rows) if rows else 0.0)
 
-    report = _build_report(args.model_version, args.sample, len(rows), nrt_rows, fidelity_rows, adapter)
+    report = _build_report(
+        args.model_version, args.sample, len(rows), nrt_rows, fidelity_rows, adapter,
+        base_variant=base_variant, zones=zones,
+    )
     out_path = args.out or os.path.join("/tmp", f"lagfill_validation_{args.model_version}.json")
     with open(out_path, "w") as f:
         json.dump(report, f, indent=2)
@@ -526,13 +625,30 @@ def main() -> None:
 def _build_report(
     model_version: str, sample_requested: int, rows_sampled: int,
     nrt_rows: list[dict], fidelity_rows: list[dict], adapter: QRFModelAdapter,
+    base_variant: str | None = None, zones: list[str] | None = None,
 ) -> dict:
     """Shared by --phase all and --phase score so the two paths can never
     silently diverge in what a 'report' contains. sample_requested/
     rows_sampled are passed explicitly (not read off args) so --phase score
     reports the value the ORIGINAL dump-rows invocation actually used, not
     whatever --sample happens to be set to on the score invocation itself
-    (these can be different machines/runs)."""
+    (these can be different machines/runs). base_variant (2026-08-03) is
+    the same idea, for the SAME reason: identifies which alternate base
+    distribution (if any) this run's NRT rows were actually fetched under
+    (see load_band_gate's own docstring in heat-risk-data-api) -- stamped
+    into the report so publish_band_gate.py can refuse a report published
+    under a --variant it doesn't actually match.
+
+    zones (2026-08-03, adversarial review finding): stamped for the SAME
+    reason as base_variant, but the risk it closes is different and more
+    dangerous by default -- a --zones-scoped run with NO --elevation-nan
+    produces a report with base_variant=None, which passes build_gate's
+    variant check cleanly (None matches the default key) and would
+    silently REPLACE the entire fleet-wide default gate with only the
+    scoped zone(s)' data (build_gate constructs the gate fresh from the
+    report alone, no merge with what's currently published). Stamping
+    zones here lets build_gate refuse that specific case even when variant
+    itself was never in play."""
     by_target: dict[str, dict] = {}
     for target in ("tmax", "tmin"):
         by_zone = score_band(adapter, nrt_rows, target, fold_salt=model_version)
@@ -555,6 +671,9 @@ def _build_report(
         rows_paired=len(nrt_rows),
         fidelity_check=fidelity_report(fidelity_rows),
         by_target=by_target,
+        extra=({"base_variant": base_variant} if base_variant else {})
+              | ({"zones": sorted(zones)} if zones else {})
+              or None,
     )
 
 

@@ -38,15 +38,19 @@ def _fake_hourly_response(base_temp_c: float):
 
 class FakeSession:
     """Minimal stand-in for api_call_manager.HttpSession -- returns a
-    scripted response regardless of params, records call count."""
+    scripted response regardless of params, records call count and the
+    params of every call (so tests can assert on request shape, e.g.
+    elevation=nan threading)."""
 
     def __init__(self, response):
         self._response = response
         self.calls = 0
+        self.calls_params = []
         self.throttle = AdaptiveThrottle(max_workers=4)  # fetch_all reads session.throttle.stats()
 
     def get_json(self, url, params, **kwargs):
         self.calls += 1
+        self.calls_params.append(params)
         return self._response
 
 
@@ -94,6 +98,63 @@ class TestProcessOneStation:
         payload = vld._process_one_station(station, session)
 
         assert payload is NO_RESULT
+
+
+class TestElevationNanThreading:
+    """2026-08-03, gate-variant scoping: disable_elevation_correction must
+    reach every real Open-Meteo request as elevation=nan -- these are
+    single-station requests (one point per call), so a bare "nan" scalar is
+    correct as-is, unlike production's batched multi-point requests (see
+    heat-risk-data-api's own open_meteo.py fix for that distinct bug)."""
+
+    def test_disabled_by_default_no_elevation_param(self):
+        station = {
+            "station_id": "TEST001",
+            "rows": [{
+                "station_id": "TEST001", "date": "2023-06-15", "lat": 40.0, "lon": -75.0,
+                "climate_zone": "Cfa", "station_tmax_c": 30.0, "station_tmin_c": 20.0,
+            }],
+            "tz": "UTC",
+            "url": "https://historical-forecast-api.open-meteo.com/v1/forecast",
+        }
+        session = FakeSession(_fake_hourly_response(base_temp_c=25.0))
+        vld._process_one_station(station, session)
+        assert "elevation" not in session.calls_params[0]
+
+    def test_enabled_sends_bare_nan_scalar(self):
+        station = {
+            "station_id": "TEST001",
+            "rows": [{
+                "station_id": "TEST001", "date": "2023-06-15", "lat": 40.0, "lon": -75.0,
+                "climate_zone": "Cfa", "station_tmax_c": 30.0, "station_tmin_c": 20.0,
+            }],
+            "tz": "UTC",
+            "url": "https://historical-forecast-api.open-meteo.com/v1/forecast",
+            "disable_elevation_correction": True,
+        }
+        session = FakeSession(_fake_hourly_response(base_temp_c=25.0))
+        vld._process_one_station(station, session)
+        assert session.calls_params[0]["elevation"] == "nan"
+
+    def test_build_paired_rows_threads_flag_to_every_station(self, tmp_path, monkeypatch):
+        rows = [
+            {"station_id": "A", "date": "2023-06-15", "lat": 40.0, "lon": -75.0,
+             "climate_zone": "Cfa", "station_tmax_c": 30.0, "station_tmin_c": 20.0},
+            {"station_id": "B", "date": "2023-06-15", "lat": 51.5, "lon": -0.1,
+             "climate_zone": "Cfb", "station_tmax_c": 22.0, "station_tmin_c": 14.0},
+        ]
+        tz_by_station = {"A": "UTC", "B": "UTC"}
+        fake_session = FakeSession(_fake_hourly_response(base_temp_c=20.0))
+        monkeypatch.setattr(vld, "HttpSession", lambda *a, **kw: fake_session)
+        checkpoint_path = str(tmp_path / "checkpoint.jsonl")
+
+        vld.build_paired_rows(
+            rows, tz_by_station, api_key=None, max_workers=2, checkpoint_path=checkpoint_path,
+            disable_elevation_correction=True,
+        )
+
+        assert len(fake_session.calls_params) == 2
+        assert all(p.get("elevation") == "nan" for p in fake_session.calls_params)
 
 
 class TestBuildPairedRowsCheckpointing:
@@ -166,3 +227,84 @@ class TestBuildReportBandKey:
         report = vld._build_report("ds-test", 10, 10, [], [], _FakeAdapter())
         assert report["snapshot_version"] == "ghcn_training-live"
         assert report["model_version"] == "ds-test"
+
+
+class TestBuildReportBaseVariant:
+    """2026-08-03, gate-variant scoping: base_variant must be stamped into
+    the report so publish_band_gate.py can refuse to publish a variant
+    report under the wrong --variant -- and must NOT appear at all for a
+    default run, matching every other gate-variant default (None/omitted
+    reproduces today's behavior byte-for-byte)."""
+
+    def test_default_omits_base_variant_entirely(self):
+        report = vld._build_report("ds-test", 10, 10, [], [], _FakeAdapter())
+        assert "base_variant" not in report
+
+    def test_elevation_nan_run_stamps_native_noelev(self):
+        report = vld._build_report("ds-test", 10, 10, [], [], _FakeAdapter(), base_variant="native_noelev")
+        assert report["base_variant"] == "native_noelev"
+
+    def test_default_omits_zones_entirely(self):
+        report = vld._build_report("ds-test", 10, 10, [], [], _FakeAdapter())
+        assert "zones" not in report
+
+    def test_zones_scoped_run_stamps_sorted_zone_list(self):
+        report = vld._build_report("ds-test", 10, 10, [], [], _FakeAdapter(), zones=["Cwa", "Cfb"])
+        assert report["zones"] == ["Cfb", "Cwa"]
+
+    def test_empty_zones_list_omits_the_key(self):
+        report = vld._build_report("ds-test", 10, 10, [], [], _FakeAdapter(), zones=[])
+        assert "zones" not in report
+
+
+class TestLoadValidationRowsZonesFilter:
+    """2026-08-03, gate-variant scoping: --zones restricts the query to
+    specific Koppen zone(s) via a plain IN (...) clause -- not = ANY(%s),
+    which this project's pg8000 driver has historically handled
+    inconsistently for array parameters."""
+
+    def test_no_zones_omits_the_filter_entirely(self, monkeypatch):
+        import db
+        captured = {}
+
+        def fake_execute(query, params):
+            captured["query"] = query
+            captured["params"] = params
+            return []
+
+        monkeypatch.setattr(db, "execute", fake_execute)
+        vld.load_validation_rows(sample=None, seed=1, zones=None)
+        assert "climate_zone IN" not in captured["query"]
+        assert captured["params"] == ()
+
+    def test_zones_adds_in_clause_with_one_placeholder_per_zone(self, monkeypatch):
+        import db
+        captured = {}
+
+        def fake_execute(query, params):
+            captured["query"] = query
+            captured["params"] = params
+            return []
+
+        monkeypatch.setattr(db, "execute", fake_execute)
+        vld.load_validation_rows(sample=None, seed=1, zones=["Cfb"])
+        assert "climate_zone IN (%s)" in captured["query"]
+        assert captured["params"] == ("Cfb",)
+
+    def test_sample_and_zones_together_places_sample_placeholder_last(self, monkeypatch):
+        """ORDER BY random() LIMIT %s is appended AFTER the zones filter --
+        params must be built in the same order the query text places its
+        placeholders, or the wrong value binds to the wrong %s."""
+        import db
+        captured = {}
+
+        def fake_execute(query, params):
+            captured["query"] = query
+            captured["params"] = params
+            return []
+
+        monkeypatch.setattr(db, "execute", fake_execute)
+        vld.load_validation_rows(sample=500, seed=1, zones=["Cfb", "Cwa"])
+        assert "climate_zone IN (%s,%s)" in captured["query"]
+        assert captured["query"].index("climate_zone IN") < captured["query"].index("LIMIT %s")
+        assert captured["params"] == ("Cfb", "Cwa", 500)

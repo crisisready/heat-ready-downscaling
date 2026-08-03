@@ -143,14 +143,25 @@ _SNAPSHOT_VERSION = "ghcn_training-live"
 
 def fetch_lead_daily_for_station(
     station_id: str, lat: float, lon: float, dates: list[date], lead_days: int, session: HttpSession, tz: str,
-    url: str,
+    url: str, disable_elevation_correction: bool = False,
 ) -> dict[str, dict]:
     """Same shape as validate_lagfill_downscaling._fetch_nrt_daily_for_station_tz,
     but reconstructs the `lead_days`-ahead forecast value instead of the NRT
     analysis: fetches `{var}_previous_day{lead_days}` for each of _LEAD_VARS,
     remaps to the unsuffixed names open_meteo._hourly_to_rows expects, then
     runs the SAME production aggregation path. api_key (if any) is attached
-    by the shared HttpSession/ServiceConfig, not built into params here."""
+    by the shared HttpSession/ServiceConfig, not built into params here.
+
+    disable_elevation_correction (2026-08-03): single-station request (one
+    point per call), so a bare "nan" scalar is correct as-is -- see
+    validate_lagfill_downscaling._fetch_nrt_daily_for_station_tz's identical
+    comment. NOTE this endpoint is already pinned to models=gfs_seamless
+    (module docstring) rather than production's best_match/ICON-D2 -- a
+    native_noelev report from THIS script fixes only the elevation axis of
+    the real serving-time change, not the resolution axis, since the model
+    itself already differs from what production serves. Real, pre-existing,
+    not introduced by this change -- see this repo's own roadmap for the
+    full caveat."""
     dates = [d for d in dates if d >= _COVERAGE_START]
     if not dates:
         return {}
@@ -166,6 +177,8 @@ def fetch_lead_daily_for_station(
         "timezone": "UTC",
         "wind_speed_unit": "ms",  # see validate_lagfill_downscaling's identical comment -- default is km/h
     }
+    if disable_elevation_correction:
+        params["elevation"] = "nan"
 
     resp = session.get_json(url, params)
     if resp is NO_RESULT or "hourly" not in resp:
@@ -247,6 +260,7 @@ def _process_one_station_lead(station: dict, session: HttpSession) -> dict:
     tz = station["tz"]
     lead_days = station["lead_days"]
     url = station["url"]
+    disable_elevation_correction = station.get("disable_elevation_correction", False)
     lat, lon = station_rows[0]["lat"], station_rows[0]["lon"]
     dates = [r["date"] if isinstance(r["date"], date) else date.fromisoformat(r["date"]) for r in station_rows]
 
@@ -271,7 +285,10 @@ def _process_one_station_lead(station: dict, session: HttpSession) -> dict:
 
     daily_by_date: dict[str, dict] = {}
     for year, year_dates in by_year.items():
-        chunk = fetch_lead_daily_for_station(station_id, lat, lon, year_dates, lead_days, session, tz, url)
+        chunk = fetch_lead_daily_for_station(
+            station_id, lat, lon, year_dates, lead_days, session, tz, url,
+            disable_elevation_correction=disable_elevation_correction,
+        )
         daily_by_date.update(chunk)
 
     lead_rows: list[dict] = []
@@ -313,7 +330,7 @@ def _process_one_station_lead(station: dict, session: HttpSession) -> dict:
 
 def build_paired_rows(
     rows: list[dict], tz_by_station: dict[str, str], lead_days: int, api_key: str | None,
-    max_workers: int = 4, checkpoint_path: str | None = None,
+    max_workers: int = 4, checkpoint_path: str | None = None, disable_elevation_correction: bool = False,
 ) -> tuple[list[dict], list[dict]]:
     """Same contract/concurrency model as
     validate_lagfill_downscaling.build_paired_rows -- see that function's
@@ -335,7 +352,7 @@ def build_paired_rows(
 
     stations = [
         {"station_id": sid, "rows": station_rows, "tz": tz_by_station.get(sid, "UTC"),
-         "lead_days": lead_days, "url": url}
+         "lead_days": lead_days, "url": url, "disable_elevation_correction": disable_elevation_correction}
         for sid, station_rows in by_station.items()
     ]
 
@@ -382,7 +399,25 @@ def main() -> None:
                               "seed{seed}.jsonl (config-specific, to avoid silently reusing another run's "
                               "data) -- pass explicitly to intentionally resume across runs.")
     parser.add_argument("--out", default=None)
+    # 2026-08-03, gate-variant scoping -- see validate_lagfill_downscaling.py's
+    # identical --elevation-nan/--zones args for the full reasoning.
+    parser.add_argument("--elevation-nan", action="store_true",
+                         help="disable Open-Meteo's elevation lapse-rate correction on every request. "
+                              "Stamps base_variant='native_noelev' into the report. NOTE: this endpoint is "
+                              "already pinned to models=gfs_seamless, not production's best_match/ICON-D2 -- "
+                              "see fetch_lead_daily_for_station's own docstring for what this variant does "
+                              "and doesn't cover.")
+    parser.add_argument("--zones", default=None,
+                         help="comma-separated Koppen climate_zone(s) to restrict validation to (e.g. Cfb) -- "
+                              "default is unscoped, every zone with data.")
     args = parser.parse_args()
+    zones = [z.strip() for z in args.zones.split(",") if z.strip()] if args.zones else None
+    # 2026-08-03, adversarial review finding -- see validate_lagfill_downscaling.py's
+    # identical comment.
+    if args.zones and not zones:
+        raise SystemExit(f"--zones {args.zones!r} parsed to an empty zone list -- refusing to "
+                          "silently fall back to an unscoped (global) run")
+    base_variant = "native_noelev" if args.elevation_nan else None
 
     if not (1 <= args.lead_days <= 7):
         raise SystemExit("--lead-days must be 1-7 (production's FORECAST_DAYS horizon)")
@@ -394,7 +429,7 @@ def main() -> None:
     bucket = args.bucket or os.environ["VULNERABILITY_DATA_BUCKET"]
     adapter = QRFModelAdapter.load(args.model_version, bucket=bucket)
 
-    rows = load_validation_rows(args.sample or None, args.seed)
+    rows = load_validation_rows(args.sample or None, args.seed, zones=zones)
     if not rows:
         logger.error("No ghcn_training rows returned -- nothing to validate")
         return
@@ -402,9 +437,18 @@ def main() -> None:
     tz_by_station = _station_timezones(rows)
     logger.info("Resolved timezones for %d distinct station(s)", len(tz_by_station))
 
-    checkpoint_path = args.checkpoint or f"/tmp/forecast_lead{args.lead_days}_fetch_checkpoint_s{args.sample}_seed{args.seed}.jsonl"
+    # variant_tag in the default path (2026-08-03): see
+    # validate_lagfill_downscaling.py's identical comment -- a fixed default
+    # across different --elevation-nan configs would silently reuse a prior
+    # run's per-station payloads for a different base distribution.
+    variant_tag = base_variant or "default"
+    checkpoint_path = (
+        args.checkpoint
+        or f"/tmp/forecast_lead{args.lead_days}_fetch_checkpoint_s{args.sample}_seed{args.seed}_{variant_tag}.jsonl"
+    )
     lead_rows, fidelity_rows = build_paired_rows(
         rows, tz_by_station, args.lead_days, api_key, args.max_workers, checkpoint_path,
+        disable_elevation_correction=args.elevation_nan,
     )
     logger.info("Built %d lead-%d-paired row(s) from %d sampled row(s) (%.1f%% coverage)",
                 len(lead_rows), args.lead_days, len(rows),
@@ -433,6 +477,9 @@ def main() -> None:
         if corrected:
             logger.info("[lead=%d, %s] bias corrections that will be published: %s", args.lead_days, target, corrected)
 
+    extra = {"lead_days": args.lead_days}
+    if base_variant:
+        extra["base_variant"] = base_variant
     report = build_report(
         model_version=args.model_version,
         band_key=band_key,
@@ -442,7 +489,7 @@ def main() -> None:
         rows_paired=len(lead_rows),
         fidelity_check=fidelity_report(fidelity_rows),
         by_target=by_target,
-        extra={"lead_days": args.lead_days},
+        extra=extra,
     )
 
     out_path = args.out or os.path.join("/tmp", f"forecast_lead{args.lead_days}_validation_{args.model_version}.json")

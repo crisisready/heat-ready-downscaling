@@ -148,7 +148,7 @@ def validate_spatial_ranking(artifact: dict) -> None:
     jsonschema.validate(artifact, SPATIAL_RANKING_SCHEMA)
 
 
-def build_gate(report: dict, band_key: str | None = None) -> dict:
+def build_gate(report: dict, band_key: str | None = None, variant: str | None = None) -> dict:
     """band_key, when given, is asserted against report["band_key"] --
     the validation scripts both stamp their own band into every report
     they write, so a report generated for one band (e.g. lag_fill) can
@@ -157,6 +157,21 @@ def build_gate(report: dict, band_key: str | None = None) -> dict:
     skipping the check) only so this stays callable the same way against a
     hand-built report dict that omits "band_key" -- every real invocation
     from a publish CLI always passes it.
+
+    variant (2026-08-03, gate-variant scoping -- see downscaling.
+    load_band_gate's own docstring in heat-risk-data-api): same idea as
+    band_key, checked in BOTH directions. A report fitted under an
+    alternate base distribution (e.g. --elevation-nan, stamped
+    report["base_variant"]="native_noelev") must be published under the
+    matching --variant, and a DEFAULT report (no base_variant stamped)
+    must be published with no --variant at all -- either mismatch raises.
+    The dangerous direction is the second one: publishing a variant-fitted
+    report to the DEFAULT (no-variant) S3 key would silently corrupt the
+    gate every OTHER project (in the same zone(s), under the DEFAULT
+    request config) reads, which is exactly the cross-project corruption
+    this whole variant mechanism exists to prevent -- so this check is not
+    optional/skippable the way band_key's is, and there is no bypass for a
+    hand-built report dict here.
 
     bias_correction (MOS-style recalibration): for every zone that passes
     ONLY because of the debiased, cross-validated check
@@ -221,6 +236,32 @@ def build_gate(report: dict, band_key: str | None = None) -> dict:
         raise ValueError(
             f"report band_key {report.get('band_key')!r} does not match --band-key {band_key!r} "
             "-- refusing to publish a report generated for a different band",
+        )
+    report_variant = report.get("base_variant")
+    if report_variant != variant:
+        raise ValueError(
+            f"report base_variant {report_variant!r} does not match --variant {variant!r} "
+            "-- refusing to publish a report fitted under one base distribution to a gate "
+            "key for a different one (this would corrupt every other project reading that key)",
+        )
+    # 2026-08-03, adversarial review finding: a --zones-scoped validation run
+    # with NO --elevation-nan produces a report with base_variant=None, which
+    # passes the check above cleanly (None matches --variant omitted) -- but
+    # this function builds the gate FRESH from the report alone, no merge
+    # with whatever's currently published, so publishing it to the DEFAULT
+    # key would silently replace every zone NOT in this report's scope with
+    # nothing (wiped tmax/tmin pass bits, bias_correction, delta_scale,
+    # spatial_skill) for every other project reading that key. variant is
+    # the escape hatch: a zones-scoped report is only safe to publish when
+    # it's also going to a variant-suffixed key, never the shared default.
+    if report.get("zones") and variant is None:
+        raise ValueError(
+            f"report is scoped to zones={report['zones']!r} but --variant was not given -- "
+            "refusing to publish a zone-scoped report to the shared default key, which would "
+            "silently wipe every zone NOT in this report for every other project reading it "
+            "(this function builds the gate fresh from the report, it does not merge with what's "
+            "currently published). Either publish under a --variant, or rerun the validation "
+            "without --zones for a report that's safe to publish to the default key.",
         )
     gate: dict = {
         "tmax": {}, "tmin": {},

@@ -92,6 +92,16 @@ def main() -> None:
     parser.add_argument("--bucket", default=None, help="defaults to VULNERABILITY_DATA_BUCKET env var")
     parser.add_argument("--profile", default=None, help="named AWS profile (omit on EC2 with an attached IAM role)")
     parser.add_argument("--dry-run", action="store_true", help="print the gate that would be published, don't upload")
+    # 2026-08-03, gate-variant scoping (see downscaling.load_band_gate's own
+    # docstring in heat-risk-data-api): must match the --report's own
+    # stamped base_variant exactly (build_gate enforces this in BOTH
+    # directions, unconditionally -- see its own docstring) -- there is no
+    # way to bypass the check by omitting this flag.
+    parser.add_argument("--variant", default=None,
+                         help="publish to downscaling/band_gates/{model_version}/{band_key}__{variant}.json "
+                              "instead of the default (no-variant) key -- for a gate fitted under an "
+                              "alternate base distribution (e.g. --elevation-nan on the validation harness). "
+                              "Must match the --report's own stamped base_variant exactly.")
     args = parser.parse_args()
 
     if args.profile:
@@ -100,9 +110,10 @@ def main() -> None:
     with open(args.report) as f:
         report = json.load(f)
 
-    gate = build_gate(report, band_key=args.band_key)
+    gate = build_gate(report, band_key=args.band_key, variant=args.variant)
     validate_gate(gate)
-    print(f"Band gate for model={args.model_version} band={args.band_key}:")
+    print(f"Band gate for model={args.model_version} band={args.band_key}"
+          f"{f' variant={args.variant}' if args.variant else ''}:")
     print(json.dumps(gate, indent=2))
     for target in ("tmax", "tmin"):
         skill = gate["spatial_skill"][target]
@@ -123,7 +134,8 @@ def main() -> None:
     import boto3
 
     bucket = args.bucket or os.environ["VULNERABILITY_DATA_BUCKET"]
-    key = f"downscaling/band_gates/{args.model_version}/{args.band_key}.json"
+    key_band = f"{args.band_key}__{args.variant}" if args.variant else args.band_key
+    key = f"downscaling/band_gates/{args.model_version}/{key_band}.json"
     client = boto3.client("s3")
     client.put_object(
         Bucket=bucket, Key=key,
