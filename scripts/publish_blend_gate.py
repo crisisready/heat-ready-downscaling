@@ -35,6 +35,24 @@ nearby-station anomaly) but would falsely imply a distribution nobody has
 actually validated. The CLI itself refuses those keys rather than relying
 on operator discipline alone.
 
+--variant (2026-08-04): downscaling.load_blend_gate has taken a `variant`
+param since 2026-08-03 (gate-variant scoping, mirroring load_band_gate's
+own fix) but this script had no way to publish one -- the one real gap
+found before the first variant-scoped blend-gate publish. Mirrors
+publish_band_gate.py's own --variant flag: writes to
+downscaling/blend_gates/{model_version}/{band_key}__{variant}.json instead
+of the default (no-variant) key. Unlike publish_band_gate.py's --variant,
+there is no separate build_gate step here to cross-check a stamped
+base_variant against (validate_station_blend.py's --gate-out is already
+the final gate shape) -- the caller is responsible for passing the variant
+that matches whatever base distribution the --gate file was actually
+validated against.
+
+Also mirrors publish_band_gate.py's fail-closed drop protection
+(2026-08-03 there, added here for the same reason): refuses to publish if
+the new gate would drop a zone (per target) present in whatever is
+currently published at the target key, unless --confirm-drops is passed.
+
 Usage:
     python scripts/publish_blend_gate.py \\
         --gate /tmp/station_blend_gate.json \\
@@ -47,8 +65,49 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 
 from heatready_downscaling.gates import validate_blend_gate
+
+
+def _refuse_if_zones_would_be_dropped(client, bucket, key, new_gate, confirm_drops):
+    """GET the gate currently published at (bucket, key) and compare its
+    tmax/tmin zone sets against new_gate's. Raises SystemExit(1) (before
+    put_object) if any zone present in the current gate is absent from
+    new_gate, unless confirm_drops is True. No prior gate (NoSuchKey/404)
+    means nothing to drop. Any other S3 error is re-raised rather than
+    silently treated as "nothing to drop" -- fail-closed applies to the
+    safety check itself too. Near-verbatim clone of publish_band_gate.py's
+    own helper of the same name."""
+    from botocore.exceptions import ClientError
+
+    try:
+        existing_obj = client.get_object(Bucket=bucket, Key=key)
+        existing_gate = json.loads(existing_obj["Body"].read())
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") in ("NoSuchKey", "404"):
+            return
+        raise
+
+    dropped = {}
+    for target in ("tmax", "tmin"):
+        removed = sorted(set(existing_gate.get(target, {})) - set(new_gate.get(target, {})))
+        if removed:
+            dropped[target] = removed
+    if not dropped:
+        return
+
+    if confirm_drops:
+        for target, zones in dropped.items():
+            print(f"--confirm-drops set: publishing anyway, dropping {target} zone(s) {zones} "
+                  f"that are currently published at s3://{bucket}/{key}")
+        return
+
+    for target, zones in dropped.items():
+        print(f"REFUSING to publish: would drop {target} zone(s) {zones} that are currently "
+              f"published at s3://{bucket}/{key} but absent from the new gate. "
+              f"Pass --confirm-drops if this is intentional.", file=sys.stderr)
+    raise SystemExit(1)
 
 
 def main() -> None:
@@ -59,6 +118,16 @@ def main() -> None:
     parser.add_argument("--bucket", default=None, help="defaults to VULNERABILITY_DATA_BUCKET env var")
     parser.add_argument("--profile", default=None, help="named AWS profile (omit on EC2 with an attached IAM role)")
     parser.add_argument("--dry-run", action="store_true", help="print the gate that would be published, don't upload")
+    parser.add_argument("--variant", default=None,
+                         help="publish to downscaling/blend_gates/{model_version}/{band_key}__{variant}.json "
+                              "instead of the default (no-variant) key -- for a gate fitted under an "
+                              "alternate base distribution (e.g. --elevation-nan on validate_station_blend.py's "
+                              "own upstream validate_lagfill_downscaling.py rows-in). Must match whatever base "
+                              "distribution the --gate file was actually validated against.")
+    parser.add_argument("--confirm-drops", action="store_true",
+                         help="required to proceed if the new gate would drop a zone (tmax or tmin) "
+                              "that is present in the gate currently published at the target key. "
+                              "Omit unless you specifically intend to remove a zone.")
     args = parser.parse_args()
 
     if args.profile:
@@ -69,7 +138,8 @@ def main() -> None:
 
     validate_blend_gate(gate)
 
-    print(f"Blend gate for model={args.model_version} band={args.band_key}:")
+    print(f"Blend gate for model={args.model_version} band={args.band_key}"
+          f"{f' variant={args.variant}' if args.variant else ''}:")
     print(json.dumps(gate, indent=2))
     for target in ("tmax", "tmin"):
         zones = sorted(z for z, v in gate[target].items() if v)
@@ -85,8 +155,12 @@ def main() -> None:
     import boto3
 
     bucket = args.bucket or os.environ["VULNERABILITY_DATA_BUCKET"]
-    key = f"downscaling/blend_gates/{args.model_version}/{args.band_key}.json"
+    key_band = f"{args.band_key}__{args.variant}" if args.variant else args.band_key
+    key = f"downscaling/blend_gates/{args.model_version}/{key_band}.json"
     client = boto3.client("s3")
+
+    _refuse_if_zones_would_be_dropped(client, bucket, key, gate, args.confirm_drops)
+
     client.put_object(
         Bucket=bucket, Key=key,
         Body=json.dumps(gate, indent=2).encode(), ContentType="application/json",
