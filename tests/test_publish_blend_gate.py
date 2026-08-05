@@ -142,6 +142,45 @@ class TestPublishBlendGateCli:
         assert result.returncode == 0, result.stderr
         assert "variant=" not in result.stdout
 
+    def test_KNOWN_LIMITATION_variant_mismatch_is_not_caught(self, tmp_path):
+        """Documents a real, disclosed gap (code review, 2026-08-05), not a
+        passing feature: publish_band_gate.py has TWO independent safety
+        mechanisms -- (1) same-key zone-drop protection (ported here,
+        covered by TestRefuseIfZonesWouldBeDropped above) and (2) a
+        cross-key check that the --report's own stamped base_variant
+        matches --variant (build_gate enforces this in both directions --
+        see heatready_downscaling.gates.build_gate's own docstring).
+
+        This script can only replicate (1). Mechanism (2) has no analogue
+        here because validate_station_blend.py's --gate-out JSON carries no
+        variant stamp at all -- there is nothing in the gate file itself to
+        cross-check --variant against. This test asserts that CURRENT
+        behavior -- publishing under any --variant string succeeds
+        regardless of what the gate was actually validated against -- so a
+        future change that silently starts enforcing this (or a refactor
+        that accidentally removes intended-future enforcement) shows up as
+        a deliberate, reviewed test change, not a silent behavior shift.
+
+        The caller remains responsible for passing the --variant that
+        matches whatever base distribution --gate was actually validated
+        against, exactly as this script's own --help text says. Closing
+        this gap for real means adding a variant stamp to
+        validate_station_blend.py's own output first -- a separate,
+        deliberately-not-bundled-here change (see this PR's own
+        description)."""
+        gate_path = _write_gate(tmp_path, _VALID_GATE)
+        result = subprocess.run(
+            [sys.executable, _SCRIPT, "--gate", gate_path, "--model-version", "ds-test-1",
+             "--variant", "totally_unrelated_variant_the_gate_was_never_validated_against",
+             "--dry-run"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0, (
+            "if this now fails, --variant enforcement was added -- update/remove this test "
+            "deliberately rather than treating the failure as a regression"
+        )
+        assert "variant=totally_unrelated_variant_the_gate_was_never_validated_against" in result.stdout
+
 
 class TestRefuseIfZonesWouldBeDropped:
     """Direct tests of _refuse_if_zones_would_be_dropped -- near-verbatim
@@ -155,6 +194,25 @@ class TestRefuseIfZonesWouldBeDropped:
         publish_blend_gate._refuse_if_zones_would_be_dropped(
             client, "bucket", "key", {"tmax": {"Cfb": True}, "tmin": {}}, confirm_drops=False,
         )  # must not raise -- first-ever publish to this key
+
+    def test_other_client_error_reraises(self):
+        """Only NoSuchKey/404 means 'nothing to drop' -- any other S3 error
+        (e.g. AccessDenied) must propagate, not be silently swallowed as if
+        it meant the same thing. Fail-closed applies to the safety check
+        itself, not just the thing it's protecting. Missed in the original
+        port (2026-08-04) -- publish_band_gate.py's own test suite already
+        covers this for the sibling helper; this was the one gap."""
+        client = MagicMock()
+        client.get_object.side_effect = _client_error("AccessDenied")
+        try:
+            publish_blend_gate._refuse_if_zones_would_be_dropped(
+                client, "bucket", "key", {"tmax": {"Cfb": True}, "tmin": {}}, confirm_drops=False,
+            )
+            assert False, "expected the AccessDenied ClientError to propagate"
+        except Exception as exc:
+            from botocore.exceptions import ClientError
+            assert isinstance(exc, ClientError)
+            assert exc.response["Error"]["Code"] == "AccessDenied"
 
     def test_same_zones_proceeds(self):
         client = MagicMock()
