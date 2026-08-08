@@ -483,8 +483,34 @@ def main() -> None:
                          help="comma-separated Koppen climate_zone(s) to restrict validation to (e.g. Cfb) -- "
                               "default is unscoped, every zone with data. Use with --elevation-nan to refit "
                               "only the zone(s) a specific project's variant override actually needs.")
+    parser.add_argument("--regions", default=None,
+                         help="comma-separated GHCN station_id COUNTRY PREFIXES (e.g. FR) to restrict "
+                              "SCORING to -- applied to already-fetched nrt_rows, works with --phase score "
+                              "or --phase all, does NOT change what --phase dump-rows/fetch pull (see "
+                              "_build_report's own regions docstring for why). Mutually exclusive with "
+                              "--exclude-regions. A regions-scoped report must never be published to a "
+                              "shared, unscoped zone gate key -- stamped into the report for a sub-zone-"
+                              "aware publish_band_gate.py to enforce.")
+    parser.add_argument("--exclude-regions", default=None,
+                         help="comma-separated GHCN station_id country prefixes to EXCLUDE from scoring -- "
+                              "the complement of --regions, e.g. --zones Cfb --exclude-regions FR scores "
+                              "'the rest of Cfb' against the SAME fetched data a --regions FR run used, "
+                              "for a direct regression check without a second Open-Meteo fetch. Mutually "
+                              "exclusive with --regions.")
     args = parser.parse_args()
     zones = [z.strip() for z in args.zones.split(",") if z.strip()] if args.zones else None
+    regions = [r.strip() for r in args.regions.split(",") if r.strip()] if args.regions else None
+    exclude_regions = (
+        [r.strip() for r in args.exclude_regions.split(",") if r.strip()] if args.exclude_regions else None
+    )
+    if regions and exclude_regions:
+        raise SystemExit("--regions and --exclude-regions are mutually exclusive -- pick one")
+    if args.regions and not regions:
+        raise SystemExit(f"--regions {args.regions!r} parsed to an empty list -- refusing to silently "
+                          "fall back to an unscoped (all-regions) run")
+    if args.exclude_regions and not exclude_regions:
+        raise SystemExit(f"--exclude-regions {args.exclude_regions!r} parsed to an empty list -- refusing "
+                          "to silently fall back to an unscoped (all-regions) run")
     # 2026-08-03, adversarial review finding: --zones "," or --zones ""
     # parses to an empty list, which the `if zones:` guards elsewhere in
     # this file treat as "no filter" -- silently turning an intended
@@ -580,10 +606,17 @@ def main() -> None:
         with open(args.paired_in) as f:
             paired = json.load(f)
         nrt_rows, fidelity_rows = paired["nrt_rows"], paired["fidelity_rows"]
+        rows_sampled = paired["rows_sampled"]
+        if regions or exclude_regions:
+            n_before = len(nrt_rows)
+            nrt_rows = _filter_rows_by_region(nrt_rows, regions, exclude_regions)
+            fidelity_rows = _filter_rows_by_region(fidelity_rows, regions, exclude_regions)
+            logger.info("Region filter (regions=%s exclude_regions=%s): %d -> %d nrt_row(s)",
+                        regions, exclude_regions, n_before, len(nrt_rows))
         report = _build_report(
-            args.model_version, paired["sample_requested"], paired["rows_sampled"],
+            args.model_version, paired["sample_requested"], rows_sampled,
             nrt_rows, fidelity_rows, adapter, base_variant=paired.get("base_variant"),
-            zones=paired.get("zones"),
+            zones=paired.get("zones"), regions=regions, exclude_regions=exclude_regions,
         )
         out_path = args.out or os.path.join("/tmp", f"lagfill_validation_{args.model_version}.json")
         with open(out_path, "w") as f:
@@ -626,9 +659,16 @@ def main() -> None:
     logger.info("Built %d NRT-paired row(s) from %d sampled row(s) (%.1f%% coverage)",
                 len(nrt_rows), len(rows), 100.0 * len(nrt_rows) / len(rows) if rows else 0.0)
 
+    if regions or exclude_regions:
+        n_before = len(nrt_rows)
+        nrt_rows = _filter_rows_by_region(nrt_rows, regions, exclude_regions)
+        fidelity_rows = _filter_rows_by_region(fidelity_rows, regions, exclude_regions)
+        logger.info("Region filter (regions=%s exclude_regions=%s): %d -> %d nrt_row(s)",
+                    regions, exclude_regions, n_before, len(nrt_rows))
+
     report = _build_report(
         args.model_version, args.sample, len(rows), nrt_rows, fidelity_rows, adapter,
-        base_variant=base_variant, zones=zones,
+        base_variant=base_variant, zones=zones, regions=regions, exclude_regions=exclude_regions,
     )
     out_path = args.out or os.path.join("/tmp", f"lagfill_validation_{args.model_version}.json")
     with open(out_path, "w") as f:
@@ -640,6 +680,7 @@ def _build_report(
     model_version: str, sample_requested: int, rows_sampled: int,
     nrt_rows: list[dict], fidelity_rows: list[dict], adapter: QRFModelAdapter,
     base_variant: str | None = None, zones: list[str] | None = None,
+    regions: list[str] | None = None, exclude_regions: list[str] | None = None,
 ) -> dict:
     """Shared by --phase all and --phase score so the two paths can never
     silently diverge in what a 'report' contains. sample_requested/
@@ -662,7 +703,28 @@ def _build_report(
     scoped zone(s)' data (build_gate constructs the gate fresh from the
     report alone, no merge with what's currently published). Stamping
     zones here lets build_gate refuse that specific case even when variant
-    itself was never in play."""
+    itself was never in play.
+
+    regions/exclude_regions (2026-08-08, sub-zone affine stratification --
+    see PARIS_CONFIDENCE_ROADMAP.md's "next round plan" in crisisready/
+    heat-risk-data-api for the full design this serves): the SAME
+    "silently replace the shared default" risk zones already guards
+    against exists one level finer here -- a report scored on only a
+    country subset of a Koppen zone's stations (e.g. FR-only Cfb) must
+    never be publishable to the shared, whole-zone default gate key, since
+    the fitted delta_scale/bias_correction would then apply to every
+    OTHER country sharing that zone too (a real, measured risk: this
+    program's own research found Cfb's raw tmin bias flips SIGN between
+    France and the rest of the zone). Stamped here so a future sub-zone-
+    aware publish_band_gate.py can refuse a regions-scoped report at the
+    default key the same way it already refuses a zones-scoped one,
+    without needing this script to know anything about how publishing
+    works. Filtering happens at SCORE time (see main()'s --phase score/all
+    branches), not at dump-rows/fetch time like --zones does -- a
+    deliberate difference: one whole-zone NRT fetch can be scored multiple
+    ways (regions=[FR], exclude_regions=[FR], unscoped) without re-hitting
+    Open-Meteo for the same stations three times, since the region filter
+    is a cheap in-memory station_id-prefix filter, not a DB predicate."""
     by_target: dict[str, dict] = {}
     for target in ("tmax", "tmin"):
         by_zone = score_band(adapter, nrt_rows, target, fold_salt=model_version)
@@ -687,8 +749,40 @@ def _build_report(
         by_target=by_target,
         extra=({"base_variant": base_variant} if base_variant else {})
               | ({"zones": sorted(zones)} if zones else {})
+              | ({"regions": sorted(regions)} if regions else {})
+              | ({"exclude_regions": sorted(exclude_regions)} if exclude_regions else {})
               or None,
     )
+
+
+def _filter_rows_by_region(
+    rows: list[dict], regions: list[str] | None, exclude_regions: list[str] | None,
+) -> list[dict]:
+    """Cheap, in-memory station_id-prefix filter applied to already-fetched
+    nrt_rows/fidelity_rows (see _build_report's own regions/exclude_regions
+    docstring for why this happens at score time, not dump-rows/fetch
+    time). GHCN's own station_id convention prefixes every ID with a
+    2-letter FIPS/ISO country code (confirmed against this program's own
+    prior research -- 'FR...' for France, 'MXM...'/'ASN...' etc. for
+    others) -- the SAME convention crisisready/heat-risk-data-api's own
+    round-1 France-affine evaluation already relied on
+    (str(r['station_id']).startswith('FR')), reused here rather than
+    re-deriving a country lookup from lat/lon or the `region` column
+    (which does exist on the DB row this script's dump-rows phase reads,
+    but does not currently survive into nrt_rows/fidelity_rows -- the
+    station_id prefix is available on every row already and needs no
+    plumbing change to carry an extra field through build_paired_rows).
+
+    regions and exclude_regions are mutually exclusive (validated in
+    main(), not re-validated here -- this is an internal helper, not a
+    second CLI entry point)."""
+    if not regions and not exclude_regions:
+        return rows
+    if regions:
+        prefixes = tuple(regions)
+        return [r for r in rows if str(r["station_id"]).startswith(prefixes)]
+    prefixes = tuple(exclude_regions)
+    return [r for r in rows if not str(r["station_id"]).startswith(prefixes)]
 
 
 if __name__ == "__main__":
