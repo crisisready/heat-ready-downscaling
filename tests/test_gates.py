@@ -347,3 +347,148 @@ class TestValidateBlendGate:
         }
         with pytest.raises(jsonschema.ValidationError):
             gates.validate_blend_gate(blend_gate)
+
+
+class TestBuildGateRefusesRegionsScopedReports:
+    """A regions-scoped report's by_target metrics reflect only that
+    country subset of a zone's stations -- build_gate must never turn
+    those into a flat gate[target][zone] entry (see gates.py's own
+    docstring on why: it would silently apply one country's fit to every
+    other country sharing that zone)."""
+
+    def test_regions_scoped_report_raises(self):
+        report = {"by_target": {"tmax": {"Cfb": _metrics(True)}, "tmin": {}}, "regions": ["FR"]}
+        with pytest.raises(ValueError, match="regions"):
+            gates.build_gate(report)
+
+    def test_exclude_regions_scoped_report_raises(self):
+        report = {"by_target": {"tmax": {"Cfb": _metrics(True)}, "tmin": {}}, "exclude_regions": ["FR"]}
+        with pytest.raises(ValueError, match="regions"):
+            gates.build_gate(report)
+
+    def test_unscoped_report_with_neither_key_still_proceeds(self):
+        report = {"by_target": {"tmax": {"Cfb": _metrics(True)}, "tmin": {}}}
+        gate = gates.build_gate(report)  # must not raise
+        assert gate["tmax"] == {"Cfb": True}
+
+
+class TestBuildSubzonePatch:
+    def test_basic_patch_shape(self):
+        report = {
+            "by_target": {
+                "tmax": {"Cfb": _metrics(True, rmse_improvement_pct_debiased_cv=0.05, bias_correction_c=0.3,
+                                          qrf_beats_grid_with_margin_affine=True, delta_scale_c={"scale": 0.5, "offset": 0.1})},
+                "tmin": {},
+            },
+            "regions": ["FR"],
+        }
+        patch = gates.build_subzone_patch(report)
+        assert patch["delta_scale_subzone"]["tmax"]["Cfb"]["FR"] == {"scale": 0.5, "offset": 0.1}
+        assert patch["bias_correction_subzone"]["tmax"]["Cfb"]["FR"] == 0.3
+        assert patch["delta_scale_subzone"]["tmin"] == {}
+
+    def test_no_regions_raises(self):
+        report = {"by_target": {"tmax": {}, "tmin": {}}}
+        with pytest.raises(ValueError, match="no regions"):
+            gates.build_subzone_patch(report)
+
+    def test_multi_region_report_raises(self):
+        report = {"by_target": {"tmax": {}, "tmin": {}}, "regions": ["FR", "DE"]}
+        with pytest.raises(ValueError, match="exactly one"):
+            gates.build_subzone_patch(report)
+
+    def test_band_key_mismatch_raises(self):
+        report = {"by_target": {"tmax": {}, "tmin": {}}, "regions": ["FR"], "band_key": "forecast_lead1"}
+        with pytest.raises(ValueError, match="band_key"):
+            gates.build_subzone_patch(report, band_key="lag_fill")
+
+    def test_variant_mismatch_raises(self):
+        report = {"by_target": {"tmax": {}, "tmin": {}}, "regions": ["FR"], "base_variant": "native_noelev"}
+        with pytest.raises(ValueError, match="base_variant"):
+            gates.build_subzone_patch(report, variant=None)
+
+    def test_non_passing_zone_publishes_nothing(self):
+        report = {"by_target": {"tmax": {"Cfb": _metrics(False)}, "tmin": {}}, "regions": ["FR"]}
+        patch = gates.build_subzone_patch(report)
+        assert patch["delta_scale_subzone"]["tmax"] == {}
+        assert patch["bias_correction_subzone"]["tmax"] == {}
+
+
+class TestMergeSubzonePatch:
+    def test_merge_into_empty_gate(self):
+        patch = {"delta_scale_subzone": {"tmax": {"Cfb": {"FR": {"scale": 0.5, "offset": 0.1}}}, "tmin": {}},
+                  "bias_correction_subzone": {"tmax": {}, "tmin": {}}}
+        merged = gates.merge_subzone_patch({}, patch)
+        assert merged["delta_scale_subzone"]["tmax"]["Cfb"]["FR"] == {"scale": 0.5, "offset": 0.1}
+
+    def test_merge_preserves_existing_zone_level_fields_untouched(self):
+        current = {
+            "tmax": {"Cfb": True}, "tmin": {"Cfb": True},
+            "bias_correction": {"tmax": {}, "tmin": {}},
+            "delta_scale": {"tmax": {"Cfb": {"scale": 0.415, "offset": 0.312}}, "tmin": {}},
+            "spatial_skill": {"tmax": {"Cfb": True}, "tmin": {"Cfb": True}},
+        }
+        patch = {"delta_scale_subzone": {"tmax": {"Cfb": {"FR": {"scale": 0.6, "offset": 0.2}}}, "tmin": {}},
+                  "bias_correction_subzone": {"tmax": {}, "tmin": {}}}
+        merged = gates.merge_subzone_patch(current, patch)
+        # Everything that existed before is untouched...
+        assert merged["tmax"] == {"Cfb": True}
+        assert merged["delta_scale"]["tmax"]["Cfb"] == {"scale": 0.415, "offset": 0.312}
+        assert merged["spatial_skill"] == current["spatial_skill"]
+        # ...and the new subzone entry is added alongside it.
+        assert merged["delta_scale_subzone"]["tmax"]["Cfb"]["FR"] == {"scale": 0.6, "offset": 0.2}
+        # original dict is not mutated
+        assert "delta_scale_subzone" not in current
+
+    def test_merge_preserves_a_different_zones_existing_subzone_entry(self):
+        current = {"delta_scale_subzone": {"tmax": {"Csa": {"ES": {"scale": 0.7, "offset": 0.0}}}, "tmin": {}},
+                    "bias_correction_subzone": {"tmax": {}, "tmin": {}}}
+        patch = {"delta_scale_subzone": {"tmax": {"Cfb": {"FR": {"scale": 0.6, "offset": 0.2}}}, "tmin": {}},
+                  "bias_correction_subzone": {"tmax": {}, "tmin": {}}}
+        merged = gates.merge_subzone_patch(current, patch)
+        assert merged["delta_scale_subzone"]["tmax"]["Csa"]["ES"] == {"scale": 0.7, "offset": 0.0}
+        assert merged["delta_scale_subzone"]["tmax"]["Cfb"]["FR"] == {"scale": 0.6, "offset": 0.2}
+
+    def test_merge_overwrites_same_zone_same_subzone_entry_on_republish(self):
+        current = {"delta_scale_subzone": {"tmax": {"Cfb": {"FR": {"scale": 0.5, "offset": 0.1}}}, "tmin": {}},
+                    "bias_correction_subzone": {"tmax": {}, "tmin": {}}}
+        patch = {"delta_scale_subzone": {"tmax": {"Cfb": {"FR": {"scale": 0.55, "offset": 0.15}}}, "tmin": {}},
+                  "bias_correction_subzone": {"tmax": {}, "tmin": {}}}
+        merged = gates.merge_subzone_patch(current, patch)
+        assert merged["delta_scale_subzone"]["tmax"]["Cfb"]["FR"] == {"scale": 0.55, "offset": 0.15}
+
+
+class TestSubzoneSchemaValidation:
+    def test_well_formed_subzone_fields_pass(self):
+        gate = {
+            "tmax": {"Cfb": True}, "tmin": {},
+            "bias_correction": {"tmax": {}, "tmin": {}},
+            "delta_scale": {"tmax": {}, "tmin": {}},
+            "spatial_skill": {"tmax": {"Cfb": True}, "tmin": {}},
+            "delta_scale_subzone": {"tmax": {"Cfb": {"FR": {"scale": 0.6, "offset": 0.2}}}, "tmin": {}},
+            "bias_correction_subzone": {"tmax": {"Cfb": {"FR": 0.1}}, "tmin": {}},
+        }
+        gates.validate_gate(gate)  # must not raise
+
+    def test_gate_with_no_subzone_fields_at_all_still_validates(self):
+        # Backward compatibility: every gate published before this feature
+        # existed has neither field, and must keep validating unchanged.
+        gate = {
+            "tmax": {"Cfb": True}, "tmin": {},
+            "bias_correction": {"tmax": {}, "tmin": {}},
+            "delta_scale": {"tmax": {}, "tmin": {}},
+            "spatial_skill": {"tmax": {"Cfb": True}, "tmin": {}},
+        }
+        gates.validate_gate(gate)  # must not raise
+
+    def test_malformed_subzone_entry_missing_offset_raises(self):
+        import jsonschema
+        gate = {
+            "tmax": {"Cfb": True}, "tmin": {},
+            "bias_correction": {"tmax": {}, "tmin": {}},
+            "delta_scale": {"tmax": {}, "tmin": {}},
+            "spatial_skill": {"tmax": {"Cfb": True}, "tmin": {}},
+            "delta_scale_subzone": {"tmax": {"Cfb": {"FR": {"scale": 0.6}}}, "tmin": {}},  # missing offset
+        }
+        with pytest.raises(jsonschema.ValidationError):
+            gates.validate_gate(gate)

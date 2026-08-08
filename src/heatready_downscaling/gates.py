@@ -8,6 +8,8 @@ parity, so this module genuinely owns "the gate shape" for both gate kinds.
 See PROVENANCE.md.
 """
 
+import copy
+
 BAND_GATE_SCHEMA: dict = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
@@ -60,6 +62,85 @@ BAND_GATE_SCHEMA: dict = {
             "properties": {
                 "tmax": {"type": "object", "additionalProperties": {"type": "boolean"}},
                 "tmin": {"type": "object", "additionalProperties": {"type": "boolean"}},
+            },
+        },
+        # delta_scale_subzone / bias_correction_subzone (2026-08-08,
+        # PARIS_CONFIDENCE_ROADMAP.md's "next round plan" in
+        # crisisready/heat-risk-data-api -- the France-within-Cfb shippable
+        # candidate): one level finer than delta_scale/bias_correction,
+        # NOT required, so every gate published before this field existed
+        # still validates, and a server that hasn't been updated to read it
+        # keeps serving the zone-level correction exactly as before -- same
+        # backward-compat shape delta_scale itself used when it was added
+        # alongside bias_correction.
+        #
+        # Keyed {target: {zone: {subzone_code: {scale, offset}}}} -- one
+        # extra nesting level under the existing zone key, not a parallel
+        # top-level-by-subzone structure, so a zone with no subzone data at
+        # all is simply absent here (matches every other field's "absent
+        # means not published" convention).
+        #
+        # subzone_code is a GHCN station_id COUNTRY PREFIX (e.g. "FR"),
+        # the SAME convention validate_lagfill_downscaling.py's own
+        # --regions flag uses -- deliberately not a free-text region name,
+        # so gates.py never needs its own separate concept of what a
+        # subzone "is."
+        #
+        # WHY THIS IS A SEPARATE FIELD, NOT JUST A FINER delta_scale: a
+        # subzone-scoped correction must NEVER silently reach a project
+        # outside that subzone the way a flat delta_scale[target][zone]
+        # entry would (every project in that zone reads the same value).
+        # build_gate() refuses to build this field from a whole-zone
+        # report (see its own docstring) -- ONLY build_subzone_patch(),
+        # called on a --regions-scoped report, ever populates it, and only
+        # as a MERGE into the currently-published gate (never a fresh
+        # build+overwrite the way the rest of this schema's fields are) --
+        # see publish_band_gate.py's own --regions handling. Serving-side
+        # resolution is likewise opt-in per project (crisisready/
+        # heat-risk-data-api's manager.py, an explicit override dict
+        # mirroring _LAG_FILL_FORECAST_NATIVE_RESOLUTION_OVERRIDE's own
+        # precedent) -- a project not explicitly opted into a subzone code
+        # never reads this field at all, regardless of what's published
+        # here, so publishing a subzone entry can never silently change
+        # what any EXISTING project serves.
+        "delta_scale_subzone": {
+            "type": "object",
+            "properties": {
+                "tmax": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "object",
+                        "additionalProperties": {
+                            "type": "object",
+                            "required": ["scale", "offset"],
+                            "properties": {"scale": {"type": "number"}, "offset": {"type": "number"}},
+                        },
+                    },
+                },
+                "tmin": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "object",
+                        "additionalProperties": {
+                            "type": "object",
+                            "required": ["scale", "offset"],
+                            "properties": {"scale": {"type": "number"}, "offset": {"type": "number"}},
+                        },
+                    },
+                },
+            },
+        },
+        "bias_correction_subzone": {
+            "type": "object",
+            "properties": {
+                "tmax": {
+                    "type": "object",
+                    "additionalProperties": {"type": "object", "additionalProperties": {"type": "number"}},
+                },
+                "tmin": {
+                    "type": "object",
+                    "additionalProperties": {"type": "object", "additionalProperties": {"type": "number"}},
+                },
             },
         },
     },
@@ -263,6 +344,26 @@ def build_gate(report: dict, band_key: str | None = None, variant: str | None = 
             "currently published). Either publish under a --variant, or rerun the validation "
             "without --zones for a report that's safe to publish to the default key.",
         )
+    # 2026-08-08, sub-zone (country) scoping: a regions-scoped report's own
+    # by_target metrics reflect ONLY that subset of a zone's stations (e.g.
+    # French Cfb stations only) -- feeding it through this function's normal
+    # "build a fresh gate from the report" path would write those
+    # France-only numbers to the SHARED, whole-zone gate[target][zone]
+    # entry, exactly the cross-country regression this program's own
+    # research found real (Cfb's raw tmin bias flips sign between France
+    # and the rest of the zone). Refuse unconditionally here, the same way
+    # a zones-scoped/no-variant report is refused above -- a regions-scoped
+    # report must go through build_subzone_patch() instead, which never
+    # touches the flat zone-level fields at all.
+    if report.get("regions") or report.get("exclude_regions"):
+        raise ValueError(
+            f"report is scoped to regions={report.get('regions')!r} "
+            f"exclude_regions={report.get('exclude_regions')!r} -- refusing to publish via build_gate, "
+            "which would write this subset's own numbers to the shared, whole-zone gate entry every "
+            "OTHER country in that zone also reads. Use build_subzone_patch() instead (regions-scoped "
+            "reports only -- exclude_regions-scoped reports, e.g. 'the rest of Cfb', are a regression "
+            "CHECK, not something this program ever publishes on their own).",
+        )
     gate: dict = {
         "tmax": {}, "tmin": {},
         "bias_correction": {"tmax": {}, "tmin": {}},
@@ -293,6 +394,98 @@ def build_gate(report: dict, band_key: str | None = None, variant: str | None = 
             # already beats grid -- see this function's own docstring.
             gate["spatial_skill"][target][zone] = bool(metrics.get("qrf_beats_grid"))
     return gate
+
+
+def build_subzone_patch(report: dict, band_key: str | None = None, variant: str | None = None) -> dict:
+    """The regions-scoped counterpart to build_gate() -- builds a small
+    PATCH fragment ({"delta_scale_subzone": {...}, "bias_correction_subzone":
+    {...}}), never a full gate, and never anything a caller could
+    accidentally PUT as a whole gate (it deliberately omits "tmax"/"tmin"/
+    "bias_correction"/"delta_scale"/"spatial_skill" entirely) -- the
+    caller (publish_band_gate.py's --regions path) is required to GET the
+    currently-published gate and MERGE this patch into it, never overwrite.
+
+    Same band_key/variant checks as build_gate, for the same reasons (see
+    its own docstring) -- a regions-scoped report is still subject to both.
+
+    Requires report["regions"] to be a single-element list -- a subzone
+    patch is keyed by exactly one subzone code per publish, so a report
+    scoped to multiple regions at once (which validate_lagfill_downscaling.py's
+    --regions flag technically allows, e.g. --regions FR,DE) has no single
+    subzone code to file its numbers under and must be split into separate
+    single-region validation runs before publishing, one patch per region.
+    This is a deliberate restriction on what's PUBLISHABLE, not on what the
+    validation harness can score -- --regions FR,DE remains a legitimate
+    thing to score (e.g. as an ad-hoc combined check) even though the
+    result can't go through this function."""
+    if band_key is not None and report.get("band_key") != band_key:
+        raise ValueError(
+            f"report band_key {report.get('band_key')!r} does not match --band-key {band_key!r} "
+            "-- refusing to publish a report generated for a different band",
+        )
+    report_variant = report.get("base_variant")
+    if report_variant != variant:
+        raise ValueError(
+            f"report base_variant {report_variant!r} does not match --variant {variant!r} -- "
+            "refusing to publish a subzone patch fitted under one base distribution against a "
+            "gate key for a different one",
+        )
+    regions = report.get("regions")
+    if not regions:
+        raise ValueError(
+            "report has no regions -- build_subzone_patch is only for --regions-scoped reports; "
+            "use build_gate for an unscoped or --zones-scoped (whole-zone) report",
+        )
+    if len(regions) != 1:
+        raise ValueError(
+            f"report is scoped to regions={regions!r} -- build_subzone_patch requires exactly one "
+            "region per publish (a subzone patch is keyed by a single subzone code); rerun the "
+            "validation once per region if a combined multi-region report was used to score",
+        )
+    subzone = regions[0]
+
+    patch: dict = {"delta_scale_subzone": {"tmax": {}, "tmin": {}}, "bias_correction_subzone": {"tmax": {}, "tmin": {}}}
+    for target in ("tmax", "tmin"):
+        for zone, metrics in report.get("by_target", {}).get(target, {}).items():
+            debias_passes = metrics.get("qrf_beats_grid_with_margin") is True
+            affine_passes = metrics.get("qrf_beats_grid_with_margin_affine") is True
+            if not (debias_passes or affine_passes):
+                continue
+            # Same publish conditions as build_gate's own bias_correction/delta_scale
+            # blocks (see that function's docstring) -- a subzone entry is held to
+            # the SAME evidence bar as a zone entry, not a looser one, because
+            # a subzone claim is exactly as capable of corrupting what gets served
+            # as a zone claim is (just to a narrower project set).
+            if debias_passes and metrics.get("bias_correction_c") is not None:
+                patch["bias_correction_subzone"][target].setdefault(zone, {})[subzone] = metrics["bias_correction_c"]
+            if affine_passes and metrics.get("delta_scale_c") is not None:
+                patch["delta_scale_subzone"][target].setdefault(zone, {})[subzone] = metrics["delta_scale_c"]
+    return patch
+
+
+def merge_subzone_patch(current_gate: dict, patch: dict) -> dict:
+    """Merges a build_subzone_patch() fragment into an already-published
+    gate dict (as returned by a real GET, or {} on a first-ever subzone
+    publish to a gate with no subzone data yet) -- returns a NEW dict,
+    does not mutate current_gate in place, so a caller can still compare
+    before/after for logging without the comparison being trivially equal.
+
+    Deliberately additive at the (target, zone, subzone) leaf only -- every
+    OTHER key in current_gate (tmax, tmin, bias_correction, delta_scale,
+    spatial_skill, and any OTHER zone's or OTHER subzone's entry already
+    present under delta_scale_subzone/bias_correction_subzone) is carried
+    through byte-for-byte unchanged. This is the actual mechanism that
+    makes a subzone publish safe where a build_gate publish of the same
+    data would not be -- see build_gate's own regions refusal."""
+    merged = copy.deepcopy(current_gate) if current_gate else {}
+    for field in ("delta_scale_subzone", "bias_correction_subzone"):
+        merged.setdefault(field, {"tmax": {}, "tmin": {}})
+        for target in ("tmax", "tmin"):
+            merged[field].setdefault(target, {})
+            for zone, by_subzone in patch.get(field, {}).get(target, {}).items():
+                merged[field][target].setdefault(zone, {})
+                merged[field][target][zone].update(by_subzone)
+    return merged
 
 
 def validate_gate(gate: dict) -> None:
