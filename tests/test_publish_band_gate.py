@@ -325,6 +325,56 @@ class TestDoSubzonePublish:
         except ClientError as exc:
             assert exc.response["Error"]["Code"] == "AccessDenied"
 
+    def test_patch_zone_not_enabled_at_zone_level_refuses(self):
+        """2026-08-08 review finding: a gate exists at the key, but not for
+        the SPECIFIC zone the patch targets -- e.g. current gate only has
+        tmax={'Cfb': True}, patch carries a Csa entry. Must refuse, the
+        same 'dead data nothing ever reads' reasoning as the no-current-
+        gate check, just one level finer."""
+        client = MagicMock()
+        client.get_object.return_value = {"Body": MagicMock(read=lambda: json.dumps(self._EXISTING_GATE).encode())}
+        csa_patch = {
+            "delta_scale_subzone": {"tmax": {"Csa": {"ES": {"scale": 0.7, "offset": 0.0}}}, "tmin": {}},
+            "bias_correction_subzone": {"tmax": {}, "tmin": {}},
+        }
+        try:
+            publish_band_gate._do_subzone_publish(client, csa_patch, "bucket", "key", dry_run=False)
+            assert False, "expected SystemExit"
+        except SystemExit as exc:
+            assert "Csa" in str(exc)
+        client.put_object.assert_not_called()
+
+    def test_patch_zone_enabled_only_for_other_target_refuses(self):
+        """Zone-level enablement is per-TARGET too -- a gate with
+        tmin={'Cfb': True} but no tmax entry must still refuse a tmax/Cfb
+        subzone patch."""
+        client = MagicMock()
+        gate = {**self._EXISTING_GATE, "tmax": {}}  # Cfb not enabled for tmax
+        client.get_object.return_value = {"Body": MagicMock(read=lambda: json.dumps(gate).encode())}
+        try:
+            publish_band_gate._do_subzone_publish(client, _SUBZONE_PATCH, "bucket", "key", dry_run=False)
+            assert False, "expected SystemExit"
+        except SystemExit as exc:
+            assert "tmax/Cfb" in str(exc)
+
+    def test_bias_correction_only_subzone_entry_still_reported_and_published(self, capsys):
+        """2026-08-08 review finding: an entry present ONLY in
+        bias_correction_subzone (debias passes, affine doesn't) must still
+        show up in the printed summary, not just silently upload -- the
+        whole point of a separate, explicit publish step is a human seeing
+        what's about to change before it does."""
+        client = MagicMock()
+        client.get_object.return_value = {"Body": MagicMock(read=lambda: json.dumps(self._EXISTING_GATE).encode())}
+        bias_only_patch = {
+            "delta_scale_subzone": {"tmax": {}, "tmin": {}},
+            "bias_correction_subzone": {"tmax": {"Cfb": {"FR": 0.3}}, "tmin": {}},
+        }
+        merged = publish_band_gate._do_subzone_publish(client, bias_only_patch, "bucket", "key", dry_run=False)
+        assert merged["bias_correction_subzone"]["tmax"]["Cfb"]["FR"] == 0.3
+        client.put_object.assert_called_once()
+        out = capsys.readouterr().out
+        assert "tmax/Cfb" in out and "bias_correction" in out and "FR" in out
+
 
 class TestPublishBandGateCliRegionsRouting:
     """CLI-level: a regions-stamped report must route to the subzone-patch
@@ -351,3 +401,23 @@ class TestPublishBandGateCliRegionsRouting:
         )
         assert result.returncode != 0
         assert "VULNERABILITY_DATA_BUCKET" in result.stderr or "bucket" in result.stderr.lower()
+
+    def test_exclude_regions_only_report_refuses_cleanly_not_a_raw_traceback(self, tmp_path):
+        """2026-08-08 review finding, live-reproduced before this fix: an
+        exclude_regions-only report (the 'score the rest of the zone as a
+        regression check' workflow this program's own design supports) was
+        being routed into the subzone-patch path, which crashed with an
+        unhandled ValueError/raw traceback instead of this CLI's normal
+        SystemExit-with-message idiom. Must now refuse cleanly, with no
+        traceback, before ever touching S3 (no --dry-run needed to prove
+        this -- it must fail before any bucket/boto3 code runs)."""
+        exclude_only_report = {**_VALID_REPORT, "exclude_regions": ["FR"]}
+        report_path = _write_report(tmp_path, exclude_only_report)
+        result = subprocess.run(
+            [sys.executable, _SCRIPT, "--report", report_path, "--model-version", "ds-test-1",
+             "--band-key", "lag_fill", "--dry-run"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode != 0
+        assert "Traceback" not in result.stderr
+        assert "exclude_regions" in result.stderr and "regression" in result.stderr.lower()

@@ -372,8 +372,7 @@ def build_gate(report: dict, band_key: str | None = None, variant: str | None = 
     }
     for target in ("tmax", "tmin"):
         for zone, metrics in report.get("by_target", {}).get(target, {}).items():
-            debias_passes = metrics.get("qrf_beats_grid_with_margin") is True
-            affine_passes = metrics.get("qrf_beats_grid_with_margin_affine") is True
+            debias_passes, affine_passes = _evidence_bar_verdict(metrics)
             if not (debias_passes or affine_passes):
                 continue
             gate[target][zone] = True
@@ -394,6 +393,19 @@ def build_gate(report: dict, band_key: str | None = None, variant: str | None = 
             # already beats grid -- see this function's own docstring.
             gate["spatial_skill"][target][zone] = bool(metrics.get("qrf_beats_grid"))
     return gate
+
+
+def _evidence_bar_verdict(metrics: dict) -> tuple[bool, bool]:
+    """(debias_passes, affine_passes) -- the SAME evidence bar build_gate
+    and build_subzone_patch both hold every zone/subzone entry to (both
+    docstrings explicitly claim this; 2026-08-08 review finding: they had
+    silently duplicated this exact block instead of sharing it, a real
+    risk of the two drifting apart on a future edit to one but not the
+    other). Factored out here so there is exactly one place this decision
+    is made."""
+    debias_passes = metrics.get("qrf_beats_grid_with_margin") is True
+    affine_passes = metrics.get("qrf_beats_grid_with_margin_affine") is True
+    return debias_passes, affine_passes
 
 
 def build_subzone_patch(report: dict, band_key: str | None = None, variant: str | None = None) -> dict:
@@ -447,8 +459,7 @@ def build_subzone_patch(report: dict, band_key: str | None = None, variant: str 
     patch: dict = {"delta_scale_subzone": {"tmax": {}, "tmin": {}}, "bias_correction_subzone": {"tmax": {}, "tmin": {}}}
     for target in ("tmax", "tmin"):
         for zone, metrics in report.get("by_target", {}).get(target, {}).items():
-            debias_passes = metrics.get("qrf_beats_grid_with_margin") is True
-            affine_passes = metrics.get("qrf_beats_grid_with_margin_affine") is True
+            debias_passes, affine_passes = _evidence_bar_verdict(metrics)
             if not (debias_passes or affine_passes):
                 continue
             # Same publish conditions as build_gate's own bias_correction/delta_scale

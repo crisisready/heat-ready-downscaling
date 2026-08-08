@@ -189,7 +189,27 @@ def main() -> None:
     # different S3 key), so it needs an explicit, checkable-against-the-
     # report flag; regions changes WHAT KIND of publish this is (patch vs.
     # full gate), which the report already unambiguously says on its own.
-    if report.get("regions") or report.get("exclude_regions"):
+    #
+    # exclude_regions-WITHOUT-regions gets its own explicit, clean refusal
+    # here (2026-08-08 review finding) rather than falling through to
+    # _publish_subzone_patch, which would hit build_subzone_patch's own
+    # "report has no regions" ValueError uncaught -- a real, live-reproduced
+    # crash (raw traceback, not this CLI's usual SystemExit-with-message
+    # idiom) for exactly the "score the rest of the zone as a regression
+    # check" workflow this program's own regions/exclude_regions design is
+    # meant to support. An exclude_regions-only report is legitimate to
+    # SCORE (validate_lagfill_downscaling.py's own regression-check use
+    # case) but was never meant to be PUBLISHABLE on its own -- see
+    # build_gate's own refusal message for the same point stated from the
+    # gates.py side.
+    if report.get("exclude_regions") and not report.get("regions"):
+        raise SystemExit(
+            "report is scoped to exclude_regions="
+            f"{report['exclude_regions']!r} with no regions -- this shape is a regression CHECK "
+            "(e.g. 'score the rest of Cfb'), not something this program ever publishes on its own. "
+            "Nothing to publish here.",
+        )
+    if report.get("regions"):
         _publish_subzone_patch(report, args, bucket, key)
     else:
         _publish_full_gate(report, args, bucket, key)
@@ -281,15 +301,52 @@ def _do_subzone_publish(client, patch: dict, bucket: str, key: str, dry_run: boo
             "patch with no zone-level gate to refine. Publish the whole-zone gate first (build_gate, "
             "the normal, unscoped publish path), then publish this sub-zone patch as a follow-up.",
         )
+    # 2026-08-08 review finding: the check above catches "no gate at all"
+    # but not "gate exists, but not for THIS specific zone" -- e.g. the
+    # current gate has tmax={'Cfb': True} only, and this patch carries a
+    # Csa entry (a zone that's never cleared the zone-level gate). That
+    # would publish delta_scale_subzone data for a zone with no top-level
+    # tmax['Csa']/tmin['Csa'] entry at all -- exactly the "dead data
+    # nothing ever reads" case the no-current-gate check above already
+    # exists to prevent, just one level finer. Check every zone referenced
+    # in the patch (either subzone field, either target) is actually
+    # enabled (True) in current_gate's own top-level tmax/tmin first.
+    unpublished_zones = []
+    for field in ("delta_scale_subzone", "bias_correction_subzone"):
+        for target, by_zone in patch.get(field, {}).items():
+            for zone in by_zone:
+                if not current_gate.get(target, {}).get(zone):
+                    unpublished_zones.append((target, zone))
+    if unpublished_zones:
+        detail = ", ".join(f"{t}/{z}" for t, z in sorted(set(unpublished_zones)))
+        raise SystemExit(
+            f"Refusing to publish a sub-zone patch for zone(s) not yet enabled at the zone level in "
+            f"the currently-published gate: {detail}. A sub-zone entry for a zone with no top-level "
+            "tmax/tmin=True entry would be dead data nothing ever reads -- get that zone passing the "
+            "whole-zone gate first.",
+        )
     merged_gate = merge_subzone_patch(current_gate, patch)
     validate_gate(merged_gate)
 
+    # 2026-08-08 review finding: this loop only inspected delta_scale_subzone
+    # -- a patch entry that exists ONLY in bias_correction_subzone (the
+    # offset-only/debias path passes but the affine path doesn't) was being
+    # merged and uploaded with zero mention in this human-readable summary,
+    # even though the whole point of a separate, explicit publish step is a
+    # human seeing what's about to change before it does. Report both
+    # fields, and union their zones per target so a zone appearing in only
+    # one of the two still gets a line.
     for target in ("tmax", "tmin"):
-        new_entries = patch["delta_scale_subzone"][target]
-        if new_entries:
-            for zone, by_region in new_entries.items():
-                print(f"  {target}/{zone}: publishing subzone delta_scale for {sorted(by_region)} "
-                      f"(zone-level default at s3://{bucket}/{key} is untouched)")
+        delta_zones = patch["delta_scale_subzone"][target]
+        bias_zones = patch["bias_correction_subzone"][target]
+        for zone in sorted(set(delta_zones) | set(bias_zones)):
+            parts = []
+            if zone in delta_zones:
+                parts.append(f"delta_scale for {sorted(delta_zones[zone])}")
+            if zone in bias_zones:
+                parts.append(f"bias_correction for {sorted(bias_zones[zone])}")
+            print(f"  {target}/{zone}: publishing subzone " + " and ".join(parts) +
+                  f" (zone-level default at s3://{bucket}/{key} is untouched)")
 
     if dry_run:
         print(f"--dry-run: not uploading. Merged gate that WOULD be published to s3://{bucket}/{key}:")
