@@ -1159,6 +1159,36 @@ class TestMainStationIdsFileAndDryRun:
         stdout = capsys.readouterr().out
         assert "WARNING" in stdout and "USW00099999" in stdout
 
+    def test_dry_run_skips_the_table_ddl_too_not_just_the_upsert(self, monkeypatch, tmp_path):
+        """Real gap found live 2026-08-20: create_ghcn_training_table() (a real
+        write-capable DB connection + DDL, idempotent but still a write) was
+        called unconditionally, before dry_run was even checked -- so --dry-run
+        could never actually run without DB write credentials, contradicting
+        its own docstring's promise to skip "the DB write itself." Gated the
+        same way the real upsert already was."""
+        f = tmp_path / "ids.json"
+        f.write_text(json.dumps({"station_ids": ["USW00023183"]}))
+        monkeypatch.setattr(sys, "argv", [
+            "build_training_set.py", "--station-ids-file", str(f),
+            "--start-date", "2016-06-01", "--end-date", "2016-06-30", "--dry-run",
+        ])
+        mocks = self._patch_common(list_ghcn_stations_return=[_US_STATION], active_ids={"USW00023183"})
+        with mocks[0], mocks[1], mocks[2] as mock_create_table, mocks[3], mocks[4], mocks[5], mocks[6], mocks[7]:
+            bts.main()
+        mock_create_table.assert_not_called()
+
+    def test_normal_run_still_creates_the_table(self, monkeypatch, tmp_path):
+        f = tmp_path / "ids.json"
+        f.write_text(json.dumps({"station_ids": ["USW00023183"]}))
+        monkeypatch.setattr(sys, "argv", [
+            "build_training_set.py", "--station-ids-file", str(f),
+            "--start-date", "2016-06-01", "--end-date", "2016-06-30",
+        ])
+        mocks = self._patch_common(list_ghcn_stations_return=[_US_STATION], active_ids={"USW00023183"})
+        with mocks[0], mocks[1], mocks[2] as mock_create_table, mocks[3], mocks[4], mocks[5], mocks[6], mocks[7]:
+            bts.main()
+        mock_create_table.assert_called_once()
+
     def test_dry_run_skips_upsert_but_still_builds_rows(self, monkeypatch, tmp_path, capsys):
         f = tmp_path / "ids.json"
         f.write_text(json.dumps({"station_ids": ["USW00023183"]}))

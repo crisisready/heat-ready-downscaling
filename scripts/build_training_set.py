@@ -1230,7 +1230,17 @@ def main() -> None:
     vuln_bucket = _bucket_from_credentials()
     landscan_bucket, landscan_key = _landscan_from_credentials()
 
-    ghcn.create_ghcn_training_table()
+    if not args.dry_run:
+        # Real gap, found live 2026-08-20 staging a --dry-run --rows-out run with no
+        # DB write credentials available yet: this was called unconditionally, before
+        # dry_run was even checked, so --dry-run could never actually run without a
+        # write-capable DB connection despite its own docstring's explicit promise
+        # ("skip the final ghcn.upsert_ghcn_training_rows call... this only gates the
+        # DB write itself") -- the CREATE TABLE/ALTER TABLE DDL here (idempotent, but
+        # still a real write-capable connection and a real write statement) is exactly
+        # the kind of DB interaction a dry run should never require. Gated the same way
+        # the actual upsert already is.
+        ghcn.create_ghcn_training_table()
 
     # One inventory fetch for every requested country, not one per country --
     # list_ghcn_stations downloads and parses NOAA's entire global station
