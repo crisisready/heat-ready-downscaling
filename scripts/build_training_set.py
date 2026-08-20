@@ -1187,6 +1187,17 @@ def main() -> None:
                               "computing them) -- this only gates the DB write itself, matching "
                               "publish_band_gate.py's own dry-run/human-decision idiom for the one step "
                               "that actually commits something.")
+    parser.add_argument("--rows-out", default=None,
+                         help="Write every real computed row (across all countries/zones/chunks) to this "
+                              "JSON path -- {\"rows\": [...], \"row_count\": N, \"countries\": [...], "
+                              "\"start_date\", \"end_date\"}. Independent of --dry-run/--dry-run's own DB "
+                              "write gate: this only controls whether the real fetch/covariate compute this "
+                              "run already paid for gets persisted anywhere besides the DB, so a --dry-run "
+                              "(no DB write) run's real CDS/S3/NOAA cost isn't thrown away with nothing to "
+                              "show for it -- the same gap validate_lagfill_downscaling.py's own "
+                              "--phase dump-rows/--rows-in split already solved for reading FROM "
+                              "ghcn_training; this is the equivalent for rows computed but not yet written "
+                              "TO it. Omit for the previous behavior (rows exist only in-process memory).")
     args = parser.parse_args()
 
     if bool(args.countries) == bool(args.station_ids_file):
@@ -1242,6 +1253,8 @@ def main() -> None:
     active_ids = ghcn.active_station_ids(countries, min_last_year)
 
     total_rows = 0
+    all_rows: list[dict] = [] if args.rows_out else None  # None (not []) when unused, so a caller
+    # that forgets --rows-out can't mistake an always-empty list for "genuinely zero rows computed."
     for country in countries:
         stations = stations_by_country.get(country, [])
         before_active_filter = len(stations)
@@ -1283,6 +1296,8 @@ def main() -> None:
                 )
                 if rows and not args.dry_run:
                     ghcn.upsert_ghcn_training_rows(rows)
+                if all_rows is not None:
+                    all_rows.extend(rows)
                 total_rows += len(rows)
                 if args.dry_run:
                     print(f"[{batch_label}] --dry-run: would write {len(rows)} row(s), not uploading. "
@@ -1295,6 +1310,16 @@ def main() -> None:
               f"across {len(countries)} countr(y/ies).")
     else:
         print(f"Done. {total_rows} total ghcn_training row(s) across {len(countries)} countr(y/ies).")
+
+    if args.rows_out:
+        with open(args.rows_out, "w") as f:
+            json.dump({
+                "rows": all_rows, "row_count": len(all_rows), "countries": countries,
+                "start_date": args.start_date, "end_date": args.end_date,
+                "dry_run": args.dry_run,  # honest provenance -- whether this same run ALSO wrote to
+                # ghcn_training, or these rows exist only here, matters to anyone consuming the file later.
+            }, f)
+        print(f"--rows-out: wrote {len(all_rows)} row(s) to {args.rows_out}")
 
 
 if __name__ == "__main__":
