@@ -1200,6 +1200,56 @@ class TestMainStationIdsFileAndDryRun:
         stdout = capsys.readouterr().out
         assert "WARNING" in stdout and "USW00099999" in stdout
 
+    def test_rows_out_flushes_after_every_chunk_not_just_at_the_end(self, monkeypatch, tmp_path):
+        """Real gap found live 2026-08-20 mid-way through an actual multi-hour,
+        many-chunk Spain GHCN pull: --rows-out only ever wrote once, at the
+        very end of the ENTIRE station-ids-file list, so a crash/kill/bastion
+        interruption after hours of real compute lost all of it with nothing
+        on disk. Two stations far enough apart (different 0.5deg extent
+        chunks, same mocked zone) force two separate build_rows_for_country
+        calls -- the file on disk must reflect the first chunk's rows before
+        the second chunk even starts, not only after both are done."""
+        far_station_1 = {"station_id": "USW00023183", "lon": -112.0, "lat": 33.43, "elevation_m": 339.2, "name": "PHOENIX AP"}
+        far_station_2 = {"station_id": "USW00099998", "lon": -70.0, "lat": 40.0, "elevation_m": 10.0, "name": "FAR AWAY STATION"}
+        f = tmp_path / "ids.json"
+        f.write_text(json.dumps({"station_ids": ["USW00023183", "USW00099998"]}))
+        out = tmp_path / "rows.json"
+        monkeypatch.setattr(sys, "argv", [
+            "build_training_set.py", "--station-ids-file", str(f),
+            "--start-date", "2016-06-01", "--end-date", "2016-06-30",
+            "--dry-run", "--rows-out", str(out),
+        ])
+        call_count = 0
+        seen_row_counts_on_disk_during_run = []
+
+        def fake_build_rows(country, stations, *a, **k):
+            nonlocal call_count
+            call_count += 1
+            rows = [{"station_id": s["station_id"], "date": "2016-06-15"} for s in stations]
+            # Read the file back INSIDE this call (before the NEXT chunk's
+            # build_rows_for_country runs) -- proves the checkpoint from the
+            # PREVIOUS chunk (or nothing, on the first call) already landed.
+            if out.exists():
+                seen_row_counts_on_disk_during_run.append(json.loads(out.read_text())["row_count"])
+            else:
+                seen_row_counts_on_disk_during_run.append(0)
+            return rows
+
+        mocks = self._patch_common(
+            list_ghcn_stations_return=[far_station_1, far_station_2],
+            active_ids={"USW00023183", "USW00099998"},
+        )
+        with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], \
+             patch.object(bts, "build_rows_for_country", side_effect=fake_build_rows), \
+             mocks[6], mocks[7]:
+            bts.main()
+
+        assert call_count == 2  # confirms the two stations really did land in separate chunks
+        assert seen_row_counts_on_disk_during_run == [0, 1]  # 0 before chunk 1, 1 (chunk 1's row) before chunk 2
+        final = json.loads(out.read_text())
+        assert final["row_count"] == 2
+        assert final["complete"] is True
+
     def test_dry_run_skips_the_table_ddl_too_not_just_the_upsert(self, monkeypatch, tmp_path):
         """Real gap found live 2026-08-20: create_ghcn_training_table() (a real
         write-capable DB connection + DDL, idempotent but still a write) was
