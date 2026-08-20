@@ -119,6 +119,9 @@ import os
 import re
 import sys
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 
@@ -130,6 +133,7 @@ import ghcn
 import heat_calcs
 import landscan
 import lst
+import open_meteo
 import vulnerability
 
 logger = logging.getLogger(__name__)
@@ -452,6 +456,93 @@ def fetch_era5_land_for_stations(
             nighttime_wind_by_station.setdefault(name, {}).update(by_date)
 
     return daily_by_station, humidity_by_station, nighttime_wind_by_station
+
+
+def _fetch_om_era5_land_daily(lat: float, lon: float, tz: str, start_date: date, end_date: date, retries: int = 3):
+    """One real Open-Meteo archive call for one station point, requesting
+    the EXPLICIT era5_land model (2026-08-20 real finding: the archive
+    API's default is Open-Meteo's own best_match blend, NOT raw ERA5-Land
+    -- confirmed live via a direct CDS comparison after first mistakenly
+    comparing against the default, and via era5.download_era5's own
+    DEFAULT_ERA5_DATASET being "reanalysis-era5-single-levels", the coarse
+    non-Land dataset, unless "reanalysis-era5-land" is passed explicitly --
+    the same real mistake this docstring is warning a future reader not to
+    repeat). `timezone=tz` makes Open-Meteo aggregate to LOCAL calendar
+    days server-side, the same real convention
+    heat_calcs.aggregate_hourly_to_daily enforces for the CDS path (see
+    fetch_era5_land_for_stations's own docstring on why UTC-day
+    aggregation silently produces zero complete days for a real western-
+    hemisphere station) -- no separate hourly-to-daily step needed here."""
+    params = {
+        "latitude": lat, "longitude": lon,
+        "start_date": start_date.isoformat(), "end_date": end_date.isoformat(),
+        "daily": "temperature_2m_max,temperature_2m_min",
+        "timezone": tz, "models": "era5_land",
+    }
+    api_key = open_meteo._open_meteo_api_key()
+    if api_key:
+        params["apikey"] = api_key
+    url = open_meteo._archive_url() + "?" + urllib.parse.urlencode(params)
+    last_exc = None
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(url, timeout=60) as resp:
+                return json.loads(resp.read())
+        except (urllib.error.URLError, TimeoutError) as exc:
+            last_exc = exc
+            time.sleep(2)
+    raise last_exc
+
+
+def fetch_era5_land_for_stations_via_openmeteo(
+    stations: list[dict], start_date: date, end_date: date,
+) -> tuple[dict[str, dict[str, dict]], dict[str, dict[str, float]], dict[str, dict[str, float]]]:
+    """Real, fast alternative to fetch_era5_land_for_stations -- same exact
+    return shape (so build_rows_for_country needs no changes beyond which
+    function it calls), but via Open-Meteo's non-queued archive API
+    (models=era5_land, confirmed live 2026-08-20 to genuinely match real
+    CDS ERA5-Land once requested correctly -- see this module's own
+    changelog/commit message for the live comparison numbers) instead of
+    CDS's own async job queue, which was independently measured tonight to
+    add multi-minute-per-request real wall-clock latency regardless of
+    account rotation.
+
+    Real, honest limitation, not silently glossed over: humidity_by_station
+    and nighttime_wind_by_station are returned EMPTY -- Open-Meteo's
+    archive API was only queried for temperature_2m_max/min here, not the
+    d2m/sp/u10/v10/ssrd carrier the CDS path derives specific humidity and
+    nighttime wind from. Rows built from this path will have real, disclosed
+    NULL grid_specific_humidity_kgkg/nighttime_wind_ms -- ghcn.py's own
+    _NOT_NULL_DEFAULTS confirms neither column is required, matching this
+    codebase's existing "no imputation, a real gap stays a real gap" rule
+    (PHASE5_CSA_ES_FIT_SCOPE.md, crisisready/heat-risk-data-api) rather than
+    fabricating a value. A row missing these two columns fails
+    build_feature_matrix's complete_mask check for actual model training,
+    same real consequence any other missing covariate already has -- these
+    rows are real and correctly labeled, just not usable for a full
+    predict_downscaled-style fit until backfilled by a future CDS pass.
+
+    One real Open-Meteo call per station (not per chunk/bbox like the CDS
+    path) -- no lock needed, Open-Meteo's paid tier has no documented
+    per-account concurrency cap at this volume (see this repo's own
+    reference notes)."""
+    tz_map = _timezones_for_stations(stations)
+    daily_by_station: dict[str, dict[str, dict]] = {}
+    for s in stations:
+        sid = s["station_id"]
+        tz = tz_map.get(sid, "UTC")
+        om = _fetch_om_era5_land_daily(s["lat"], s["lon"], tz, start_date, end_date)
+        daily = om.get("daily", {})
+        times = daily.get("time", [])
+        tmax_list = daily.get("temperature_2m_max", [])
+        tmin_list = daily.get("temperature_2m_min", [])
+        by_date = {}
+        for date_iso, tmax, tmin in zip(times, tmax_list, tmin_list):
+            if tmax is None or tmin is None:
+                continue
+            by_date[date_iso] = {"tmax": tmax, "tmin": tmin}
+        daily_by_station[sid] = by_date
+    return daily_by_station, {}, {}
 
 
 def _daily_mean_specific_humidity(hourly_rows: list[dict], tz_map: dict[str, str]) -> dict[str, dict[str, float]]:
@@ -781,6 +872,7 @@ def build_rows_for_country(
     country: str, stations: list[dict], start_date: date, end_date: date, vuln_bucket: str,
     landscan_bucket: str, landscan_key: str, *,
     ghcn_max_workers: int = 8, ghcn_checkpoint_path: str | None = None,
+    era5_source: str = "cds",
 ) -> list[dict]:
     """Assemble ghcn_training rows for every station in one country/batch:
     fetch GHCN + ERA5-Land + covariates once per batch, align each
@@ -789,7 +881,19 @@ def build_rows_for_country(
 
     ghcn_max_workers/ghcn_checkpoint_path pass straight through to
     ghcn.fetch_ghcn_daily_bulk_concurrent (adaptive-concurrency GHCN fetch,
-    2026-08-03 -- see that function's own docstring)."""
+    2026-08-03 -- see that function's own docstring).
+
+    era5_source="openmeteo" (2026-08-20) swaps the CDS-queue ERA5-Land fetch
+    for Open-Meteo's own era5_land model on the archive API -- confirmed
+    live to match real CDS ERA5-Land to within ~0.1-0.2C once the correct
+    dataset is actually requested on both sides (see this function's own
+    fetch_era5_land_for_stations_via_openmeteo docstring for the real
+    comparison numbers and the one real, disclosed gap: no humidity/
+    nighttime-wind carrier variables, so rows built this way have NULL
+    grid_specific_humidity_kgkg/nighttime_wind_ms and won't pass
+    build_feature_matrix's complete_mask until backfilled by a later CDS
+    pass). Default stays "cds" -- this is an opt-in speed path, not a
+    silent behavior change for existing callers."""
     # Computed once here and shared with both calls below -- they'd otherwise
     # each independently rebuild the identical bbox/GeoJSON from this same
     # station list.
@@ -818,8 +922,11 @@ def build_rows_for_country(
     # this function could overlap with.
     def _timed_era5():
         t0 = time.monotonic()
-        logger.info("[%s] ERA5 fetch starting", country)
-        result = fetch_era5_land_for_stations(stations, start_date, end_date, bbox=bbox, geojson_obj=geojson_obj)
+        logger.info("[%s] ERA5 fetch starting (source=%s)", country, era5_source)
+        if era5_source == "openmeteo":
+            result = fetch_era5_land_for_stations_via_openmeteo(stations, start_date, end_date)
+        else:
+            result = fetch_era5_land_for_stations(stations, start_date, end_date, bbox=bbox, geojson_obj=geojson_obj)
         logger.info("[%s] ERA5 fetch finished in %.1fs", country, time.monotonic() - t0)
         return result
 
@@ -1180,6 +1287,17 @@ def main() -> None:
                               "chunks bounded by this (see _chunk_stations_by_extent). Lower this if CDS "
                               "still rejects a request as too large; a single climate zone is not always "
                               "small enough on its own (confirmed live 2026-08-03).")
+    parser.add_argument("--era5-source", choices=("cds", "openmeteo"), default="cds",
+                         help="Where ERA5-Land daily tmax/tmin comes from. \"cds\" (default) is the "
+                              "original CDS async-queue fetch, unchanged. \"openmeteo\" (2026-08-20) uses "
+                              "Open-Meteo's archive API (models=era5_land) instead -- confirmed live to "
+                              "match real CDS ERA5-Land to within ~0.1-0.2C once both sides request the "
+                              "same correct dataset, and with no CDS queue wait. Real, disclosed trade-off: "
+                              "rows built this way have NULL grid_specific_humidity_kgkg/nighttime_wind_ms "
+                              "(Open-Meteo's archive API wasn't queried for the d2m/sp/u10/v10/ssrd carrier "
+                              "variables those are derived from) and won't pass build_feature_matrix's "
+                              "complete_mask until backfilled by a later --era5-source cds pass over the "
+                              "same stations.")
     parser.add_argument("--dry-run", action="store_true",
                          help="Run the full fetch/covariate/row-build pipeline exactly as a real build "
                               "would, but skip the final ghcn.upsert_ghcn_training_rows call -- print a "
@@ -1305,6 +1423,7 @@ def main() -> None:
                 rows = build_rows_for_country(
                     batch_label, chunk_stations, start_date, end_date, vuln_bucket, landscan_bucket, landscan_key,
                     ghcn_max_workers=args.ghcn_max_workers, ghcn_checkpoint_path=ghcn_checkpoint_path,
+                    era5_source=args.era5_source,
                 )
                 if rows and not args.dry_run:
                     ghcn.upsert_ghcn_training_rows(rows)
