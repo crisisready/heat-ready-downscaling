@@ -374,6 +374,47 @@ class TestEra5DownloadLockFreeSlotFirst:
             releaser.join(timeout=5)
         assert results == [0]
 
+    def test_grabs_a_different_slot_freeing_first_instead_of_waiting_on_the_one_scanned_first(
+        self, tmp_path, monkeypatch,
+    ):
+        """Real bug found live 2026-08-20, first genuine 3-way concurrent
+        build_training_set.py run: when every configured slot was busy at
+        scan time, the original implementation committed to a single
+        blocking flock() on configured[0] specifically -- so a caller could
+        stay blocked on THAT slot for many minutes even after a DIFFERENT
+        slot freed up seconds later (confirmed live: two real processes both
+        saw all 3 slots busy; one correctly grabbed slot 'a' once it freed,
+        the other stayed blocked on 'a' specifically for 8+ minutes while
+        slot 'b' sat completely idle the whole time -- a real, measured
+        throughput loss). This test holds BOTH slots, releases slot B
+        (the second one) first while slot A stays held, and asserts the
+        waiting caller grabs B -- not that it stays stuck waiting on A."""
+        monkeypatch.setenv("ERA5_SECRET_ARN_2", "arn:aws:secretsmanager:us-east-1:123:secret:era5-2")
+        monkeypatch.delenv("ERA5_SECRET_ARN_3", raising=False)
+        lock_a, lock_b = self._patch_lock_paths(tmp_path, monkeypatch)
+
+        holder_a = open(lock_a, "w")
+        fcntl.flock(holder_a, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        holder_b = open(lock_b, "w")
+        fcntl.flock(holder_b, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        def release_b_only_soon():
+            time.sleep(0.3)
+            fcntl.flock(holder_b, fcntl.LOCK_UN)
+            holder_b.close()
+
+        releaser = threading.Thread(target=release_b_only_soon)
+        releaser.start()
+        try:
+            with bts._era5_download_lock() as account_index:
+                # slot A (index 0) is still held by holder_a throughout --
+                # only slot B (index 1) ever freed, so this MUST be 1.
+                assert account_index == 1
+        finally:
+            releaser.join(timeout=5)
+            fcntl.flock(holder_a, fcntl.LOCK_UN)
+            holder_a.close()
+
     def test_lock_released_on_normal_exit(self, tmp_path, monkeypatch):
         monkeypatch.delenv("ERA5_SECRET_ARN_2", raising=False)
         monkeypatch.delenv("ERA5_SECRET_ARN_3", raising=False)
