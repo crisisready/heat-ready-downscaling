@@ -563,7 +563,17 @@ def _fetch_om_era5_land_hourly_for_station(station: dict, session: "api_call_man
         "elevation": "nan",       # raw grid-cell value, matching CDS -- see docstring above
     }
     hourly_data = session.get_json(station["url"], params)
-    if hourly_data is api_call_manager.NO_RESULT or "hourly" not in hourly_data:
+    # round-2 /code-review finding, fixed: a successful (2xx) response is not
+    # guaranteed to be a dict -- api_call_manager's own module docstring
+    # documents a real class of Open-Meteo endpoint returning a literal JSON
+    # null body for a station/range outside coverage, which get_json passes
+    # through as Python None (a legitimate, non-NO_RESULT payload per its own
+    # documented contract). `"hourly" not in None` would raise TypeError,
+    # silently swallowed by fetch_all's broad exception handling into a
+    # generic "failed" station with no signal distinguishing it from a real
+    # network error -- checking for a dict explicitly instead treats it the
+    # same as any other empty/unusable result.
+    if hourly_data is api_call_manager.NO_RESULT or not isinstance(hourly_data, dict) or "hourly" not in hourly_data:
         return api_call_manager.NO_RESULT
 
     tz_map = {sid: tz}
