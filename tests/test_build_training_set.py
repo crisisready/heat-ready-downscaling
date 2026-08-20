@@ -1159,6 +1159,36 @@ class TestMainStationIdsFileAndDryRun:
         stdout = capsys.readouterr().out
         assert "WARNING" in stdout and "USW00099999" in stdout
 
+    def test_dry_run_skips_the_table_ddl_too_not_just_the_upsert(self, monkeypatch, tmp_path):
+        """Real gap found live 2026-08-20: create_ghcn_training_table() (a real
+        write-capable DB connection + DDL, idempotent but still a write) was
+        called unconditionally, before dry_run was even checked -- so --dry-run
+        could never actually run without DB write credentials, contradicting
+        its own docstring's promise to skip "the DB write itself." Gated the
+        same way the real upsert already was."""
+        f = tmp_path / "ids.json"
+        f.write_text(json.dumps({"station_ids": ["USW00023183"]}))
+        monkeypatch.setattr(sys, "argv", [
+            "build_training_set.py", "--station-ids-file", str(f),
+            "--start-date", "2016-06-01", "--end-date", "2016-06-30", "--dry-run",
+        ])
+        mocks = self._patch_common(list_ghcn_stations_return=[_US_STATION], active_ids={"USW00023183"})
+        with mocks[0], mocks[1], mocks[2] as mock_create_table, mocks[3], mocks[4], mocks[5], mocks[6], mocks[7]:
+            bts.main()
+        mock_create_table.assert_not_called()
+
+    def test_normal_run_still_creates_the_table(self, monkeypatch, tmp_path):
+        f = tmp_path / "ids.json"
+        f.write_text(json.dumps({"station_ids": ["USW00023183"]}))
+        monkeypatch.setattr(sys, "argv", [
+            "build_training_set.py", "--station-ids-file", str(f),
+            "--start-date", "2016-06-01", "--end-date", "2016-06-30",
+        ])
+        mocks = self._patch_common(list_ghcn_stations_return=[_US_STATION], active_ids={"USW00023183"})
+        with mocks[0], mocks[1], mocks[2] as mock_create_table, mocks[3], mocks[4], mocks[5], mocks[6], mocks[7]:
+            bts.main()
+        mock_create_table.assert_called_once()
+
     def test_dry_run_skips_upsert_but_still_builds_rows(self, monkeypatch, tmp_path, capsys):
         f = tmp_path / "ids.json"
         f.write_text(json.dumps({"station_ids": ["USW00023183"]}))
@@ -1178,6 +1208,52 @@ class TestMainStationIdsFileAndDryRun:
         out = capsys.readouterr().out
         assert "--dry-run: would write 1 row(s)" in out
         assert "--dry-run: not uploading" in out
+
+    def test_rows_out_persists_computed_rows_alongside_dry_run(self, monkeypatch, tmp_path):
+        """--rows-out + --dry-run together: the real fetch/covariate compute a
+        dry-run pays for should be recoverable from disk, not thrown away with
+        only a summary print to show for it (2026-08-20, real gap hit live
+        staging a Spain sub-zone fit -- see this repo's own git history)."""
+        f = tmp_path / "ids.json"
+        f.write_text(json.dumps({"station_ids": ["USW00023183"]}))
+        out = tmp_path / "rows.json"
+        monkeypatch.setattr(sys, "argv", [
+            "build_training_set.py", "--station-ids-file", str(f),
+            "--start-date", "2016-06-01", "--end-date", "2016-06-30",
+            "--dry-run", "--rows-out", str(out),
+        ])
+        fake_rows = [{"station_id": "USW00023183", "date": "2016-06-15", "elevation_mean_m": 100.0}]
+        mocks = self._patch_common(
+            list_ghcn_stations_return=[_US_STATION], active_ids={"USW00023183"},
+            build_rows_return=fake_rows,
+        )
+        with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], mocks[5], mocks[6] as mock_upsert, mocks[7]:
+            bts.main()
+
+        mock_upsert.assert_not_called()  # --rows-out is not a backdoor around --dry-run's own DB-write gate
+        written = json.loads(out.read_text())
+        assert written["rows"] == fake_rows
+        assert written["row_count"] == 1
+        assert written["countries"] == ["US"]
+        assert written["dry_run"] is True
+
+    def test_rows_out_omitted_writes_no_file(self, monkeypatch, tmp_path):
+        """The default (no --rows-out) must not create any file -- confirms
+        the feature is opt-in, matching every other flag in this script."""
+        f = tmp_path / "ids.json"
+        f.write_text(json.dumps({"station_ids": ["USW00023183"]}))
+        monkeypatch.setattr(sys, "argv", [
+            "build_training_set.py", "--station-ids-file", str(f),
+            "--start-date", "2016-06-01", "--end-date", "2016-06-30", "--dry-run",
+        ])
+        mocks = self._patch_common(
+            list_ghcn_stations_return=[_US_STATION], active_ids={"USW00023183"},
+            build_rows_return=[{"station_id": "USW00023183"}],
+        )
+        with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], mocks[5], mocks[6], mocks[7]:
+            bts.main()
+
+        assert not (tmp_path / "rows.json").exists()
 
     def test_normal_run_calls_upsert_with_the_built_rows(self, monkeypatch, tmp_path):
         f = tmp_path / "ids.json"
