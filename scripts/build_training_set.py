@@ -213,35 +213,37 @@ def _era5_download_lock():
 
     fh = None
     acquired_account_index = None
-    opened: list = []  # every handle opened below, so the fallback path can
-                        # reuse one instead of reopening the same path twice
     try:
-        for path, account_index in configured:
-            candidate = open(path, "w")
-            opened.append(candidate)
-            try:
-                fcntl.flock(candidate, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
-                continue
-            fh, acquired_account_index = candidate, account_index
-            break
-        else:
-            # Every configured slot is currently held -- block on the
-            # first configured one rather than giving up (reusing the
-            # handle already opened for it above, not reopening the same
-            # path a second time) -- this guarantees eventual progress the
-            # same way a single (non-multi-slot) lock always would have.
-            path, account_index = configured[0]
-            fh = opened[0]
-            fcntl.flock(fh, fcntl.LOCK_EX)
-            acquired_account_index = account_index
-
-        # Close every handle opened above that ISN'T the one we ended up
-        # holding the lock on (e.g. an earlier candidate that lost the
-        # non-blocking race) -- do this before yielding, not deferred.
-        for candidate in opened:
-            if candidate is not fh:
-                candidate.close()
+        while fh is None:
+            for path, account_index in configured:
+                candidate = open(path, "w")
+                try:
+                    fcntl.flock(candidate, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    candidate.close()
+                    continue
+                fh, acquired_account_index = candidate, account_index
+                break
+            if fh is None:
+                # Real bug found live 2026-08-20, first genuine 3-way
+                # concurrent run: the original fallback here committed to a
+                # single blocking flock() on configured[0] the moment every
+                # slot was seen busy in one scan -- so a caller could sit
+                # blocked on THAT one specific slot for many minutes even
+                # after a DIFFERENT slot freed up seconds later (confirmed
+                # live: two processes both saw all 3 slots busy; one grabbed
+                # slot 'a' once it freed, the other stayed blocked on 'a'
+                # specifically for 8+ minutes while slot 'b' sat completely
+                # idle the whole time -- a real, direct throughput loss, not
+                # a theoretical one). Re-scanning ALL configured slots every
+                # second instead of ever committing to one preserves the
+                # same "guaranteed eventual progress" property (the loop
+                # never gives up) while actually grabbing whichever slot
+                # frees first, not whichever happened to be first in the
+                # list. Re-opening 2-3 tiny local lock files once/sec while
+                # genuinely waiting on a multi-minute CDS queue anyway is
+                # negligible overhead, not worth optimizing further.
+                time.sleep(1.0)
 
         yield acquired_account_index
     finally:
