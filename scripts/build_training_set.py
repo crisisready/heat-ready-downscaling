@@ -575,6 +575,11 @@ def _fetch_om_era5_land_hourly_for_station(station: dict, session: "api_call_man
     if not daily:
         return api_call_manager.NO_RESULT
     return {
+        # station_id carried in the payload (not just the checkpoint key) so
+        # the collect() loop below never has to parse it back out of the
+        # composite date-scoped key -- see fetch_era5_land_for_stations_via_
+        # openmeteo's key_fn for why the key itself isn't a bare station_id.
+        "station_id": sid,
         "daily": {
             d["date"]: {
                 "tmax": d["day_t2m_max"], "tmin": d["day_t2m_min"],
@@ -654,8 +659,18 @@ def fetch_era5_land_for_stations_via_openmeteo(
         checkpoint_path or "/tmp/build_training_set_openmeteo_checkpoint.jsonl"
     )
 
+    def _key_fn(s):
+        # round-2 codex-review.sh finding, fixed: a bare station_id key means
+        # a checkpoint file reused (deliberately, via the same
+        # --ghcn-checkpoint-dir, or accidentally, via the shared /tmp default)
+        # across two DIFFERENT date ranges for the same station marks it
+        # "already done" and silently returns the FIRST range's stale data
+        # for the second. Date-scoping the key means two different ranges
+        # for the same station are two different checkpoint entries.
+        return f"{s['station_id']}_{s['start_date'].isoformat()}_{s['end_date'].isoformat()}"
+
     summary = api_call_manager.fetch_all(
-        items, fetch_fn=_fetch_om_era5_land_hourly_for_station, key_fn=lambda s: s["station_id"],
+        items, fetch_fn=_fetch_om_era5_land_hourly_for_station, key_fn=_key_fn,
         store=store, session=session, max_workers=max_workers, progress_every=25,
     )
     logger.info(
@@ -663,10 +678,21 @@ def fetch_era5_land_for_stations_via_openmeteo(
         summary.n_fetched, summary.n_total, summary.n_failed, summary.n_done_preexisting,
     )
 
+    # store.collect() replays EVERY entry ever persisted at checkpoint_path,
+    # not just this call's -- a real risk when checkpoint_path is the shared
+    # /tmp default across multiple build_rows_for_country calls in one run
+    # (different countries/zones/chunks). Filtered to exactly this call's own
+    # keys so a stale entry from an unrelated earlier batch sharing the same
+    # default path can never silently leak into (or overwrite, since the
+    # dict below is keyed by bare station_id) this batch's own result.
+    wanted_keys = {_key_fn(item) for item in items}
     daily_by_station: dict[str, dict[str, dict]] = {}
     humidity_by_station: dict[str, dict[str, float]] = {}
     nighttime_wind_by_station: dict[str, dict[str, float]] = {}
-    for sid, payload in store.collect():
+    for key, payload in store.collect():
+        if key not in wanted_keys:
+            continue
+        sid = payload["station_id"]
         by_date = payload["daily"]
         daily_by_station[sid] = {d: {"tmax": v["tmax"], "tmin": v["tmin"]} for d, v in by_date.items()}
         humidity_by_station[sid] = {
