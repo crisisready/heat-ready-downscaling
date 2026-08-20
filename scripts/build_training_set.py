@@ -1310,6 +1310,24 @@ def main() -> None:
                     ghcn.upsert_ghcn_training_rows(rows)
                 if all_rows is not None:
                     all_rows.extend(rows)
+                    if args.rows_out:
+                        # Real gap found live 2026-08-20: a multi-hour run (many
+                        # zone/extent chunks, each with real CDS queue latency)
+                        # only ever wrote --rows-out ONCE, at the very end of
+                        # EVERY chunk across the whole country/station-ids-file
+                        # list -- so a crash, kill, or bastion interruption after
+                        # hours of real compute lost all of it, with nothing on
+                        # disk to show for it. Flush after every chunk instead
+                        # (same real cost class as the GHCN checkpoint dir's own
+                        # per-station resumability) -- a partial file is always
+                        # readable, and the final write still happens the same
+                        # way at the end for the common no-interruption case.
+                        with open(args.rows_out, "w") as f:
+                            json.dump({
+                                "rows": all_rows, "row_count": len(all_rows), "countries": countries,
+                                "start_date": args.start_date, "end_date": args.end_date,
+                                "dry_run": args.dry_run, "complete": False,
+                            }, f)
                 total_rows += len(rows)
                 if args.dry_run:
                     print(f"[{batch_label}] --dry-run: would write {len(rows)} row(s), not uploading. "
@@ -1330,6 +1348,10 @@ def main() -> None:
                 "start_date": args.start_date, "end_date": args.end_date,
                 "dry_run": args.dry_run,  # honest provenance -- whether this same run ALSO wrote to
                 # ghcn_training, or these rows exist only here, matters to anyone consuming the file later.
+                "complete": True,  # distinguishes a genuine final write from one of the per-chunk
+                # checkpoint writes above (same file, same shape, complete=False) -- a reader that
+                # only wants the finished result should check this rather than assume the file's
+                # mere existence means the run finished.
             }, f)
         print(f"--rows-out: wrote {len(all_rows)} row(s) to {args.rows_out}")
 
