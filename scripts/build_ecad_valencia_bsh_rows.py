@@ -19,16 +19,23 @@ GHCN 2-letter country prefix, so ghcn.region_from_station_id/dedup logic
 never confuses these with a real GHCN station.
 """
 import json
+import os
 import re
 import sys
 import zipfile
 from datetime import date, timedelta
 
-sys.path.insert(0, "src")
-sys.path.insert(0, "scripts")
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(_REPO_ROOT, "src"))
+sys.path.insert(0, os.path.join(_REPO_ROOT, "scripts"))
 
 import ghcn  # noqa: E402
-from build_training_set_openmeteo import (  # noqa: E402
+# NOTE: this repo's real module is build_training_set.py (the --era5-source
+# openmeteo flag lives there, PR #17/#18) -- an earlier draft of this script
+# imported from build_training_set_openmeteo, a name that only ever existed
+# as a locally-renamed staging copy on the bastion, never in this repo.
+# Caught by round-1 review (both codex-review.sh and /code-review medium).
+from build_training_set import (  # noqa: E402
     fetch_era5_land_for_stations_via_openmeteo,
     snapshot_covariates_for_stations,
     _bucket_from_credentials,
@@ -110,6 +117,15 @@ def main():
         if series:
             ghcn_by_station[sid] = series
         print(f"  {sid} {s['name']}: {len(series)} real quality-valid day(s)")
+
+    # round-1 review finding, fixed: only fetch/snapshot for stations that
+    # actually produced a real quality-valid series above -- a station with
+    # zero common TX/TN dates never contributes a row (the loop below skips
+    # it via `if not station_series: continue`), so fetching its full-year
+    # ERA5-Land archive and covariate snapshot was pure wasted external-API
+    # cost with no output to show for it.
+    stations = [s for s in stations if s["station_id"] in ghcn_by_station]
+    print(f"real station(s) with usable data (fetch scoped to these): {len(stations)}")
 
     vuln_bucket = _bucket_from_credentials()
     landscan_bucket, landscan_key = _landscan_from_credentials()
