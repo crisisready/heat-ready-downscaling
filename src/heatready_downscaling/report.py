@@ -59,7 +59,21 @@ _SCORE_BAND_METRICS_SCHEMA: dict = {
         # no additionalProperties restriction above means these were always
         # accepted even before being listed here (same non-event delta_scale_c's
         # own addition already was), listed for an accurate schema.
-        "proposed_correction_kind": {"enum": ["bias", "affine", None]},
+        "proposed_correction_kind": {"enum": ["bias", "affine", "covariate_linear", None]},
+        "proposed_correction_basis": {"enum": ["raw_grid", "model_delta", None]},
+        "proposed_correction_n_scored": {"type": ["integer", "null"]},
+        # The per-stratum block is nested and deliberately not constrained in
+        # detail here -- compare_reports cannot compare it (see its own
+        # guard), and the numbers that gate a decision are mirrored as the
+        # flat scalars below, which CAN be tolerance-checked.
+        "proposed_correction_by_stratum": {"type": ["object", "null"]},
+        "proposed_correction_ci95_lo_pct": {"type": ["number", "null"]},
+        "proposed_correction_ci95_hi_pct": {"type": ["number", "null"]},
+        "proposed_correction_hot_day_rmse_c": {"type": ["number", "null"]},
+        "proposed_correction_hot_day_bias_c": {"type": ["number", "null"]},
+        "proposed_correction_hot_day_margin_pct": {"type": ["number", "null"]},
+        "proposed_correction_hot_day_ci95_lo_pct": {"type": ["number", "null"]},
+        "proposed_correction_hot_day_ci95_hi_pct": {"type": ["number", "null"]},
         "proposed_correction_rmse_c": {"type": ["number", "null"]},
         "proposed_correction_bias_c": {"type": ["number", "null"]},
         "proposed_correction_beats_grid": {"type": ["boolean", "null"]},
@@ -205,6 +219,23 @@ def compare_reports(claimed: dict, reproduced: dict, tolerance: dict[str, float]
                 claimed_val = claimed_metrics.get(metric)
                 reproduced_val = reproduced_metrics.get(metric)
                 if claimed_val is None or reproduced_val is None:
+                    continue
+                # Skip anything that isn't a plain number. A metric dict can
+                # now legitimately hold a nested block
+                # (proposed_correction_by_stratum, 2026-08-25), and a manifest
+                # naming it in its own tolerance block would otherwise reach
+                # abs(dict - dict) and raise TypeError. Reported as a
+                # violation rather than a crash: a non-numeric metric can
+                # never be shown to reproduce within a numeric tolerance, and
+                # silently skipping it would let it pass unchecked.
+                if not isinstance(claimed_val, (int, float)) or isinstance(claimed_val, bool) \
+                        or not isinstance(reproduced_val, (int, float)) or isinstance(reproduced_val, bool):
+                    violations.append({
+                        "target": target, "zone": zone, "metric": metric,
+                        "claimed": claimed_val, "reproduced": reproduced_val,
+                        "abs_diff": None, "allowed": allowed,
+                        "reason": "metric is not a scalar -- cannot be compared against a numeric tolerance",
+                    })
                     continue
                 abs_diff = abs(claimed_val - reproduced_val)
                 max_abs_deviation[metric] = max(max_abs_deviation[metric], abs_diff)

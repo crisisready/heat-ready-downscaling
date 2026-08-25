@@ -254,3 +254,103 @@ class TestParseSubmissionId:
         year_month, seq = submission.parse_submission_id("2026-08-042")
         assert seq == 42
         assert isinstance(seq, int)
+
+
+class TestCovariateLinearCandidateSchema:
+    """The third proposed_correction shape (2026-08-25). The two hard limits
+    -- a closed covariate allowlist and a term cap -- are enforced here as
+    well as at runtime, because the monthly re-scoring path reads manifests
+    off disk without re-running this schema."""
+
+    def _manifest_cl(self, entry):
+        m = _manifest(rung="B")
+        m["claims"][0]["targets"] = ["tmin"]
+        m["claims"][0]["zones"] = ["BSh"]
+        m["method"] = {
+            "kind": "parameters", "entrypoint": "scripts/run_submission.py",
+            "args": [], "package_version": "0.1.0", "code_ref": None, "extra_covariates": [],
+            "candidate": {"tmin": {"BSh": entry}},
+        }
+        return m
+
+    def test_valencia_shaped_candidate_passes(self):
+        """The real shape: Valencia's coast-distance correction on the raw
+        grid, with the fitted range it is actually evidence over."""
+        submission.validate_manifest(self._manifest_cl({
+            "basis": "raw_grid",
+            "intercept": 0.782,
+            "terms": [{"covariate": "coast_dist_km", "slope": -0.0413}],
+            "valid_range": [[0.0, 25.0]],
+        }))
+
+    def test_minimal_candidate_without_valid_range_passes(self):
+        submission.validate_manifest(self._manifest_cl({
+            "basis": "model_delta", "intercept": 0.1,
+            "terms": [{"covariate": "elevation_mean_m", "slope": 0.001}],
+        }))
+
+    def test_day_varying_covariate_is_rejected(self):
+        """The allowlist is what keeps this shape compilable to per-polygon
+        values at promotion time instead of needing covariate evaluation in
+        the serving path."""
+        with pytest.raises(Exception):
+            submission.validate_manifest(self._manifest_cl({
+                "basis": "raw_grid", "intercept": 0.0,
+                "terms": [{"covariate": "nighttime_wind_ms", "slope": 1.0}],
+            }))
+
+    def test_unknown_covariate_is_rejected(self):
+        with pytest.raises(Exception):
+            submission.validate_manifest(self._manifest_cl({
+                "basis": "raw_grid", "intercept": 0.0,
+                "terms": [{"covariate": "not_a_real_covariate", "slope": 1.0}],
+            }))
+
+    def test_over_the_term_cap_is_rejected(self):
+        with pytest.raises(Exception):
+            submission.validate_manifest(self._manifest_cl({
+                "basis": "raw_grid", "intercept": 0.0,
+                "terms": [
+                    {"covariate": "coast_dist_km", "slope": 1.0},
+                    {"covariate": "elevation_mean_m", "slope": 1.0},
+                    {"covariate": "slope_deg", "slope": 1.0},
+                ],
+            }))
+
+    def test_unknown_basis_is_rejected(self):
+        with pytest.raises(Exception):
+            submission.validate_manifest(self._manifest_cl({
+                "basis": "raw_grid_but_different", "intercept": 0.0,
+                "terms": [{"covariate": "coast_dist_km", "slope": 1.0}],
+            }))
+
+    def test_off_enum_hot_day_threshold_is_rejected(self):
+        with pytest.raises(Exception):
+            submission.validate_manifest(self._manifest_cl({
+                "basis": "raw_grid", "intercept": 0.0,
+                "terms": [{"covariate": "coast_dist_km", "slope": 1.0}],
+                "hot_day_threshold_c": 28.5,
+            }))
+
+    def test_mixing_a_flat_shape_into_a_covariate_entry_is_rejected(self):
+        """oneOf, not anyOf -- an entry carrying two shapes must fail here,
+        the same guarantee score.classify_proposed_correction enforces at
+        runtime."""
+        with pytest.raises(Exception):
+            submission.validate_manifest(self._manifest_cl({
+                "basis": "raw_grid", "intercept": 0.0,
+                "terms": [{"covariate": "coast_dist_km", "slope": 1.0}],
+                "bias_correction_c": 0.5,
+            }))
+
+    def test_extra_unknown_key_is_rejected(self):
+        with pytest.raises(Exception):
+            submission.validate_manifest(self._manifest_cl({
+                "basis": "raw_grid", "intercept": 0.0,
+                "terms": [{"covariate": "coast_dist_km", "slope": 1.0}],
+                "typo_field": 1,
+            }))
+
+    def test_the_two_flat_shapes_still_validate(self):
+        submission.validate_manifest(self._manifest_cl({"bias_correction_c": 0.5}))
+        submission.validate_manifest(self._manifest_cl({"scale": 1.1, "offset": 0.2}))
