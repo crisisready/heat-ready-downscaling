@@ -133,8 +133,8 @@ class TestPairedDeltaDiff:
 
 
 class TestBoundaryDiscontinuity:
-    def _row(self, zone, lat, lon, d=date(2023, 7, 1)):
-        return {"climate_zone": zone, "lat": lat, "lon": lon, "date": d}
+    def _row(self, zone, lat, lon, d=date(2023, 7, 1), station_id="US001"):
+        return {"climate_zone": zone, "lat": lat, "lon": lon, "date": d, "station_id": station_id}
 
     def test_close_cross_zone_pair_counted(self):
         rows = [self._row("Cfb", 48.0, 2.0), self._row("BWh", 48.001, 2.001)]
@@ -148,6 +148,31 @@ class TestBoundaryDiscontinuity:
         result = rd.boundary_discontinuity(rows, old_served=[20.0, 25.0], new_served=[20.0, 22.0], max_km=50.0)
         assert result["n_cross_zone_pairs_within_km"] == 0
         assert result["old_mean_abs_jump_c"] is None
+        assert result["cross_subzone"]["n_pairs"] == 0  # zone not in subzoned_zones (default: none)
+
+    def test_same_zone_different_subzone_counted_when_zone_is_subzoned(self):
+        """Codex adversarial review finding, PR #25: French Cfb vs.
+        neighboring German Cfb straddles exactly the boundary a
+        delta_scale_subzone correction introduces -- the ORIGINAL
+        cross-ZONE-only definition would find zero pairs for this case."""
+        rows = [self._row("Cfb", 48.0, 2.0, station_id="FR001"), self._row("Cfb", 48.001, 2.001, station_id="DE001")]
+        result = rd.boundary_discontinuity(
+            rows, old_served=[20.0, 25.0], new_served=[20.0, 30.0], max_km=50.0, subzoned_zones=frozenset({"Cfb"}),
+        )
+        assert result["cross_subzone"]["n_pairs"] == 1
+        assert result["cross_subzone"]["old_mean_abs_jump_c"] == pytest.approx(5.0)
+        assert result["cross_subzone"]["new_mean_abs_jump_c"] == pytest.approx(10.0)
+        assert result["cross_zone"]["n_pairs"] == 0  # same zone -- never double-counted as cross-zone
+
+    def test_same_zone_different_subzone_excluded_when_zone_not_subzoned(self):
+        """A zone with NO subzone-scoped correction published at all must
+        not generate cross-subzone noise from an arbitrary country split
+        that was never a real correction boundary."""
+        rows = [self._row("Cfb", 48.0, 2.0, station_id="FR001"), self._row("Cfb", 48.001, 2.001, station_id="DE001")]
+        result = rd.boundary_discontinuity(
+            rows, old_served=[20.0, 25.0], new_served=[20.0, 30.0], max_km=50.0, subzoned_zones=frozenset(),
+        )
+        assert result["cross_subzone"]["n_pairs"] == 0
 
     def test_far_apart_pair_excluded(self):
         rows = [self._row("Cfb", 0.0, 0.0), self._row("BWh", 50.0, 50.0)]  # thousands of km apart
@@ -158,6 +183,27 @@ class TestBoundaryDiscontinuity:
         rows = [self._row("Cfb", 48.0, 2.0, d=date(2023, 7, 1)), self._row("BWh", 48.001, 2.001, d=date(2023, 7, 2))]
         result = rd.boundary_discontinuity(rows, old_served=[20.0, 25.0], new_served=[20.0, 22.0], max_km=50.0)
         assert result["n_cross_zone_pairs_within_km"] == 0
+
+
+class TestCheckPartitionCoverage:
+    """Codex adversarial review finding, PR #25: a mistyped --model-version
+    produces a FrozenPredictionAdapter with zero frozen predictions --
+    every row comes back not-applied under BOTH arms, and this tool would
+    otherwise print a valid-looking 'nothing changes' report instead of
+    failing loudly."""
+
+    def test_zero_predictions_with_real_rows_raises(self):
+        with pytest.raises(SystemExit, match="ZERO frozen predictions"):
+            rd.check_partition_coverage([{"station_id": "S001"}], n_predictions=0, model_version="ds-typo", band_key="lag_fill")
+
+    def test_some_predictions_does_not_raise(self):
+        rd.check_partition_coverage([{"station_id": "S001"}], n_predictions=1, model_version="ds-test", band_key="lag_fill")  # must not raise
+
+    def test_no_rows_at_all_does_not_raise(self):
+        """Distinct from "rows exist but nothing predicted" -- an empty
+        band is caught earlier in replay_band by its own separate
+        'snapshot has no rows' check, not this one."""
+        rd.check_partition_coverage([], n_predictions=0, model_version="ds-test", band_key="lag_fill")  # must not raise
 
 
 class TestPredictWithGateAndReplayBandIntegration:
@@ -224,6 +270,43 @@ class TestPredictWithGateAndReplayBandIntegration:
         assert tmax["overall"]["tier_mix"]["old"]["applied_rate"] == pytest.approx(0.0)  # fail-closed baseline
         assert tmax["overall"]["tier_mix"]["new"]["applied_rate"] == pytest.approx(1.0)  # newly lit
         assert "Cfb" in tmax["by_zone"]
+
+    def test_replay_band_raises_on_mistyped_model_version(self, tmp_path):
+        """End-to-end version of TestCheckPartitionCoverage -- proves
+        replay_band itself refuses to produce a misleading report for a
+        model_version with zero matching frozen predictions, not just
+        the pure-logic check function in isolation."""
+        self._build_snapshot(tmp_path, ["S001"])
+        old_gate, new_gate = rd.load_gate(None), rd.load_gate(None)
+        with pytest.raises(SystemExit, match="ZERO frozen predictions"):
+            rd.replay_band(str(tmp_path), "ds-typo-does-not-exist", "lag_fill", old_gate, new_gate)
+
+    def test_by_zone_hides_a_subzone_specific_regression_by_subzone_does_not(self, tmp_path):
+        """Codex adversarial review finding, PR #25: a delta_scale_subzone
+        regression confined to one country can be diluted/hidden in the
+        (target, zone) aggregate by every other country's unaffected
+        rows in the same zone -- by_subzone must isolate it."""
+        self._build_snapshot(tmp_path, ["FR001", "US001"])
+        old_gate = {  # a real published baseline, not the fail-closed default -- both arms must be
+            "tmax": {"Cfb": True}, "tmin": {"Cfb": True},   # "applied" for paired_delta_diff to be meaningful
+            "bias_correction": {"tmax": {}, "tmin": {}}, "delta_scale": {"tmax": {}, "tmin": {}},
+        }
+        new_gate = {
+            "tmax": {"Cfb": True}, "tmin": {"Cfb": True},
+            "bias_correction": {"tmax": {}, "tmin": {}}, "delta_scale": {"tmax": {}, "tmin": {}},
+            # FR gets a wildly-overcorrecting subzone fit; US keeps whatever
+            # the (absent) flat delta_scale/bias_correction would give it
+            # (i.e. the raw model delta, unchanged) -- a real per-subzone
+            # regression that a whole-Cfb average could still average away.
+            "delta_scale_subzone": {"tmax": {"Cfb": {"FR": {"scale": 10.0, "offset": 100.0}}}, "tmin": {}},
+        }
+        result = rd.replay_band(str(tmp_path), "ds-test", "lag_fill", old_gate, new_gate)
+        cfb = result["by_target"]["tmax"]["by_zone"]["Cfb"]
+        assert "by_subzone" in cfb
+        fr_diff = cfb["by_subzone"]["FR"]["paired_delta_diff"]["mean"]
+        us_diff = cfb["by_subzone"]["US"]["paired_delta_diff"]["mean"]
+        assert fr_diff is not None and abs(fr_diff) > 50  # the overcorrection is real and large
+        assert us_diff is not None and abs(us_diff) < 10  # US is essentially unaffected
 
     def test_render_summary_does_not_raise_and_mentions_band(self, tmp_path):
         self._build_snapshot(tmp_path, ["S001"])

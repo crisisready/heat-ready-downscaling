@@ -143,24 +143,27 @@ def predict_with_gate(adapter, rows: list[dict], target: str, gate: dict) -> lis
         delta_scale=flat_delta_scale,
     )
 
-    subzone_data = gate.get("delta_scale_subzone", {}).get(target, {})
-    if not subzone_data:
-        return base
-
+    # Group rows whose resolve_delta_scale() result differs from the FLAT
+    # value `base` was already scored with -- resolve_delta_scale is the
+    # single source of truth for subzone-vs-flat precedence (code-review
+    # finding, PR #25: an earlier draft re-implemented this same decision
+    # inline here instead of calling it, a real risk of the two silently
+    # drifting apart on a future edit to one but not the other).
     by_cell: dict[tuple, list[int]] = {}
     for i, r in enumerate(rows):
         zone = r.get("climate_zone")
-        by_subzone = subzone_data.get(zone)
-        if not by_subzone:
-            continue
         sc = subzone_code(r.get("station_id"))
-        if sc in by_subzone:
-            by_cell.setdefault((zone, sc), []).append(i)
+        resolved = resolve_delta_scale(gate, target, zone, sc)
+        if resolved is not None and resolved != flat_delta_scale[target].get(zone):
+            by_cell.setdefault((zone, tuple(sorted(resolved.items()))), []).append(i)
+
+    if not by_cell:
+        return base
 
     results = list(base)
-    for (zone, sc), idxs in by_cell.items():
+    for (zone, resolved_items), idxs in by_cell.items():
         patched_delta_scale = {target: dict(flat_delta_scale[target])}
-        patched_delta_scale[target][zone] = subzone_data[zone][sc]
+        patched_delta_scale[target][zone] = dict(resolved_items)
         sub_rows = [rows[i] for i in idxs]
         sub_preds = adapter.predict(
             sub_rows, target, extra_zone_gate=extra_zone_gate, bias_correction=bias_correction,
@@ -225,6 +228,18 @@ def paired_delta_diff(old_preds: list[dict], new_preds: list[dict]) -> dict:
     return _percentile_summary(diffs)
 
 
+def _diff_metrics(old_preds: list[dict], new_preds: list[dict]) -> dict:
+    """The tier_mix/delta_distribution/paired_delta_diff triple, computed
+    once and reused for the overall, per-zone, AND per-subzone breakouts
+    -- one shared implementation rather than three copies that could
+    silently diverge."""
+    return {
+        "tier_mix": {"old": tier_mix(old_preds), "new": tier_mix(new_preds)},
+        "delta_distribution": {"old": delta_distribution(old_preds), "new": delta_distribution(new_preds)},
+        "paired_delta_diff": paired_delta_diff(old_preds, new_preds),
+    }
+
+
 def _haversine_km(lat1, lon1, lat2, lon2) -> float:
     lat1, lon1, lat2, lon2 = (np.radians(v) for v in (lat1, lon1, lat2, lon2))
     dlat, dlon = lat2 - lat1, lon2 - lon1
@@ -234,16 +249,33 @@ def _haversine_km(lat1, lon1, lat2, lon2) -> float:
 
 def boundary_discontinuity(
     rows: list[dict], old_served: list[float | None], new_served: list[float | None],
-    max_km: float = _DEFAULT_BOUNDARY_MAX_KM,
+    max_km: float = _DEFAULT_BOUNDARY_MAX_KM, subzoned_zones: frozenset[str] = frozenset(),
 ) -> dict:
     """Mean absolute jump in the served value between geographically
-    nearby (same date, within max_km) rows that fall in DIFFERENT zones --
-    a direct generalization of Valencia's own boundary-discontinuity
-    diagnostic (PHASE3_BOUNDARY_DIAGNOSTIC.md), which found a candidate
-    correction can amplify a pre-existing raw-grid discontinuity at a
-    zone boundary even when its own zone's aggregate metrics look fine.
-    old_served/new_served: the served value (grid + corrected delta, or
-    grid alone if not applied) per row, same order as rows.
+    nearby (same date, within max_km) rows that straddle a correction's
+    OWN scope boundary -- a direct generalization of Valencia's own
+    boundary-discontinuity diagnostic (PHASE3_BOUNDARY_DIAGNOSTIC.md),
+    which found a candidate correction can amplify a pre-existing
+    raw-grid discontinuity at a boundary even when its own zone's
+    aggregate metrics look fine. old_served/new_served: the served value
+    (grid + corrected delta, or grid alone if not applied) per row, same
+    order as rows.
+
+    Two DISTINCT boundary types, reported separately (Codex adversarial
+    review finding, PR #25: an earlier draft only ever checked
+    cross-ZONE pairs, which finds zero pairs for a delta_scale_subzone
+    correction confined to one country within a single Köppen zone --
+    e.g. French Cfb vs. neighboring German Cfb straddle exactly the
+    boundary a subzone-scoped fit actually introduces, and the original
+    "different zone" definition can never see it):
+      - cross-zone: different climate_zone entirely.
+      - cross-subzone: SAME climate_zone, but that zone is in
+        `subzoned_zones` (i.e. either gate publishes a delta_scale_subzone
+        entry for it) AND the two rows resolve to different subzone
+        codes. Restricted to subzoned_zones specifically so a zone with
+        no subzone-scoped correction at all doesn't generate meaningless
+        noise from an arbitrary country split that was never a real
+        correction boundary.
 
     O(n^2) within each date group -- acceptable for a human-run review
     tool over realistic station-day counts, not intended for a snapshot
@@ -253,9 +285,8 @@ def boundary_discontinuity(
     for i, r in enumerate(rows):
         by_date.setdefault(r.get("date"), []).append(i)
 
-    old_jumps: list[float] = []
-    new_jumps: list[float] = []
-    n_pairs = 0
+    cross_zone_old, cross_zone_new, n_cross_zone = [], [], 0
+    cross_subzone_old, cross_subzone_new, n_cross_subzone = [], [], 0
     for idxs in by_date.values():
         if len(idxs) < 2:
             continue
@@ -263,23 +294,56 @@ def boundary_discontinuity(
             ia = idxs[a]
             if old_served[ia] is None or rows[ia].get("lat") is None or rows[ia].get("lon") is None:
                 continue
+            zone_a = rows[ia].get("climate_zone")
             for b in range(a + 1, len(idxs)):
                 ib = idxs[b]
-                if rows[ia].get("climate_zone") == rows[ib].get("climate_zone"):
-                    continue
                 if old_served[ib] is None or rows[ib].get("lat") is None or rows[ib].get("lon") is None:
                     continue
+                zone_b = rows[ib].get("climate_zone")
+                same_zone = zone_a == zone_b
+                if same_zone:
+                    if zone_a not in subzoned_zones:
+                        continue
+                    sub_a = subzone_code(rows[ia].get("station_id")) or "other"
+                    sub_b = subzone_code(rows[ib].get("station_id")) or "other"
+                    if sub_a == sub_b:
+                        continue
                 dist = _haversine_km(rows[ia]["lat"], rows[ia]["lon"], rows[ib]["lat"], rows[ib]["lon"])
                 if dist > max_km:
                     continue
-                n_pairs += 1
-                old_jumps.append(abs(old_served[ia] - old_served[ib]))
-                if new_served[ia] is not None and new_served[ib] is not None:
-                    new_jumps.append(abs(new_served[ia] - new_served[ib]))
+                old_jump = abs(old_served[ia] - old_served[ib])
+                new_jump = (
+                    abs(new_served[ia] - new_served[ib])
+                    if new_served[ia] is not None and new_served[ib] is not None else None
+                )
+                if same_zone:
+                    n_cross_subzone += 1
+                    cross_subzone_old.append(old_jump)
+                    if new_jump is not None:
+                        cross_subzone_new.append(new_jump)
+                else:
+                    n_cross_zone += 1
+                    cross_zone_old.append(old_jump)
+                    if new_jump is not None:
+                        cross_zone_new.append(new_jump)
     return {
-        "n_cross_zone_pairs_within_km": n_pairs, "max_km": max_km,
-        "old_mean_abs_jump_c": float(np.mean(old_jumps)) if old_jumps else None,
-        "new_mean_abs_jump_c": float(np.mean(new_jumps)) if new_jumps else None,
+        "max_km": max_km,
+        "cross_zone": {
+            "n_pairs": n_cross_zone,
+            "old_mean_abs_jump_c": float(np.mean(cross_zone_old)) if cross_zone_old else None,
+            "new_mean_abs_jump_c": float(np.mean(cross_zone_new)) if cross_zone_new else None,
+        },
+        "cross_subzone": {
+            "n_pairs": n_cross_subzone,
+            "old_mean_abs_jump_c": float(np.mean(cross_subzone_old)) if cross_subzone_old else None,
+            "new_mean_abs_jump_c": float(np.mean(cross_subzone_new)) if cross_subzone_new else None,
+        },
+        # Backward-compatible aliases (pre-split shape) pointed at the
+        # cross-zone numbers specifically, since that was this function's
+        # entire scope before this fix.
+        "n_cross_zone_pairs_within_km": n_cross_zone,
+        "old_mean_abs_jump_c": float(np.mean(cross_zone_old)) if cross_zone_old else None,
+        "new_mean_abs_jump_c": float(np.mean(cross_zone_new)) if cross_zone_new else None,
     }
 
 
@@ -288,6 +352,26 @@ def _served_values(rows: list[dict], preds: list[dict], grid_col: str) -> list[f
         (r[grid_col] + p["delta_c"]) if (p["applied"] and p["delta_c"] is not None) else r.get(grid_col)
         for r, p in zip(rows, preds)
     ]
+
+
+def check_partition_coverage(rows: list[dict], n_predictions: int, model_version: str, band_key: str) -> None:
+    """A mistyped --model-version (or --band-key) produces a
+    FrozenPredictionAdapter with ZERO frozen predictions for these rows --
+    every single row comes back not-applied under BOTH arms, and this
+    tool would otherwise happily print a valid-looking report claiming
+    "nothing changes," which is not what it means at all (Codex
+    adversarial review finding, PR #25). Hard stop when the predictions
+    partition is completely empty relative to the rows being replayed --
+    this can never be a legitimate real-world result (SOME rows always
+    have complete covariates in any real band), only a wrong
+    model_version/band_key pairing."""
+    if rows and n_predictions == 0:
+        raise SystemExit(
+            f"snapshot has {len(rows)} row(s) for band={band_key!r} but ZERO frozen predictions for "
+            f"model_version={model_version!r} -- this almost certainly means model_version or band_key "
+            "is wrong, not that the model genuinely applies nowhere. Refusing to produce a replay diff "
+            "that would otherwise misleadingly show 'nothing changes' under both arms."
+        )
 
 
 def replay_band(
@@ -300,6 +384,11 @@ def replay_band(
     band_rows = snapshot.read_band_partitions(snapshot_dir, band_key)
     if not band_rows:
         raise SystemExit(f"snapshot has no rows for band={band_key!r}")
+    # Read the predictions partition directly (not just via the adapter,
+    # which exposes no row-count) as a sanity check BEFORE replaying
+    # anything -- see check_partition_coverage's own docstring.
+    n_predictions = len(snapshot.read_predictions_partitions(snapshot_dir, model_version, band_key))
+    check_partition_coverage(band_rows, n_predictions, model_version, band_key)
     adapter = contract.FrozenPredictionAdapter.from_snapshot(snapshot_dir, model_version, band_key)
 
     result: dict = {"model_version": model_version, "band_key": band_key, "by_target": {}}
@@ -310,26 +399,45 @@ def replay_band(
         old_served = _served_values(band_rows, old_preds, grid_col)
         new_served = _served_values(band_rows, new_preds, grid_col)
 
+        # A zone with a delta_scale_subzone entry in EITHER gate must be
+        # diffed at (target, zone, subzone_code), not just (target, zone)
+        # -- Codex adversarial review finding, PR #25: a regression
+        # confined to one subzone (e.g. a French-only Cfb fit) can
+        # otherwise be diluted/hidden by every OTHER country's rows in
+        # that same zone's aggregate. Only zones that actually publish a
+        # subzone entry get this finer breakout, to avoid noise from
+        # meaningless country splits in a zone with no subzone-scoped
+        # correction at all.
+        subzoned_zones = set(old_gate.get("delta_scale_subzone", {}).get(target, {})) | set(
+            new_gate.get("delta_scale_subzone", {}).get(target, {}),
+        )
+
         zones = sorted({r.get("climate_zone") for r in band_rows if r.get("climate_zone")})
         by_zone: dict[str, dict] = {}
         for zone in zones:
             idxs = [i for i, r in enumerate(band_rows) if r.get("climate_zone") == zone]
             zone_old = [old_preds[i] for i in idxs]
             zone_new = [new_preds[i] for i in idxs]
-            by_zone[zone] = {
-                "tier_mix": {"old": tier_mix(zone_old), "new": tier_mix(zone_new)},
-                "delta_distribution": {"old": delta_distribution(zone_old), "new": delta_distribution(zone_new)},
-                "paired_delta_diff": paired_delta_diff(zone_old, zone_new),
-            }
+            zone_entry = {**_diff_metrics(zone_old, zone_new)}
+            if zone in subzoned_zones:
+                by_subzone: dict[str, dict] = {}
+                subzone_values = sorted({subzone_code(band_rows[i].get("station_id")) or "other" for i in idxs})
+                for sv in subzone_values:
+                    sub_idxs = [
+                        i for i in idxs if (subzone_code(band_rows[i].get("station_id")) or "other") == sv
+                    ]
+                    by_subzone[sv] = _diff_metrics(
+                        [old_preds[i] for i in sub_idxs], [new_preds[i] for i in sub_idxs],
+                    )
+                zone_entry["by_subzone"] = by_subzone
+            by_zone[zone] = zone_entry
 
         result["by_target"][target] = {
-            "overall": {
-                "tier_mix": {"old": tier_mix(old_preds), "new": tier_mix(new_preds)},
-                "delta_distribution": {"old": delta_distribution(old_preds), "new": delta_distribution(new_preds)},
-                "paired_delta_diff": paired_delta_diff(old_preds, new_preds),
-            },
+            "overall": _diff_metrics(old_preds, new_preds),
             "by_zone": by_zone,
-            "boundary_discontinuity": boundary_discontinuity(band_rows, old_served, new_served, max_km=boundary_max_km),
+            "boundary_discontinuity": boundary_discontinuity(
+                band_rows, old_served, new_served, max_km=boundary_max_km, subzoned_zones=frozenset(subzoned_zones),
+            ),
             "subzone_status": {"old": subzone_status(old_gate, target), "new": subzone_status(new_gate, target)},
         }
     return result
@@ -352,10 +460,16 @@ def render_summary(result: dict) -> str:
         old_dd, new_dd = overall["delta_distribution"]["old"], overall["delta_distribution"]["new"]
         lines.append(f"- delta_c mean: {old_dd['mean']} -> {new_dd['mean']} (n={old_dd['n']} -> {new_dd['n']})")
         bd = t["boundary_discontinuity"]
+        cz, cs = bd["cross_zone"], bd["cross_subzone"]
         lines.append(
-            f"- boundary discontinuity (within {bd['max_km']}km, n_pairs={bd['n_cross_zone_pairs_within_km']}): "
-            f"{bd['old_mean_abs_jump_c']} -> {bd['new_mean_abs_jump_c']}"
+            f"- boundary discontinuity, cross-zone (within {bd['max_km']}km, n_pairs={cz['n_pairs']}): "
+            f"{cz['old_mean_abs_jump_c']} -> {cz['new_mean_abs_jump_c']}"
         )
+        if cs["n_pairs"]:
+            lines.append(
+                f"- boundary discontinuity, cross-subzone (n_pairs={cs['n_pairs']}): "
+                f"{cs['old_mean_abs_jump_c']} -> {cs['new_mean_abs_jump_c']}"
+            )
         for zone, z in sorted(t["by_zone"].items()):
             old_zt, new_zt = z["tier_mix"]["old"], z["tier_mix"]["new"]
             lines.append(
