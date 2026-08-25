@@ -1,237 +1,270 @@
 # Rung D: contributed data, and what "reproducible" can honestly mean for it
 
-**Design only. No implementation in this PR, by instruction.** Rung D decides how private
-sensor data meets a public-reproducibility rule, which is a trust-model decision rather than a
-coding one, so it wants Nishant's review before anything is built.
+**Design only. No implementation.** Rung D decides how private sensor data meets a
+public-reproducibility rule, which is a trust-model decision rather than a coding one.
+
+**Revision note (2026-08-25, after round-1 review).** An earlier draft of this document reached
+three conclusions that review showed were wrong, and cited one precedent that does not exist.
+They are corrected below rather than quietly edited, because a design record whose errors are
+invisible is worth less than one that shows where it was wrong: Seoul is **not** the easy case,
+`promote_from_public.py` **cannot** be reused as-is, the shared-QC-harness argument was
+**refuted by its own evidence**, and the "internal-track promotions stay out of the credit
+ledger's tenure path" precedent I cited repeatedly **was never real** — it was my own unbuilt
+proposal from an earlier design doc, cited later as though it were established practice.
 
 ## The tension, stated exactly
 
-The referee's whole trust model is three sentences in `GOVERNANCE.md`: a submission declares
-what to run **from this repository's own code**, at a pinned version, against a **published
-snapshot**. No contributor Python executes anywhere. Any stranger can re-derive any number.
+The referee's trust model is three things: a submission runs **this repository's own code**, at a
+**pinned version**, against a **published snapshot**. Any stranger can re-derive any number
+because GHCN-Daily is free and public.
 
-That works because GHCN-Daily is free and public. Contributed sensor data breaks all three
-legs at once:
+Contributed sensor data breaks **one** of those three: the published snapshot. It does not touch
+what code runs or at what version — Rung D admits *data*, and contributed code still never
+executes (see "Not proposed" below). An earlier draft said it "breaks all three legs at once",
+which was overstatement that made the problem look larger than it is; the three items it listed
+underneath were all restatements of the snapshot leg.
 
-1. It is not in the published snapshot.
+That one leg is enough to matter:
+
+1. The data is not in the published snapshot.
 2. It may not be redistributable at all — municipal agreements and commercial feeds routinely
    forbid it.
 3. Even when redistributable, a curated snapshot is not a place to dump every city's raw feed.
 
-So the question Rung D has to answer is not "how do we accept data" but: **what does
-reproducibility mean for a result nobody outside the project can recompute?**
+So: **what does reproducibility mean for a result nobody outside the project can recompute?**
 
 ## The move: separate reproducibility from publication
 
-What the program actually needs from "reproducible" is three distinct things, which public data
-happens to deliver together:
+"Reproducible" bundles three things that public data delivers together:
 
 - **(a) Independent re-derivation** — the maintainer, not the claimant, recomputes the number.
-  The private serving repository's `scripts/promote_from_public.py` (`crisisready/heat-risk-data-api`)
-  already does this and does not care where the data came from.
 - **(b) Third-party falsifiability** — someone unaffiliated can check the claim.
-- **(c) Identification** — what exactly was used is pinned precisely enough that a dispute is
-  resolvable.
+- **(c) Identification** — what was used is pinned precisely enough to settle a dispute.
 
-Public data gives all three, which is why it stays the default and the preferred path.
-Contributed data can always give **(a)** and **(c)**. It cannot always give **(b)**. The
-honest design says so out loud rather than implying otherwise.
+Contributed data can give **(a)** and **(c)**. It cannot always give **(b)**. Saying so is better
+than implying otherwise.
+
+**(a) needs new code, and an earlier draft wrongly said it did not.** The private serving
+repository's `scripts/promote_from_public.py` (`crisisready/heat-risk-data-api`) does perform
+independent re-derivation today, but it is bound to the snapshot layout: `main()` calls
+`verify_frozen_snapshot_pin()`, which hard-exits unless a `MANIFEST.json` in
+`--frozen-snapshot-dir` declares exactly the winning cycle's `snapshot_version`, and `rederive()`
+then reads through `snapshot.read_band_partitions()` and `contract.FrozenPredictionAdapter`. A
+private sensor store is neither a versioned snapshot nor in that layout. **Every
+`no-redistribution` claim rests on a re-derivation path that does not exist yet.** Naming that is
+the point: assuming a mechanism exists when it does not is the error the licensing gate (#31) was
+built to correct, and this document made it about the very step its trust model depends on.
 
 ## Three tiers, keyed to the axis the licensing gate already defines
 
-The `redistribution_tier` field that landed with the licensing gate (#31) turns out to be exactly
-the axis that determines what reproducibility is achievable. That is not a coincidence worth
-hiding — it means Rung D needs no new vocabulary for the hard part, and it is why the licensing
-gate had to be built first.
+`redistribution_tier`, from #31, is the axis that determines what reproducibility is achievable.
 
-| Tier | Can it enter a published snapshot? | What "reproducible" means |
+| Tier | Enters a published snapshot? | What "reproducible" means |
 |---|---|---|
-| `unrestricted` | Yes | Full public reproducibility. Any stranger recomputes the number. |
-| `attribution-required` | Yes, with attribution carried forward | Same as above. `DATA_LICENSE` already does this for LandScan/ORNL. |
-| `no-redistribution` | **No** | Maintainer-verifiable and publicly **auditable**, but not publicly recomputable. |
+| `unrestricted` | Yes | Full public reproducibility |
+| `attribution-required` | Yes, notice carried forward | Same |
+| `no-redistribution` | **No** | Maintainer-verifiable and auditable, not publicly recomputable |
 
-### What `no-redistribution` actually buys
+### What `no-redistribution` buys, stated more carefully than before
 
-The data lands in a private store. The maintainer re-derives the claim against it. What gets
-published is a **content-addressed attestation**: the exact station/sensor ids and date range
-used, a per-file `sha256`, row counts, and the full QC report — plus the derived numbers.
+The data lands in a private store, the maintainer re-derives (see the dependency above), and what
+publishes is a **content-addressed attestation**.
 
-A third party cannot recompute the result. They **can** verify that the claimant did not alter
-the data after claiming, that the QC bar was met, that the maintainer's re-derivation consumed
-the same bytes, and that the sensor set was not quietly trimmed to flatter the outcome.
+An earlier draft claimed the attestation proved four things. It proves two. Hashes over the
+*submitted* files show that the claimant did not alter the data **after** claiming, and that the
+maintainer consumed the same bytes. They cannot show that the QC bar was met on the whole feed,
+or that the sensor set was not trimmed to flatter the result — because **the excluded bytes are
+never hashed or published.** The concrete attack: pull all 1,044 sensors, compute the result over
+subsets, publish ids and hashes for the 744 that help. The maintainer re-derives the same number
+from the same bytes and every hash verifies.
 
-**One dependency this exposes, and it is not hypothetical.** `#31` validates
-`redistribution_tier` and `attribution_required` but nothing yet *consumes* them — no code
-generates the snapshot's attribution notices from the tier. An attestation for
-`attribution-required` data has to carry that notice forward, so Rung D cannot ship its
-`attribution-required` path until something reads the field. Named here rather than discovered
-during implementation, because assuming a mechanism exists when it does not is the specific
-error `#31` was written to correct and then made three more times inside itself.
+Closing that requires the attestation to cover the **full pre-QC pull plus the exclusion set with
+its reasons**, not just the surviving rows. That is a real design requirement, not a detail, and
+it is what makes the tier auditable rather than merely tamper-evident.
 
-That is tamper-evidence plus independent verification. It is genuinely weaker than public
-reproducibility, and the difference is not cosmetic, so:
-
-**Any cell whose evidence rests on `no-redistribution` data is labelled as such — in the
-registry, on the public models page, and on the leaderboard.** Without that label the program
-silently merges "anyone can check this" and "trust us, we checked" under one badge. This is the
-same reasoning that keeps internal-track promotions out of the credit ledger's tenure path:
-the record's value comes from the categories staying distinct.
+**Any cell resting on this tier is labelled.** Two surfaces named for that labelling do not exist
+in this repository yet: there is no `registry/` and no public models page — both are roadmap
+Phase 1 deliverables. `docs/leaderboard.{md,json}` is the only surface that exists today, so it
+is the only one this design can commit to.
 
 ## What a Rung D submission is
 
-A **data-source dossier**, not a model and not a parameter. The acceptance checklist below is §0 of
+A **data-source dossier**. The checklist is §0 of
 `research/seoul-local-sensor-validation/REPRODUCE_FOR_A_NEW_CITY.md` in the private
-`crisisready/heat-risk-data-api` repo, promoted from a research habit to a submission
-requirement — and worth promoting precisely because it has already earned its keep: it is what
-rejected Chicago and NYC after each looked fine on paper.
+`crisisready/heat-risk-data-api` repo. **It has to be restated in this public repository to be
+binding** — a requirement a contributor cannot read is not a requirement — so the items are
+reproduced here in full, and implementation should move them into `CONTRIBUTING.md` rather than
+linking out.
 
-**It has to be restated in this public repository to be binding.** A requirement a contributor
-cannot read is not a requirement, and citing a private-repo filename as the acceptance criteria
-for a public submission type would be the same documented-but-unreachable-control problem the
-licensing gate (#31) was written to correct. The seven items are therefore reproduced in full
-here, and implementation should move them into `CONTRIBUTING.md` rather than linking out.
+Its provenance, accurately: it was **distilled from** the Chicago and NYC rejections after the
+fact, and its own source describes it as "the checklist that would have caught both faster". It
+has never actually gated a city. An earlier draft said it had "already earned its keep", which
+credited it with work it has not yet done.
 
 1. **Live-endpoint proof.** Hit the actual data endpoint, not the dataset's landing page.
 2. **Sensor count for the variable you actually need.** Chicago advertised 286 sensors; 7
    reported temperature.
 3. **Currency.** A recent real timestamp, not a frozen campaign. NYC's Hyperlocal Temperature
    Monitoring is 475 sensors and ends in 2019.
-4. **Self-serve access.** Not request-and-wait with a possible fee (NYS Mesonet's 29 real
-   stations are gated exactly this way).
+4. **Self-serve access.** Not request-and-wait with a possible fee — the NYC-area NYS Mesonet
+   subset (29 stations) is gated exactly this way.
 5. **A bulk path**, in addition to any documented API. Seoul's usable route was a CSV archive
    sitting beside a gated "Open API".
-6. **Licence and redistribution tier**, through the gate that now exists (`#31`). Worth
-   anticipating for municipal feeds specifically: `ODbL-1.0` and the `CC-BY-SA` family now route
-   to a maintainer rather than auto-passing, because share-alike terms conflict with
-   `DATA_LICENSE`'s CC BY 4.0 republication. Open government data under ODbL is common, so a real
-   fraction of Rung D dossiers will land in that review path by design rather than by accident.
-7. **A QC report** from the shared harness below.
+6. **Licence and redistribution tier**, through the #31 gate. Two frictions worth naming now:
+   `ODbL-1.0`, `CC-BY-SA-4.0` and `CC-BY-SA-3.0` route to a maintainer rather than auto-passing,
+   because share-alike conflicts with `DATA_LICENSE`'s CC BY 4.0 republication (older `CC-BY-SA`
+   versions are not in that set at all, so they are outright rejections). And
+   `reproducible_fetch` is a **required** key regardless of tier, which a `no-redistribution`
+   source in a private store cannot honestly populate — so the first such dossier either fails
+   admission or declares a decorative URL. That needs resolving before the tier can ship.
+7. **A QC report** from the harness below.
 
-## The QC harness, and why it must be ours rather than the contributor's
+## QC: the argument I made was wrong, and the corrected one is narrower
 
-`dataqc.py`, generalising the S-DoT QC steps:
+The earlier draft argued the harness must be **ours** because the S-DoT QC script produced a
+false "0 of 60,919 sensor-days usable". Review pointed out the flaw, and it is fatal to that
+argument: **that script *was* ours.** A shared harness would have shipped the identical
+row-order bug to every contributor and produced the identical false rejection. "We run it, the
+contributor runs it too" is two executions of the same code and catches nothing about a bug in
+that code — a single point of failure dressed as a safeguard.
 
-- **Cadence verified, never assumed** — derived from one sensor's own timestamp sequence.
-- Physical-plausibility bounds for the city's real climate and season.
-- Per-sensor-day completeness against the **measured** cadence, not a guessed one.
-- Any cross-check field the feed offers (S-DoT's black-globe vs ambient caught 20 badly sited
-  sensors).
-- **Join-key normalisation against the boundary polygons**, which is what the 101-vs-319 dong
-  mismatch above turned on.
+What the incident actually argues for is an **independent cross-check**, which the harness alone
+cannot be. Three things, honestly separated:
 
-The argument for a shared harness rather than "run your own QC and report it" is not
-convenience, it is a real incident. The S-DoT QC script itself got the cadence wrong on its
-first pass — it read the CSV's time-then-sensor row order as one sensor at 10-minute
-intervals — and produced a headline **"0 of 60,919 sensor-days usable"**. That is a false
-*rejection* of a data source that turned out to be excellent. A contributor running bespoke QC
-would have reported it and walked away, and we would have believed them. The same thread's
-whitespace-sensitive dong join separately matched only **101 of 406** dong where **319 of 406**
-should have matched, understating coverage by about 3×. (Not to be confused with the post-QC
-figure of 315 of 423 dong having usable ground truth, which is a different measurement — an
-earlier draft of this document conflated the two, which is exactly the kind of number a
-normative design record should not get wrong.)
+- **A shared harness is still worth having**, but for *comparability* — every dossier's QC report
+  means the same thing — not for correctness.
+- **A null result requires a second method before it is accepted.** "This source is unusable" is
+  the conclusion the S-DoT bug would have produced, and it is the conclusion nobody
+  double-checks. Any dossier rejected on QC grounds gets an independent recount before the
+  rejection stands.
+- **Cadence is derived and cross-validated**, never assumed — the specific bug was inferring a
+  10-minute cadence from time-then-sensor row order, and it is caught by checking one sensor's
+  own timestamp sequence against the file-wide assumption.
 
-Both errors were in the direction of wrongly *discarding* good data, which is the failure mode
-a contributor has no incentive to catch and every incentive to accept. We run the harness; the
-contributor runs it too; both reports attach to the submission.
-
-## What this unblocks, and what it does not
-
-Rung D is a hard dependency for Seoul: nothing today can independently re-derive
-`local/seoul-sdot-v1`, and the program's own "a submission's own reported numbers are never
-trusted" rule cannot be honoured for it until this exists. S-DoT is the natural first dossier
-and is `unrestricted`-tier as far as the record shows, which means **Seoul does not need the
-hard case** — it can go through the fully-reproducible path.
-
-That matters for sequencing: the `no-redistribution` machinery is the part that needs the most
-review and the least urgency. The tiers can land in order.
-
-## What I am NOT proposing
-
-No implementation, per the constraint on this piece. Also deliberately absent: any change to
-what the referee executes. Rung D admits *data*, and contributed code still never runs —
-`GOVERNANCE.md`'s "no contributor Python executes anywhere" stands untouched, and a Rung D
-dossier is a declaration plus a QC report, not a program.
+The rest of the harness generalises what S-DoT's QC did catch: physical-plausibility bounds,
+per-sensor-day completeness against the measured cadence, any cross-check field the feed offers
+(black-globe below ambient flagged 20 badly-sited sensors of 1,044), and **join-key
+normalisation against the boundary polygons** — the defect that matched only 101 of 406 dong
+where 319 of 406 should have matched, understating coverage roughly threefold. (Distinct from the
+post-QC figure of 315 of 423 dong having usable ground truth; an earlier draft conflated the
+two.)
 
 ## Both open decisions, as decided by Nishant (2026-08-25)
 
 **1. `no-redistribution` data is admissible on the public leaderboard, with the visible label.**
 My recommendation, adopted.
 
-**2. The program is OPEN to consumer networks (Netatmo-class).** This overrides the approved
-roadmap's standing default-rejection, and it was chosen against the conservative option and
-against my own framing, so it is recorded here as his explicit call rather than as an inherited
-default. The rest of this section is what that decision requires, because admitting
-consumer data unconditioned would be the one reading of it that does not work.
+**2. Consumer networks (Netatmo-class) are admitted.**
 
-## Consumer networks: the bar that makes an open door safe
+Recorded precisely, because an earlier draft misstated the governance change: this is **not** an
+override of the approved roadmap. `ROADMAP.md` already says consumer sources are "admissible
+only with a validated bias treatment — the default expectation, given the record, is rejection."
+The decision is that the door is open; the conditions below are that stated precondition made
+concrete. Calling it an override overstated what changed, in a section whose whole job is
+recording the change accurately.
 
-Consumer weather stations fail in ways institutional ones do not, and the failures are
-systematic rather than random: sun-exposed siting reads warm by day, balcony and indoor siting
-suppresses the diurnal range, and proximity to walls, vents and vehicles adds a persistent
-night-time warm bias. Unscreened, a dense consumer network does not add noise around the truth,
-it moves the estimate.
+## Consumer networks: the conditions that make an open door safe
 
-**Our own record already contains the sharpest version of this problem, and it is not about
-consumer data at all.** Valencia's correction was fitted on 9 tight-cluster stations. Widening
-to 31 real, high-quality regional stations destroyed the validated result: whole-year tmin
-reduction fell from **19.4% to 3.5–4.2%** across every candidate correction, and the wide set's
-bootstrap CI stopped excluding zero for both targets (tmax [−4.2%, 24.9%], tmin [−5.0%, 10.0%]).
+Consumer stations fail systematically, not randomly: sun exposure reads warm by day, balcony and
+indoor siting suppresses diurnal range, wall and vent proximity adds persistent night-time warm
+bias.
 
-Stated precisely, because the precise version is the useful one: tmax's *point estimate* held up
-under widening (around 10–12.5% against the tight cluster's 11.8%) — what collapsed was tmin,
-which was the statistically validated result, and coast-distance stopped being the best
-covariate at all once mountain stations entered. So the lesson is not "more data always hurts".
-It is that pooling data from different microclimates destroyed the one finding that had cleared
-its evidence bar. A city contributing 5,000 consumer sensors against 9 reference stations is
-that same dilution three orders of magnitude larger, before any siting bias is considered.
+1. **`source_class` declared, not inferred** — `institutional | consumer`. The QC bar, the
+   weighting and the labelling differ, and inferring it from the endpoint is the kind of silent
+   guess this program keeps getting caught by.
+2. **A siting screen, not just plausibility.** Bounds catch −40 °C in July; they do not catch a
+   sensor in direct sun. Cohort-relative daytime warm bias, suppressed diurnal range, persistent
+   night-time offset, correlation breakdown against neighbours.
+3. **Density is a precondition**, because every screen in (2) is cohort-relative. A sparse
+   consumer feed cannot be screened this way and is not admissible as a consumer source. This is
+   the condition most likely to be narrower than "open" was meant to be, and the honest cost of
+   relaxing it is admitting data whose bias cannot be characterised.
+4. **The bias treatment validates against independent institutional reference data.** The
+   methodological crux: a correction fitted and judged on consumer data alone looks excellent and
+   means nothing, because the reference carries the same bias. A city with no institutional
+   reference can have its consumer network described, not validated.
+5. **Weighting is explicit**, declared in the dossier and recorded in the attestation.
 
-So five conditions, each traceable to something already measured rather than to caution:
+### Condition 5's evidence, corrected
 
-1. **Source class is declared, not inferred.** A dossier states `source_class:
-   institutional | consumer`. The QC bar, the weighting, and the labelling all differ, and
-   guessing from the endpoint would be exactly the kind of silent inference this program keeps
-   getting burned by.
+An earlier draft justified (5) with the Valencia widening result and got the mechanism wrong.
+That degradation was caused by **geographic and microclimate spread** — stations up to 115 km
+away and 1,515 m elevation, genuinely different mountain interiors — not by count imbalance; 31
+against 9 is barely 3×. And 5,000 consumer sensors *inside one city* is close to the opposite
+case: same microclimate, more samples. The draft also omitted that restricting the wide set to
+hot days **recovered** significance for both targets (tmax 18.2% CI [8.5, 26.6]; tmin 9.3% CI
+[2.8, 13.7]).
 
-2. **A siting screen, not just a plausibility screen.** Physical-plausibility bounds catch a
-   sensor reading −40 °C in July; they do not catch a sensor in direct sun. The screens that do,
-   all computable without site metadata: daytime warm bias against the local cohort, suppressed
-   diurnal range against the cohort, persistent night-time warm offset, and correlation breakdown
-   with cohort neighbours. This generalises the check that already earned its keep — S-DoT's
-   black-globe-below-ambient test flagged 20 real badly-sited sensors out of 1,044.
+So Valencia does not establish (5). The honest justification is narrower: a pooled fit in which
+influence tracks sensor count lets the least-controlled instruments dominate a cell's estimate,
+and (2)–(4) exist precisely because consumer instruments are the least controlled. That is an
+argument from bias, not from dilution, and it should be tested rather than asserted — a
+with-and-without-weighting arm on the first dense consumer city is the measurement that would
+settle it.
 
-3. **Cohort screening needs density, so density is a precondition.** Every screen above is
-   relative to neighbours. A sparse consumer feed cannot be screened this way and is therefore
-   not admissible as a consumer source — which is a genuine gate, not a formality: the thin
-   feeds are exactly the ones whose bias cannot be characterised.
+### An unresolved conflict with standing policy
 
-4. **The bias treatment must be validated against INDEPENDENT reference data.** This is the
-   methodological crux, and it is where a plausible design goes wrong: a correction fitted and
-   evaluated on consumer data alone will look excellent and mean nothing, because the reference
-   it is being judged against carries the same bias. Validation requires held-out
-   institutional stations — GHCN, ECA&D, an official municipal network. A city with no
-   institutional reference at all cannot have its consumer network validated, only described.
+`ROADMAP.md`'s data-sourcing policy requires that sources carrying device-owner locations —
+naming consumer crowd networks as the known case — be admissible "only after
+anonymization/aggregation that removes it, stated in the QC report."
 
-5. **Weighting is explicit, and consumer data never silently outvotes reference data.** Given
-   the Valencia dilution result, a pooled fit that lets sensor count decide influence is the
-   known-bad option. Consumer contributions are spatially thinned or down-weighted, and the
-   scheme is declared in the dossier and recorded in the attestation rather than left to
-   whatever the fitting code happens to do.
+**Conditions 2 and 3 require precise per-sensor geolocation at sub-neighbourhood granularity,
+which is exactly the information that policy requires stripped.** As written, a Netatmo-class
+dossier cannot satisfy both gates. This is a real conflict, not a wording problem, and the
+earlier draft did not notice it.
 
-## One consequence worth resolving now rather than accumulating
+The resolution I would propose, for review rather than as a decision: screening happens
+**maintainer-side on coordinates that are never published**, and the dossier and attestation
+carry only aggregates — per-cohort bias statistics, counts, and the exclusion set by opaque
+sensor id. That keeps the screens computable while nothing location-bearing is republished. It
+also means a consumer dossier cannot be independently re-screened by a third party, which is a
+further narrowing of leg (b) and should be labelled as such.
 
-This design now carries two separate labels: one for cells resting on `no-redistribution` data,
-one for cells resting on consumer-derived evidence. Two is where a pattern should be named
-rather than extended a third time.
+## Labelling, and a pattern named rather than extended
 
-Proposal: a single **evidence-provenance label** on every cell, recording what kind of ground
-truth its claim rests on — publicly reproducible, maintainer-attested, consumer-derived, or a
-combination — instead of a growing set of one-off badges. Same purpose as before: the
-leaderboard's value comes from its categories staying distinct, and a reader deciding whether to
-trust a number needs to know which kind it is without reading the manifest.
+This design now needs two provenance labels: `no-redistribution` and consumer-derived. Two is
+where a pattern should be named instead of extended a third time.
 
-## Explicitly out of scope here
+Proposal: **one evidence-provenance label per cell** — publicly reproducible, maintainer-attested,
+consumer-derived, or a combination — rather than accumulating one-off badges. A reader deciding
+whether to trust a number needs to know which kind it is without reading the manifest.
 
-Feeding contributed data into the **global** training corpus. The roadmap already stages that
-as its own separately-gated path with a stricter bar, and folding it in here would bundle a
-much larger decision — a global retrain's behaviour — into a data-acceptance design.
+An earlier draft justified this by analogy to "the same reasoning that keeps internal-track
+promotions out of the credit ledger's tenure path." **That precedent does not exist.** There is
+no internal track in `GOVERNANCE.md`, `ledger/README.md` or `ledger.py`'s `CREDIT_LINE_SCHEMA`;
+it was a proposal in my own earlier design document, cited in later documents as though it were
+established practice. The argument stands on its own without a fabricated precedent, and the
+fabrication is recorded here because it appeared in more than one place.
+
+## Sequencing: the earlier conclusion was wrong
+
+The earlier draft concluded that S-DoT was `unrestricted`-tier, so "Seoul does not need the hard
+case" and "the tiers can land in order."
+
+**Both are wrong.** No record in either repository states S-DoT's licence, so the claim rested on
+nothing. And under #31's own rules it almost certainly cannot be `unrestricted`:
+`SPDX_ATTRIBUTION_REQUIRED` covers every allowlisted licence except `CC0-1.0` and `PDDL-1.0`, and
+`data.seoul.go.kr` is KOGL-family — attribution-carrying, and not on `SPDX_ALLOWLIST` at all.
+Seoul therefore lands in `attribution-required`, or in the needs-review path.
+
+`attribution-required` is the tier this document says cannot ship until something generates the
+snapshot's attribution notices from the field, since #31 validates `redistribution_tier` and
+`attribution_required` but nothing reads them. **So the first dossier is blocked on exactly the
+work the earlier draft deferred**, and the real dependency order is:
+
+1. Establish S-DoT's actual licence. Nothing in either repo records it.
+2. Build the attribution-notice mechanism that consumes `redistribution_tier`.
+3. Build a re-derivation path for data outside the snapshot layout (the `promote_from_public.py`
+   gap above).
+4. Then the tiers, in whatever order their evidence allows.
+
+## Not proposed
+
+No change to what the referee executes. `GOVERNANCE.md` says "No contributor Python executes
+anywhere **in v1**" — quoted with its scope qualifier, which an earlier draft dropped; the v1
+scoping is load-bearing, since Rung C is a planned rung whose opening is explicitly conditioned
+on an execution-safety decision. A Rung D dossier is a declaration plus a QC report, not a
+program.
+
+Also out of scope: feeding contributed data into the **global** training corpus, which the
+roadmap stages as its own separately-gated path.
