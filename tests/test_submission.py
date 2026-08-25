@@ -119,7 +119,11 @@ class TestRungBCandidate:
     present iff rung=='B' (2026-08-25, Rung B scoring extension)."""
 
     def _rung_b_manifest(self, **method_overrides):
+        # Single-target claim by default -- keeps most of these tests
+        # focused on the candidate SHAPE, not coverage. See
+        # TestRungBCandidateCoverage below for the multi-cell case.
         m = _manifest(rung="B")
+        m["claims"][0]["targets"] = ["tmax"]
         m["method"] = {
             "kind": "parameters", "entrypoint": "scripts/run_submission.py",
             "args": [], "package_version": "0.1.0", "code_ref": None, "extra_covariates": [],
@@ -133,6 +137,7 @@ class TestRungBCandidate:
 
     def test_affine_shape_candidate_passes(self):
         m = self._rung_b_manifest(candidate={"tmin": {"Cfb": {"scale": 0.9, "offset": 0.2}}})
+        m["claims"][0]["targets"] = ["tmin"]
         submission.validate_manifest(m)  # must not raise
 
     def test_rung_b_with_no_candidate_raises(self):
@@ -166,6 +171,67 @@ class TestRungBCandidate:
         m = self._rung_b_manifest(candidate={"tmax": {"Cfb": {"bogus": 1.0}}})
         with pytest.raises(Exception):
             submission.validate_manifest(m)
+
+    def test_mistyped_target_key_raises(self):
+        """Codex adversarial review finding, PR #24: additionalProperties
+        was missing at the candidate level, so a mistyped target key like
+        'Tmax' passed schema validation silently and was simply never read
+        downstream -- must now be a hard reject, not a silent no-op."""
+        m = self._rung_b_manifest(candidate={"Tmax": {"Cfb": {"bias_correction_c": 0.8}}})
+        with pytest.raises(Exception):
+            submission.validate_manifest(m)
+
+
+class TestRungBCandidateCoverage:
+    """Codex adversarial review finding, PR #24: method.candidate being
+    non-empty is not enough -- it must cover EVERY (target, zone) the
+    manifest actually claims, or an uncovered cell silently falls back to
+    a Rung-A-style mechanical fit at scoring time (score_forward_eval.py's
+    own docstring)."""
+
+    def _manifest_multi_cell(self, candidate):
+        m = _manifest(rung="B")
+        m["claims"][0]["targets"] = ["tmax", "tmin"]
+        m["claims"][0]["zones"] = ["Cfb", "BWh"]
+        m["method"] = {
+            "kind": "parameters", "entrypoint": "scripts/run_submission.py",
+            "args": [], "package_version": "0.1.0", "code_ref": None, "extra_covariates": [],
+            "candidate": candidate,
+        }
+        return m
+
+    def test_full_coverage_passes(self):
+        m = self._manifest_multi_cell({
+            "tmax": {"Cfb": {"bias_correction_c": 0.8}, "BWh": {"bias_correction_c": 0.3}},
+            "tmin": {"Cfb": {"bias_correction_c": 0.5}, "BWh": {"bias_correction_c": 0.1}},
+        })
+        submission.validate_manifest(m)  # must not raise
+
+    def test_missing_one_zone_raises(self):
+        m = self._manifest_multi_cell({
+            "tmax": {"Cfb": {"bias_correction_c": 0.8}, "BWh": {"bias_correction_c": 0.3}},
+            "tmin": {"Cfb": {"bias_correction_c": 0.5}},  # BWh missing for tmin
+        })
+        with pytest.raises(ValueError, match=r"missing an entry for claimed cell"):
+            submission.validate_manifest(m)
+
+    def test_missing_an_entire_target_raises(self):
+        m = self._manifest_multi_cell({
+            "tmax": {"Cfb": {"bias_correction_c": 0.8}, "BWh": {"bias_correction_c": 0.3}},
+            # tmin entirely absent
+        })
+        with pytest.raises(ValueError, match=r"missing an entry for claimed cell"):
+            submission.validate_manifest(m)
+
+    def test_extra_uncovered_zone_beyond_the_claim_is_harmless(self):
+        """Extra candidate entries beyond the claim are fine -- same "free
+        extra feedback" spirit Rung A's own out-of-claim-zone scoring
+        already has. Only MISSING coverage for a CLAIMED cell is an error."""
+        m = self._manifest_multi_cell({
+            "tmax": {"Cfb": {"bias_correction_c": 0.8}, "BWh": {"bias_correction_c": 0.3}, "Csa": {"bias_correction_c": 0.1}},
+            "tmin": {"Cfb": {"bias_correction_c": 0.5}, "BWh": {"bias_correction_c": 0.1}},
+        })
+        submission.validate_manifest(m)  # must not raise
 
 
 class TestParseSubmissionId:

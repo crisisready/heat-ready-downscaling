@@ -110,6 +110,24 @@ def load_active_candidates(ledger_dir: str, submissions_root: str = "submissions
             continue
         with open(manifest_path) as f:
             manifest = yaml.safe_load(f)
+        # Code-review finding, PR #24: this reads a manifest straight off
+        # disk with no re-validation. A merged submission predates this
+        # schema, or was hand-edited post-merge, could otherwise crash
+        # score_band (a candidate zone entry with neither/both shapes) or
+        # this function itself (a non-dict zone value) -- which would abort
+        # the ENTIRE monthly cycle for every other active cell, not just
+        # this one. Skip (log + continue), matching the existing "no
+        # manifest.yaml found" convention just above, never let one bad
+        # manifest take down the whole cron run.
+        try:
+            submission.validate_manifest(manifest)
+        except Exception:
+            logger.warning(
+                "submission %s's manifest.yaml at %s failed validate_manifest -- skipping this "
+                "candidate entirely rather than risk scoring a malformed candidate",
+                line["submission_id"], manifest_path, exc_info=True,
+            )
+            continue
         claim = manifest["claims"][0]
         manifest_candidate = manifest.get("method", {}).get("candidate") or {}
         for target in claim["targets"]:
@@ -318,12 +336,26 @@ def main() -> None:
         if candidate["snapshot_version"] == args.current_snapshot_version:
             continue  # candidate submitted against the CURRENT snapshot -- nothing new to score yet
 
-        submission_snapshot_dir = rs.download_snapshot(candidate["snapshot_version"], args.cache_root)
-        metrics = score_cell(
-            current_snapshot_dir, submission_snapshot_dir, model_version, band_key, target, zone,
-            args.current_snapshot_version,
-            proposed_correction_entry=candidate.get("proposed_correction_entry"),
-        )
+        # Code-review finding, PR #24: one cell's failure (a transient
+        # download error, an unexpected data shape) must never abort the
+        # WHOLE monthly cycle for every other active candidate -- isolate
+        # per cell, log, and move on. load_active_candidates already
+        # validates each manifest before it becomes a `candidate` here, so
+        # this is defense in depth against everything ELSE that can go
+        # wrong scoring one cell, not a substitute for that check.
+        try:
+            submission_snapshot_dir = rs.download_snapshot(candidate["snapshot_version"], args.cache_root)
+            metrics = score_cell(
+                current_snapshot_dir, submission_snapshot_dir, model_version, band_key, target, zone,
+                args.current_snapshot_version,
+                proposed_correction_entry=candidate.get("proposed_correction_entry"),
+            )
+        except Exception:
+            logger.error(
+                "Failed to score cell %s (submission %s) -- skipping this cell for cycle %s, "
+                "continuing with the rest", cell_key, candidate["submission_id"], args.cycle, exc_info=True,
+            )
+            continue
         if metrics is None:
             continue
 

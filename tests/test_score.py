@@ -297,6 +297,19 @@ class TestScoreBandProposedCorrection:
                 proposed_correction={"Cfa": {"bogus_key": 1.0}},
             )
 
+    def test_entry_with_both_shapes_raises(self):
+        """Defense in depth (code-review finding, PR #24): submission.py's
+        jsonschema oneOf is the primary guard, but score_forward_eval.py
+        reads a merged manifest straight off disk every monthly cycle
+        without re-validating it -- score_band itself must never silently
+        pick a branch (e.g. "affine wins") for an ambiguous entry."""
+        rows, adapter = _bias_test_rows_and_adapter(bias_c=0.5)
+        with pytest.raises(ValueError, match="BOTH"):
+            score.score_band(
+                adapter, rows, "tmax", fold_salt="v-test",
+                proposed_correction={"Cfa": {"bias_correction_c": 0.8, "scale": 0.9, "offset": 0.2}},
+            )
+
     def test_result_is_identical_across_fold_salts(self):
         """The whole point of not needing a CV loop here: nothing is fit
         from `rows`, so the declared value's score can never depend on how

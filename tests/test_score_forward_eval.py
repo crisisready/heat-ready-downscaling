@@ -23,6 +23,29 @@ def _cell(model_version="ds-test", band_key="lag_fill", target="tmax", zone="Cfb
     return {"model_version": model_version, "band_key": band_key, "target": target, "zone": zone}
 
 
+def _valid_manifest_dict(submission_id, github, model_version, band_key, targets, zones, candidate=None):
+    """A FULLY schema-valid manifest dict -- load_active_candidates now
+    calls submission.validate_manifest (2026-08-25 robustness fix, PR #24
+    code review) and skips anything that doesn't pass, so every manifest
+    fixture in this file must satisfy the real schema, not just the
+    handful of fields load_active_candidates itself reads."""
+    return {
+        "schema_version": 1, "submission_id": submission_id,
+        "author": {"github": github, "name": None, "orcid": None, "affiliation": None},
+        "track": "serving-ready", "rung": "B" if candidate is not None else "A",
+        "snapshot": {"version": "v2026.08", "manifest_sha256": "a" * 64},
+        "claims": [{"model_version": model_version, "band_key": band_key, "targets": targets, "zones": zones}],
+        "method": {
+            "kind": "parameters" if candidate is not None else "rerun-validator",
+            "entrypoint": "scripts/run_submission.py", "args": [], "package_version": "0.1.0",
+            "code_ref": None, "extra_covariates": [],
+            **({"candidate": candidate} if candidate is not None else {}),
+        },
+        "claimed_report": "claimed_report.json",
+        "tolerance": {"rmse_qrf_c": 0.005},
+    }
+
+
 class TestFindSubmissionManifest:
     def test_finds_by_zero_padded_sequence_prefix(self, tmp_path):
         d = tmp_path / "submissions" / "2026-08" / "001-nishkishore-lagfill-cfb"
@@ -51,11 +74,7 @@ class TestLoadActiveCandidates:
         year_month, seq = submission_id.rsplit("-", 1)
         d = tmp_path / "submissions" / year_month / f"{seq}-{github}-slug"
         d.mkdir(parents=True)
-        manifest = {
-            "claims": [{"model_version": model_version, "band_key": band_key, "targets": targets, "zones": zones}],
-        }
-        if candidate is not None:
-            manifest["method"] = {"candidate": candidate}
+        manifest = _valid_manifest_dict(submission_id, github, model_version, band_key, targets, zones, candidate)
         (d / "manifest.yaml").write_text(yaml.dump(manifest))
 
     def _ledger_line(self, submission_id, github, snapshot_version="v2026.08", reproduced=True, ts="2026-08-01T00:00:00Z"):
@@ -111,10 +130,13 @@ class TestLoadActiveCandidates:
     def test_extracts_proposed_correction_entry_for_rung_b(self, tmp_path):
         """The single most important wiring this Codex-review-fixed gap
         was about: score_forward_eval must be able to read a Rung B
-        submission's OWN declared value back out of its manifest."""
+        submission's OWN declared value back out of its manifest --
+        correctly scoped PER (target, zone), not leaked across cells (a
+        full-coverage manifest, since validate_manifest now requires it --
+        see TestRungBCandidateCoverage in test_submission.py)."""
         self._write_submission(
             tmp_path, "2026-08-001", "alice", "ds-test", "lag_fill", ["tmax", "tmin"], ["Cfb"],
-            candidate={"tmax": {"Cfb": {"bias_correction_c": 0.8}}},
+            candidate={"tmax": {"Cfb": {"bias_correction_c": 0.8}}, "tmin": {"Cfb": {"scale": 0.9, "offset": 0.1}}},
         )
         ledger_dir = tmp_path / "ledger"
         ledger_dir.mkdir()
@@ -122,8 +144,29 @@ class TestLoadActiveCandidates:
 
         active = sfe.load_active_candidates(str(ledger_dir), str(tmp_path / "submissions"))
         assert active[("ds-test", "lag_fill", "tmax", "Cfb")]["proposed_correction_entry"] == {"bias_correction_c": 0.8}
-        # tmin has no entry in the candidate block -- must stay None, not inherit tmax's
-        assert active[("ds-test", "lag_fill", "tmin", "Cfb")]["proposed_correction_entry"] is None
+        # tmin has its OWN, differently-shaped declared value -- must not leak tmax's
+        assert active[("ds-test", "lag_fill", "tmin", "Cfb")]["proposed_correction_entry"] == {"scale": 0.9, "offset": 0.1}
+
+    def test_invalid_manifest_is_skipped_not_crashed_on(self, tmp_path):
+        """Robustness fix, code-review finding PR #24: a manifest that
+        predates this schema, or was hand-edited post-merge, must be
+        skipped (logged, not scored) rather than crashing
+        load_active_candidates for every other candidate too. Written by
+        hand (not via _write_submission) specifically to bypass that
+        helper's own validity -- this is the one test that WANTS an
+        invalid manifest on disk."""
+        d = tmp_path / "submissions" / "2026-08" / "001-alice-slug"
+        d.mkdir(parents=True)
+        (d / "manifest.yaml").write_text(yaml.dump({
+            "claims": [{"model_version": "ds-test", "band_key": "lag_fill", "targets": ["tmax"], "zones": ["Cfb"]}],
+            # Missing every other MANIFEST_SCHEMA-required top-level field.
+        }))
+        ledger_dir = tmp_path / "ledger"
+        ledger_dir.mkdir()
+        (ledger_dir / "submissions.jsonl").write_text(json.dumps(self._ledger_line("2026-08-001", "alice")) + "\n")
+
+        active = sfe.load_active_candidates(str(ledger_dir), str(tmp_path / "submissions"))  # must not raise
+        assert active == {}
 
 
 class TestBandMonthsAndNewMonths:
@@ -292,9 +335,9 @@ class TestMainIntegration:
         submissions_root = tmp_path / "submissions"
         sub_dir = submissions_root / "2026-08" / "001-alice-lagfill-cfb"
         sub_dir.mkdir(parents=True)
-        (sub_dir / "manifest.yaml").write_text(yaml.dump({
-            "claims": [{"model_version": "ds-test", "band_key": "lag_fill", "targets": ["tmax"], "zones": ["Cfb"]}],
-        }))
+        (sub_dir / "manifest.yaml").write_text(yaml.dump(
+            _valid_manifest_dict("2026-08-001", "alice", "ds-test", "lag_fill", ["tmax"], ["Cfb"]),
+        ))
 
         ledger_dir = tmp_path / "ledger"
         ledger_dir.mkdir()
@@ -356,11 +399,11 @@ class TestMainIntegration:
         submissions_root = tmp_path / "submissions"
         sub_dir = submissions_root / "2026-08" / "001-alice-lagfill-cfb"
         sub_dir.mkdir(parents=True)
-        (sub_dir / "manifest.yaml").write_text(yaml.dump({
-            "claims": [{"model_version": "ds-test", "band_key": "lag_fill", "targets": ["tmax"], "zones": ["Cfb"]}],
-            # Wildly wrong: overcorrects by 20C on top of an already-small ~1C residual.
-            "method": {"candidate": {"tmax": {"Cfb": {"bias_correction_c": -20.0}}}},
-        }))
+        # Wildly wrong: overcorrects by 20C on top of an already-small ~1C residual.
+        (sub_dir / "manifest.yaml").write_text(yaml.dump(_valid_manifest_dict(
+            "2026-08-001", "alice", "ds-test", "lag_fill", ["tmax"], ["Cfb"],
+            candidate={"tmax": {"Cfb": {"bias_correction_c": -20.0}}},
+        )))
 
         ledger_dir = tmp_path / "ledger"
         ledger_dir.mkdir()

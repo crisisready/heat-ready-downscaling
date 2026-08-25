@@ -37,6 +37,16 @@ import math
 
 import numpy as np
 
+# The two shapes a Rung B proposed_correction zone entry may take -- exactly
+# one, never both. Public (code-review finding, PR #24: this shape was
+# hand-duplicated between score_band's own runtime dispatch and
+# submission.py's independent jsonschema oneOf, a real risk of the two
+# drifting apart on a future third shape) so submission.py's
+# _CANDIDATE_ZONE_SCHEMA can build its schema FROM these instead of
+# re-listing the key names itself.
+PROPOSED_CORRECTION_BIAS_KEYS = ("bias_correction_c",)
+PROPOSED_CORRECTION_AFFINE_KEYS = ("scale", "offset")
+
 MIN_ZONE_N = 30  # zones with fewer paired samples than this are reported but not gated
 # A transferred (RAN-style) correction is theoretically disadvantaged relative
 # to a same-source-trained one -- a razor-thin rmse_qrf_c < rmse_grid_c pass
@@ -219,12 +229,28 @@ def score_band(
             if proposed_entry is not None:
                 delta_c_arr = np.array(b["delta_c"])
                 true_err_arr = np.array(b["true_err"])
-                if "scale" in proposed_entry and "offset" in proposed_entry:
+                is_affine = all(k in proposed_entry for k in PROPOSED_CORRECTION_AFFINE_KEYS)
+                is_bias = all(k in proposed_entry for k in PROPOSED_CORRECTION_BIAS_KEYS)
+                # Defense in depth (code-review finding, PR #24): submission.py's
+                # own jsonschema oneOf is the primary guard against a single
+                # entry carrying BOTH shapes, but a caller reading a manifest
+                # straight off disk without re-validating it (as
+                # score_forward_eval.py's monthly re-scoring does, by design --
+                # re-running the full jsonschema check every cycle would be
+                # redundant with the one-time check at merge time) must not
+                # silently pick a branch here. An ambiguous entry is a hard
+                # error, never "affine wins."
+                if is_affine and is_bias:
+                    raise ValueError(
+                        f"proposed_correction[{zone!r}] has BOTH ('scale','offset') and "
+                        f"'bias_correction_c' -- ambiguous, exactly one shape is required",
+                    )
+                if is_affine:
                     proposed_correction_kind = "affine"
                     proposed_new_err = true_err_arr - (
                         delta_c_arr * proposed_entry["scale"] + proposed_entry["offset"]
                     )
-                elif "bias_correction_c" in proposed_entry:
+                elif is_bias:
                     proposed_correction_kind = "bias"
                     # qrf_err already IS true_err - delta_c (see the row-build
                     # loop above); adding a constant offset to delta_c

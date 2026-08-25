@@ -12,6 +12,7 @@ already documents the intended manifest.yaml shape; this module is that
 documentation made enforceable. See PROVENANCE.md.
 """
 
+from heatready_downscaling import score as _score
 from heatready_downscaling import snapshot as _snapshot
 
 MANIFEST_SCHEMA_VERSION = 1
@@ -40,18 +41,19 @@ _TOLERANCE_MAXIMA = {
 }
 
 # One zone's declared Rung B value -- exactly one of the two shapes, never
-# both, mirroring score.score_band's own proposed_correction docstring.
+# both. Built FROM score.PROPOSED_CORRECTION_BIAS_KEYS/AFFINE_KEYS
+# (code-review finding, PR #24) rather than re-listing the key names here
+# independently -- score_band's own runtime dispatch and this schema are
+# now guaranteed to agree on what the two valid shapes are, so a future
+# third shape can't add itself to one without the other noticing.
 _CANDIDATE_ZONE_SCHEMA: dict = {
     "type": "object",
     "oneOf": [
         {
-            "type": "object", "required": ["bias_correction_c"], "additionalProperties": False,
-            "properties": {"bias_correction_c": {"type": "number"}},
-        },
-        {
-            "type": "object", "required": ["scale", "offset"], "additionalProperties": False,
-            "properties": {"scale": {"type": "number"}, "offset": {"type": "number"}},
-        },
+            "type": "object", "required": list(keys), "additionalProperties": False,
+            "properties": {k: {"type": "number"} for k in keys},
+        }
+        for keys in (_score.PROPOSED_CORRECTION_BIAS_KEYS, _score.PROPOSED_CORRECTION_AFFINE_KEYS)
     ],
 }
 
@@ -152,6 +154,15 @@ MANIFEST_SCHEMA: dict = {
                 # already uses here, not a jsonschema if/then).
                 "candidate": {
                     "type": "object",
+                    # additionalProperties: False (code-review finding, PR #24) --
+                    # without this, a mistyped target key (e.g. "Tmax") passes
+                    # schema validation silently and is simply never read by
+                    # reproduce()'s per-target .get(target) lookup, so the
+                    # contributor's declared correction goes unscored with no
+                    # error surfaced anywhere. validate_manifest below adds a
+                    # SECOND, stronger check: not just "no unknown keys" but
+                    # "every claimed (target, zone) actually has an entry."
+                    "additionalProperties": False,
                     "properties": {
                         target_key: {"type": "object", "additionalProperties": _CANDIDATE_ZONE_SCHEMA}
                         for target_key in ("tmax", "tmin")
@@ -201,6 +212,25 @@ def validate_manifest(manifest: dict) -> None:
             f"method.candidate is only meaningful for rung 'B', got rung {rung!r} -- "
             "a Rung A submission (evaluation coverage only) proposes no correction of its own",
         )
+    if rung == "B":
+        # Coverage check (Codex adversarial review finding, PR #24): every
+        # (target, zone) this manifest CLAIMS must have its own candidate
+        # entry -- not just "candidate is non-empty." Without this, a
+        # submission could declare a value for one claimed cell and leave
+        # others uncovered; score_forward_eval.py treats an uncovered cell's
+        # proposed_correction_entry as None, silently falling back to a
+        # Rung-A-style mechanical fit -- letting a contributor win/get
+        # credit on a cell they never actually proposed a value for.
+        claim = manifest["claims"][0]
+        missing_cells = [
+            (target, zone) for target in claim["targets"] for zone in claim["zones"]
+            if zone not in (candidate.get(target) or {})
+        ]
+        if missing_cells:
+            raise ValueError(
+                f"method.candidate is missing an entry for claimed cell(s) {missing_cells!r} -- "
+                "a Rung B submission must declare a value for EVERY (target, zone) it claims",
+            )
 
     tolerance = manifest.get("tolerance", {})
     too_loose = {

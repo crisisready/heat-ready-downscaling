@@ -16,6 +16,20 @@ read-only token; this script re-derives status/max_abs_deviation fresh
 against the ACTUAL merged commit, the same discipline promote_from_public.py
 (private repo, Phase 4) will apply again before anything reaches production.
 
+Rung B (2026-08-25, Codex adversarial review finding on PR #24): this is
+the AUTHORITATIVE reproduction that decides "reproduced": true/false in
+the ledger, which is what makes a submission an active candidate for
+score_forward_eval.py's monthly cycles at all -- so reproduce() here MUST
+be called with the manifest's own method.candidate, exactly like
+run_submission.py's PR-time call. Without it, a Rung B submission's
+reproduced_report would carry all-None proposed_correction_* fields
+(score_band never scored the declared value at all), report.compare_reports
+would silently SKIP comparing those against the contributor's claimed_report
+(a metric missing from either side is skipped, not a violation -- see its
+own docstring), and "reproduced": true could be written to the ledger
+having never actually verified the one thing a Rung B submission exists to
+prove: that its declared correction generalizes.
+
 Usage (see .github/workflows/ledger-append.yml):
     python scripts/append_ledger_entry.py \\
         --submission-dir submissions/2026-08/001-nishkishore-lagfill-cfb \\
@@ -107,7 +121,10 @@ def main() -> None:
         raise SystemExit(f"snapshot verification failed at merge time: {verify_violations}")
 
     claim = manifest["claims"][0]
-    reproduced_report = rs.reproduce(snapshot_dir, claim["model_version"], claim["band_key"], manifest["snapshot"]["version"])
+    reproduced_report = rs.reproduce(
+        snapshot_dir, claim["model_version"], claim["band_key"], manifest["snapshot"]["version"],
+        candidate=manifest.get("method", {}).get("candidate"),
+    )
     tolerance_result = report.compare_reports(claimed_report_data, reproduced_report, manifest["tolerance"])
     coverage = rs.coverage_violations(manifest, reproduced_report)
 
