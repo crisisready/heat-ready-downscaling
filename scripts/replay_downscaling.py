@@ -101,6 +101,20 @@ def resolve_delta_scale(gate: dict, target: str, zone: str, subzone: str | None)
     return gate.get("delta_scale", {}).get(target, {}).get(zone)
 
 
+def correction_keys_for_gate(rows: list[dict], gate: dict, target: str) -> list:
+    """One hashable "effective correction" signature per row, resolved
+    via resolve_delta_scale -- feeds boundary_discontinuity's
+    correction_keys param so a cross-subzone boundary pair is classified
+    by whether the correction ACTUALLY differs between two rows, not by
+    whether their raw subzone_code strings happen to differ (see that
+    function's own docstring)."""
+    keys = []
+    for r in rows:
+        resolved = resolve_delta_scale(gate, target, r.get("climate_zone"), subzone_code(r.get("station_id")))
+        keys.append(tuple(sorted(resolved.items())) if resolved is not None else None)
+    return keys
+
+
 def subzone_status(gate: dict, target: str) -> dict:
     """Informational only -- which (zone, subzone) cells this gate
     publishes a delta_scale_subzone entry for (APPLIED by this tool,
@@ -250,6 +264,7 @@ def _haversine_km(lat1, lon1, lat2, lon2) -> float:
 def boundary_discontinuity(
     rows: list[dict], old_served: list[float | None], new_served: list[float | None],
     max_km: float = _DEFAULT_BOUNDARY_MAX_KM, subzoned_zones: frozenset[str] = frozenset(),
+    correction_keys: list | None = None,
 ) -> dict:
     """Mean absolute jump in the served value between geographically
     nearby (same date, within max_km) rows that straddle a correction's
@@ -269,13 +284,25 @@ def boundary_discontinuity(
     boundary a subzone-scoped fit actually introduces, and the original
     "different zone" definition can never see it):
       - cross-zone: different climate_zone entirely.
-      - cross-subzone: SAME climate_zone, but that zone is in
+      - cross-subzone: SAME climate_zone, that zone is in
         `subzoned_zones` (i.e. either gate publishes a delta_scale_subzone
-        entry for it) AND the two rows resolve to different subzone
-        codes. Restricted to subzoned_zones specifically so a zone with
+        entry for it), AND the two rows actually resolve to a DIFFERENT
+        effective correction. Restricted to subzoned_zones so a zone with
         no subzone-scoped correction at all doesn't generate meaningless
         noise from an arbitrary country split that was never a real
         correction boundary.
+
+    correction_keys (round-2 Codex adversarial review finding, PR #25):
+    one hashable value per row (same order as `rows`) -- the row's
+    resolved delta_scale signature under whichever gate is under review,
+    typically built via resolve_delta_scale + subzone_code. Two same-zone
+    rows are only counted as a cross-subzone pair if their keys actually
+    DIFFER -- comparing raw subzone_code strings alone (the fallback when
+    this is omitted, kept for callers/tests with no gate handy) would
+    wrongly count e.g. a DE/US pair in a zone where only FR has an
+    override: both DE and US fall back to the identical flat correction,
+    so they never cross a boundary the correction actually introduced,
+    and counting them dilutes the real FR signal with unrelated noise.
 
     O(n^2) within each date group -- acceptable for a human-run review
     tool over realistic station-day counts, not intended for a snapshot
@@ -304,10 +331,14 @@ def boundary_discontinuity(
                 if same_zone:
                     if zone_a not in subzoned_zones:
                         continue
-                    sub_a = subzone_code(rows[ia].get("station_id")) or "other"
-                    sub_b = subzone_code(rows[ib].get("station_id")) or "other"
-                    if sub_a == sub_b:
-                        continue
+                    if correction_keys is not None:
+                        if correction_keys[ia] == correction_keys[ib]:
+                            continue
+                    else:
+                        sub_a = subzone_code(rows[ia].get("station_id")) or "other"
+                        sub_b = subzone_code(rows[ib].get("station_id")) or "other"
+                        if sub_a == sub_b:
+                            continue
                 dist = _haversine_km(rows[ia]["lat"], rows[ia]["lon"], rows[ib]["lat"], rows[ib]["lon"])
                 if dist > max_km:
                     continue
@@ -354,23 +385,31 @@ def _served_values(rows: list[dict], preds: list[dict], grid_col: str) -> list[f
     ]
 
 
-def check_partition_coverage(rows: list[dict], n_predictions: int, model_version: str, band_key: str) -> None:
-    """A mistyped --model-version (or --band-key) produces a
-    FrozenPredictionAdapter with ZERO frozen predictions for these rows --
-    every single row comes back not-applied under BOTH arms, and this
-    tool would otherwise happily print a valid-looking report claiming
-    "nothing changes," which is not what it means at all (Codex
-    adversarial review finding, PR #25). Hard stop when the predictions
-    partition is completely empty relative to the rows being replayed --
-    this can never be a legitimate real-world result (SOME rows always
-    have complete covariates in any real band), only a wrong
-    model_version/band_key pairing."""
-    if rows and n_predictions == 0:
+def check_partition_coverage(rows: list[dict], n_covered: int, model_version: str, band_key: str) -> None:
+    """A mistyped --model-version (or --band-key), or one that names a
+    real but WRONG partition (a different month, a disjoint station
+    set), produces a FrozenPredictionAdapter that returns not-applied for
+    every row in THIS batch -- indistinguishable, from the output alone,
+    from "the model genuinely applies nowhere in this batch." This tool
+    would otherwise happily print a valid-looking report claiming
+    "nothing changes" (Codex adversarial review finding, PR #25).
+
+    n_covered is adapter.coverage(rows) -- how many of `rows` have ANY
+    matching frozen prediction key at all, NOT just whether the
+    partition is non-empty (round-2 finding on the same review: a
+    non-empty partition for the wrong month/stations would still pass a
+    bare emptiness check while covering zero of THESE rows). Hard stop
+    when coverage is zero -- this can never be a legitimate real-world
+    result for a real band (SOME rows always have complete covariates),
+    only a wrong model_version/band_key pairing or a partition/row
+    mismatch."""
+    if rows and n_covered == 0:
         raise SystemExit(
-            f"snapshot has {len(rows)} row(s) for band={band_key!r} but ZERO frozen predictions for "
-            f"model_version={model_version!r} -- this almost certainly means model_version or band_key "
-            "is wrong, not that the model genuinely applies nowhere. Refusing to produce a replay diff "
-            "that would otherwise misleadingly show 'nothing changes' under both arms."
+            f"snapshot has {len(rows)} row(s) for band={band_key!r} but ZERO of them have any matching "
+            f"frozen prediction for model_version={model_version!r} -- this almost certainly means "
+            "model_version or band_key is wrong, or the predictions partition covers a disjoint set of "
+            "stations/months, not that the model genuinely applies nowhere. Refusing to produce a replay "
+            "diff that would otherwise misleadingly show 'nothing changes' under both arms."
         )
 
 
@@ -384,12 +423,13 @@ def replay_band(
     band_rows = snapshot.read_band_partitions(snapshot_dir, band_key)
     if not band_rows:
         raise SystemExit(f"snapshot has no rows for band={band_key!r}")
-    # Read the predictions partition directly (not just via the adapter,
-    # which exposes no row-count) as a sanity check BEFORE replaying
-    # anything -- see check_partition_coverage's own docstring.
-    n_predictions = len(snapshot.read_predictions_partitions(snapshot_dir, model_version, band_key))
-    check_partition_coverage(band_rows, n_predictions, model_version, band_key)
     adapter = contract.FrozenPredictionAdapter.from_snapshot(snapshot_dir, model_version, band_key)
+    # len(adapter) (round-2 code-review finding, PR #25: an earlier draft
+    # called snapshot.read_predictions_partitions a SECOND time here just
+    # for this count, re-globbing and re-parsing the identical partition
+    # from_snapshot had just read one line above) -- see
+    # check_partition_coverage's own docstring for why this check exists.
+    check_partition_coverage(band_rows, adapter.coverage(band_rows), model_version, band_key)
 
     result: dict = {"model_version": model_version, "band_key": band_key, "by_target": {}}
     for target in ("tmax", "tmin"):
@@ -437,6 +477,15 @@ def replay_band(
             "by_zone": by_zone,
             "boundary_discontinuity": boundary_discontinuity(
                 band_rows, old_served, new_served, max_km=boundary_max_km, subzoned_zones=frozenset(subzoned_zones),
+                # Combined (old_key, new_key) per row: a same-zone pair is
+                # boundary-worthy if EITHER arm's correction actually
+                # differs between them -- a pre-existing discontinuity
+                # under `old` that `new` fixes is just as worth surfacing
+                # as one `new` introduces that `old` didn't have.
+                correction_keys=list(zip(
+                    correction_keys_for_gate(band_rows, old_gate, target),
+                    correction_keys_for_gate(band_rows, new_gate, target),
+                )),
             ),
             "subzone_status": {"old": subzone_status(old_gate, target), "new": subzone_status(new_gate, target)},
         }
@@ -476,6 +525,19 @@ def render_summary(result: dict) -> str:
                 f"  - {zone}: applied_rate {old_zt['applied_rate']} -> {new_zt['applied_rate']}, "
                 f"n={old_zt['n']}"
             )
+            # Round-2 code-review finding, PR #25: the whole point of the
+            # by_subzone breakdown is to surface a regression the
+            # zone-level aggregate above can dilute/hide -- it must
+            # actually appear in the DEFAULT human-readable summary, not
+            # only in the JSON a maintainer would have to know to pass
+            # --out and inspect manually to ever see it.
+            for sub, s in sorted(z.get("by_subzone", {}).items()):
+                old_st, new_st = s["tier_mix"]["old"], s["tier_mix"]["new"]
+                paired_mean = s["paired_delta_diff"]["mean"]
+                lines.append(
+                    f"    - {zone}.{sub}: applied_rate {old_st['applied_rate']} -> {new_st['applied_rate']}, "
+                    f"n={old_st['n']}, paired delta_c mean change={paired_mean}"
+                )
         lines.append("")
     return "\n".join(lines)
 

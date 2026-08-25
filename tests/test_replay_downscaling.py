@@ -174,6 +174,29 @@ class TestBoundaryDiscontinuity:
         )
         assert result["cross_subzone"]["n_pairs"] == 0
 
+    def test_correction_keys_exclude_pair_that_resolves_identically(self):
+        """Round-2 Codex adversarial review finding, PR #25: only FR has
+        an override in this zone -- a DE/US pair both fall back to the
+        SAME flat correction, so raw subzone_code string comparison alone
+        would wrongly count them as crossing a boundary the correction
+        never actually introduced. correction_keys must exclude them."""
+        rows = [self._row("Cfb", 48.0, 2.0, station_id="DE001"), self._row("Cfb", 48.001, 2.001, station_id="US001")]
+        # Both DE and US resolve to the identical (missing -> None) key here.
+        result = rd.boundary_discontinuity(
+            rows, old_served=[20.0, 25.0], new_served=[20.0, 30.0], max_km=50.0,
+            subzoned_zones=frozenset({"Cfb"}), correction_keys=[None, None],
+        )
+        assert result["cross_subzone"]["n_pairs"] == 0
+
+    def test_correction_keys_include_pair_that_resolves_differently(self):
+        rows = [self._row("Cfb", 48.0, 2.0, station_id="FR001"), self._row("Cfb", 48.001, 2.001, station_id="US001")]
+        fr_key = (("offset", 100.0), ("scale", 10.0))
+        result = rd.boundary_discontinuity(
+            rows, old_served=[20.0, 25.0], new_served=[20.0, 30.0], max_km=50.0,
+            subzoned_zones=frozenset({"Cfb"}), correction_keys=[fr_key, None],
+        )
+        assert result["cross_subzone"]["n_pairs"] == 1
+
     def test_far_apart_pair_excluded(self):
         rows = [self._row("Cfb", 0.0, 0.0), self._row("BWh", 50.0, 50.0)]  # thousands of km apart
         result = rd.boundary_discontinuity(rows, old_served=[20.0, 25.0], new_served=[20.0, 22.0], max_km=50.0)
@@ -193,17 +216,17 @@ class TestCheckPartitionCoverage:
     failing loudly."""
 
     def test_zero_predictions_with_real_rows_raises(self):
-        with pytest.raises(SystemExit, match="ZERO frozen predictions"):
-            rd.check_partition_coverage([{"station_id": "S001"}], n_predictions=0, model_version="ds-typo", band_key="lag_fill")
+        with pytest.raises(SystemExit, match="ZERO of them have any matching frozen prediction"):
+            rd.check_partition_coverage([{"station_id": "S001"}], n_covered=0, model_version="ds-typo", band_key="lag_fill")
 
     def test_some_predictions_does_not_raise(self):
-        rd.check_partition_coverage([{"station_id": "S001"}], n_predictions=1, model_version="ds-test", band_key="lag_fill")  # must not raise
+        rd.check_partition_coverage([{"station_id": "S001"}], n_covered=1, model_version="ds-test", band_key="lag_fill")  # must not raise
 
     def test_no_rows_at_all_does_not_raise(self):
         """Distinct from "rows exist but nothing predicted" -- an empty
         band is caught earlier in replay_band by its own separate
         'snapshot has no rows' check, not this one."""
-        rd.check_partition_coverage([], n_predictions=0, model_version="ds-test", band_key="lag_fill")  # must not raise
+        rd.check_partition_coverage([], n_covered=0, model_version="ds-test", band_key="lag_fill")  # must not raise
 
 
 class TestPredictWithGateAndReplayBandIntegration:
@@ -278,7 +301,7 @@ class TestPredictWithGateAndReplayBandIntegration:
         the pure-logic check function in isolation."""
         self._build_snapshot(tmp_path, ["S001"])
         old_gate, new_gate = rd.load_gate(None), rd.load_gate(None)
-        with pytest.raises(SystemExit, match="ZERO frozen predictions"):
+        with pytest.raises(SystemExit, match="ZERO of them have any matching frozen prediction"):
             rd.replay_band(str(tmp_path), "ds-typo-does-not-exist", "lag_fill", old_gate, new_gate)
 
     def test_by_zone_hides_a_subzone_specific_regression_by_subzone_does_not(self, tmp_path):
@@ -316,3 +339,21 @@ class TestPredictWithGateAndReplayBandIntegration:
         summary = rd.render_summary(result)
         assert "lag_fill" in summary
         assert "ds-test" in summary
+
+    def test_render_summary_includes_by_subzone_lines(self, tmp_path):
+        """Round-2 code-review finding, PR #25: the by_subzone breakdown
+        must appear in the DEFAULT human-readable summary, not only in
+        the JSON a maintainer would have to know to pass --out to see --
+        otherwise the fix that adds by_subzone doesn't actually help
+        anyone who just runs the tool without --out."""
+        self._build_snapshot(tmp_path, ["FR001", "US001"])
+        old_gate = {"tmax": {"Cfb": True}, "tmin": {"Cfb": True}, "bias_correction": {"tmax": {}, "tmin": {}}, "delta_scale": {"tmax": {}, "tmin": {}}}
+        new_gate = {
+            "tmax": {"Cfb": True}, "tmin": {"Cfb": True},
+            "bias_correction": {"tmax": {}, "tmin": {}}, "delta_scale": {"tmax": {}, "tmin": {}},
+            "delta_scale_subzone": {"tmax": {"Cfb": {"FR": {"scale": 10.0, "offset": 100.0}}}, "tmin": {}},
+        }
+        result = rd.replay_band(str(tmp_path), "ds-test", "lag_fill", old_gate, new_gate)
+        summary = rd.render_summary(result)
+        assert "Cfb.FR" in summary
+        assert "Cfb.US" in summary

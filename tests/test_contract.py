@@ -301,6 +301,17 @@ class TestFrozenPredictionAdapter:
         assert preds[0]["applied"] is True
         assert preds[0]["delta_c"] == pytest.approx(1.5)
 
+    def test_len_reflects_frozen_partition_row_count(self):
+        """2026-08-25: lets a caller (replay_downscaling.py's own
+        partition-coverage sanity check) confirm the frozen partition
+        actually has rows WITHOUT re-reading it from disk a second time."""
+        adapter = contract.FrozenPredictionAdapter("ds-test", {("A", "2023-07-01", "tmax"): {}, ("B", "2023-07-01", "tmax"): {}})
+        assert len(adapter) == 2
+
+    def test_len_zero_for_empty_predictions(self):
+        adapter = contract.FrozenPredictionAdapter("ds-test", {})
+        assert len(adapter) == 0
+
 
 class TestConfidenceClass:
     def test_none_ci95_is_low(self):

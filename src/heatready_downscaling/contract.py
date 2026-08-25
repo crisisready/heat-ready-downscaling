@@ -414,6 +414,36 @@ class FrozenPredictionAdapter:
         self.model_version = model_version
         self._predictions = predictions_by_key
 
+    def __len__(self) -> int:
+        """Row count of the frozen predictions partition this adapter was
+        built from -- lets a caller (e.g. replay_downscaling.py's own
+        partition-coverage sanity check) confirm "were there really any
+        frozen predictions at all for this model_version/band" without
+        re-reading the same partition from disk a second time via
+        snapshot.read_predictions_partitions."""
+        return len(self._predictions)
+
+    def coverage(self, rows: list[dict]) -> int:
+        """How many of `rows` have AT LEAST ONE matching frozen
+        prediction (either target) in this adapter's own partition --
+        a STRONGER check than len(self) alone (round-2 code-review
+        finding, replay_downscaling.py PR #25): a non-empty partition
+        for the wrong month or the wrong station set would pass a bare
+        "is the partition empty" check while still returning not-applied
+        for every row in `rows` specifically, which looks IDENTICAL to
+        predict()'s own row-by-row "covariates were genuinely incomplete"
+        fallback -- there is no other way to distinguish "no data for
+        this batch" from "this batch is fine but nothing applies" without
+        checking actual key overlap."""
+        matched = 0
+        for r in rows:
+            d = r.get("date")
+            date_iso = d.isoformat() if hasattr(d, "isoformat") else str(d)
+            sid = r.get("station_id")
+            if (sid, date_iso, "tmax") in self._predictions or (sid, date_iso, "tmin") in self._predictions:
+                matched += 1
+        return matched
+
     @classmethod
     def from_snapshot(
         cls, snapshot_dir: str, model_version: str, band: str, months: list[str] | None = None,
