@@ -40,12 +40,70 @@ _TOLERANCE_MAXIMA = {
     "proposed_vs_best_fit_gap_c": 0.05,
 }
 
-# One zone's declared Rung B value -- exactly one of the two shapes, never
-# both. Built FROM score.PROPOSED_CORRECTION_BIAS_KEYS/AFFINE_KEYS
-# (code-review finding, PR #24) rather than re-listing the key names here
-# independently -- score_band's own runtime dispatch and this schema are
-# now guaranteed to agree on what the two valid shapes are, so a future
-# third shape can't add itself to one without the other noticing.
+# The covariate_linear shape (2026-08-25, the third one). Kept as an explicit
+# schema rather than generated from a key tuple like the two flat shapes
+# below, because its value shape is nested (a term list, an optional
+# valid_range parallel to it) rather than a flat set of numbers.
+#
+# The `covariate` enum is score.STATIC_COVARIATE_ALLOWLIST, referenced rather
+# than re-listed -- see that constant's own comment for why the list is
+# closed. This is the CI-enforced half of the staticness rule; score_band's
+# validate_covariate_linear_entry is the runtime half, because the monthly
+# re-scoring path reads manifests off disk without re-validating them.
+_COVARIATE_TERM_SCHEMA: dict = {
+    "type": "object",
+    "required": ["covariate", "slope"],
+    "additionalProperties": False,
+    "properties": {
+        "covariate": {"enum": list(_score.STATIC_COVARIATE_ALLOWLIST)},
+        "slope": {"type": "number"},
+    },
+}
+
+_COVARIATE_LINEAR_SCHEMA: dict = {
+    "type": "object",
+    "required": list(_score.PROPOSED_CORRECTION_COVARIATE_LINEAR_KEYS),
+    "additionalProperties": False,
+    "properties": {
+        "basis": {"enum": list(_score.PROPOSED_CORRECTION_BASES)},
+        "intercept": {"type": "number"},
+        # maxItems is score.MAX_COVARIATE_TERMS, not a hand-written number --
+        # the cap exists because Valencia's own 2-covariate fit was worse
+        # out-of-fold than its 1-covariate one, and the schema and the runtime
+        # check must not be able to drift apart on it.
+        "terms": {
+            "type": "array", "minItems": 1,
+            "maxItems": _score.MAX_COVARIATE_TERMS,
+            "items": _COVARIATE_TERM_SCHEMA,
+        },
+        # One [min, max] per term, in term order; null for a term that
+        # deliberately declares no range. Absent means no range check at all,
+        # which score_band permits but which a reviewer should push back on --
+        # a fit is only evidence over the range it was fit on.
+        "valid_range": {
+            "type": ["array", "null"],
+            "minItems": 1, "maxItems": _score.MAX_COVARIATE_TERMS,
+            "items": {
+                "type": ["array", "null"],
+                "minItems": 2, "maxItems": 2,
+                "items": {"type": "number"},
+            },
+        },
+        # A fixed enum, never a free number -- a contributor able to pick the
+        # hot-day cutoff can shop for the one that flatters the result, the
+        # same gaming surface fold_salt exists to close.
+        "hot_day_threshold_c": {"enum": list(_score.HOT_DAY_THRESHOLD_C_CHOICES)},
+    },
+}
+
+# One zone's declared Rung B value -- exactly one of the three shapes, never
+# more than one. The two flat shapes are built FROM
+# score.PROPOSED_CORRECTION_BIAS_KEYS/AFFINE_KEYS (code-review finding, PR
+# #24) rather than re-listing the key names here independently -- score_band's
+# own runtime dispatch and this schema are now guaranteed to agree on what the
+# valid shapes are, which is exactly the property that made adding the third
+# shape here a required, visible step rather than something that could slip
+# into one side only.
 _CANDIDATE_ZONE_SCHEMA: dict = {
     "type": "object",
     "oneOf": [
@@ -54,7 +112,7 @@ _CANDIDATE_ZONE_SCHEMA: dict = {
             "properties": {k: {"type": "number"} for k in keys},
         }
         for keys in (_score.PROPOSED_CORRECTION_BIAS_KEYS, _score.PROPOSED_CORRECTION_AFFINE_KEYS)
-    ],
+    ] + [_COVARIATE_LINEAR_SCHEMA],
 }
 
 MANIFEST_SCHEMA: dict = {

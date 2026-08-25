@@ -304,7 +304,12 @@ class TestScoreBandProposedCorrection:
         without re-validating it -- score_band itself must never silently
         pick a branch (e.g. "affine wins") for an ambiguous entry."""
         rows, adapter = _bias_test_rows_and_adapter(bias_c=0.5)
-        with pytest.raises(ValueError, match="BOTH"):
+        # The message generalized from "has BOTH shapes" to "matches multiple
+        # shapes" when the third (covariate_linear) shape landed -- naming two
+        # would now be wrong. The guarantee under test is unchanged: an
+        # ambiguous entry raises rather than picking a branch, and the message
+        # still names the offending zone.
+        with pytest.raises(ValueError, match="matches multiple shapes"):
             score.score_band(
                 adapter, rows, "tmax", fold_salt="v-test",
                 proposed_correction={"Cfa": {"bias_correction_c": 0.8, "scale": 0.9, "offset": 0.2}},

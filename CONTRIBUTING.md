@@ -138,8 +138,9 @@ numbers before writing a manifest, not just whether a cell is dark.
 
 ## What "Rung B" actually asks of you
 
-**Status (2026-08-25): open for a `bias_correction[target][zone]` float or a `delta_scale`
-`{scale, offset}` affine correction.** Declare your proposed value in `manifest.yaml`'s
+**Status (2026-08-25): open for a `bias_correction[target][zone]` float, a `delta_scale`
+`{scale, offset}` affine correction, or a covariate-linear correction that varies continuously
+with a static per-location covariate (see below).** Declare your proposed value in `manifest.yaml`'s
 `method.candidate` (`{target: {zone: {"bias_correction_c": float}}}` or
 `{target: {zone: {"scale": float, "offset": float}}}`, `method.kind: parameters`) -- the referee
 scores that DECLARED value out-of-sample (`heatready_downscaling.score.score_band`'s
@@ -149,6 +150,49 @@ value, not a freshly re-derived one). This is deliberately a smaller bar than Ru
 mechanical fit: the referee never trusts your claimed numbers, but it also never fits a value for
 you -- station-grouped CV validates whether YOUR number generalizes, not whether some other number
 would have scored better.
+
+**Also open, as of this change**: a correction that varies continuously with a static
+per-location covariate, instead of being one constant for a whole zone. A flat number cannot
+express a correction that gets stronger as you move inland, and there is no zone or subzone
+small enough to fake it. Declare `basis`, an `intercept`, and one covariate term:
+
+```yaml
+    tmin:
+      BSh:
+        basis: raw_grid                # or model_delta -- see below, this choice matters
+        intercept: 0.782
+        terms:
+          - covariate: coast_dist_km
+            slope: -0.0413
+        valid_range: [[0.0, 25.0]]     # the covariate range your fit is actually evidence over
+```
+
+Three things to know before you use it:
+
+- **`basis` decides what your correction is added to, and it is not a formatting detail.**
+  `model_delta` adds to the model's own predicted delta, which is what the two flat shapes
+  always did. `raw_grid` adds directly to the raw grid value. If the cell you are claiming is one
+  where the model does not currently apply -- a zone that fails its own cross-validation gate, or
+  one with no measured stations -- then a `model_delta` correction has nothing to attach to and
+  will score as "not scored", while a `raw_grid` one is scoreable. Several of the darkest cells
+  are exactly like this.
+- **Your covariate must be static per location**, and it must be on the allowlist in
+  `score.STATIC_COVARIATE_ALLOWLIST`. Day-varying covariates (wind, humidity, the grid value
+  itself) are excluded on purpose: a static covariate lets a promotion precompute one value per
+  served polygon, so nothing new has to run inside the serving path.
+- **One covariate term, two at the most.** This is a low cap on purpose. Our own two-covariate
+  fit for Valencia was measurably *worse* on held-out stations than the one-covariate version --
+  three free parameters against eight training stations per fold. The referee also reports what
+  your correction would have scored with the intercept alone, so a covariate term that does not
+  beat a flat constant will show up as not earning its keep.
+
+Scoring for this shape reports more than one number, because one number was hiding real results.
+You get metrics for all days and for hot days separately (hot days are where a heat product
+actually matters, and an effect concentrated there gets washed out by whole-year averaging), a
+95% confidence interval on the improvement from resampling whole stations, and a verdict of
+`pass`, `candidate`, or `fail`. `candidate` means the improvement is real but the interval still
+includes zero -- usually a sign you need more stations, not that the finding is wrong. A `pass`
+requires the interval to exclude zero, which is a stricter bar than the point estimate alone.
 
 **Not yet open**: the blend-kernel `(L_km, R_km, tau)` triple for the distance-weighted
 nearby-station residual blend (`validate_station_blend.py`'s own scoring path needs a parallel
