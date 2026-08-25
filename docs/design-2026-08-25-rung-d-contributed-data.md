@@ -65,6 +65,24 @@ built to correct, and this document made it about the very step its trust model 
 | `attribution-required` | Yes, notice carried forward | Same |
 | `no-redistribution` | **No** | Maintainer-verifiable and auditable, not publicly recomputable |
 
+### The table above is not sufficient on its own, and this is a structural correction
+
+`redistribution_tier` records what we may **republish**. Third-party falsifiability depends on
+what a third party can **obtain**. Those are different facts, and mapping reproducibility onto
+the tier alone gets both edges wrong:
+
+- A source licensed `unrestricted` but available only under a private agreement would be
+  classified as fully publicly reproducible, while no outsider can get the bytes.
+- A source that is freely downloadable by anyone, but whose terms forbid republication, is
+  `no-redistribution` — yet it is *independently recomputable* by any third party, which is the
+  strongest guarantee this design has.
+
+So the design needs a second, orthogonal field — call it `public_obtainability`: can a third
+party fetch this data themselves, on the terms the dossier declares? The provenance label is a
+function of **both**, not of the tier alone. Concretely, the second bullet above is the case
+worth not losing: a freely-fetchable but non-republishable source deserves the strong label even
+though it never enters a snapshot, and the tier-only mapping would have downgraded it.
+
 ### What `no-redistribution` buys, stated more carefully than before
 
 The data lands in a private store, the maintainer re-derives (see the dependency above), and what
@@ -78,9 +96,18 @@ never hashed or published.** The concrete attack: pull all 1,044 sensors, comput
 subsets, publish ids and hashes for the 744 that help. The maintainer re-derives the same number
 from the same bytes and every hash verifies.
 
-Closing that requires the attestation to cover the **full pre-QC pull plus the exclusion set with
-its reasons**, not just the surviving rows. That is a real design requirement, not a detail, and
-it is what makes the tier auditable rather than merely tamper-evident.
+An earlier fix said the attestation should cover the **full pre-QC pull plus the exclusion set
+with its reasons**. That is necessary and **still not sufficient**, which review caught before
+this shipped as a solved problem: hashing a package the claimant *describes* as the full pull
+establishes nothing about its completeness. Supply the favourable 744, call that the full pull,
+and every hash, row count and re-derivation passes exactly as before.
+
+Completeness cannot come from the claimant. It has to come from outside them — an
+independently-obtained inventory (the maintainer queries the provider's own sensor list), a
+provider-side receipt, or a count the maintainer can reconcile against a public figure such as
+the network's advertised sensor count. **Until one of those exists, `no-redistribution` protects
+against post-hoc alteration and not against selective submission**, and the label must not imply
+otherwise. This is the honest state of the tier, not a gap to be closed in prose.
 
 **Any cell resting on this tier is labelled.** Two surfaces named for that labelling do not exist
 in this repository yet: there is no `registry/` and no public models page — both are roadmap
@@ -262,10 +289,18 @@ the comparative analysis, not the corpus builder, not the reproduce-for-a-new-ci
 research thread used the data without ever pinning its terms, which is unremarkable for research
 and disqualifying for admission.
 
-**Established.** Under #31's rules, `unrestricted` is a narrow tier:
-`SPDX_ATTRIBUTION_REQUIRED` covers every allowlisted licence except `CC0-1.0` and `PDDL-1.0`, so
-declaring `unrestricted` for anything attribution-bearing is a hard rejection, not a judgement
-call.
+**Established, with a caveat that undercuts the mechanical version of this argument.** Under
+#31's rules `unrestricted` is narrow for *allowlisted SPDX* licences:
+`SPDX_ATTRIBUTION_REQUIRED` covers every one except `CC0-1.0` and `PDDL-1.0`, so declaring
+`unrestricted` for an attribution-bearing SPDX id is a hard rejection.
+
+But it does **not** cover `proprietary-licensed`, which is precisely the route KOGL would take,
+having no SPDX identifier. Verified directly: a `proprietary-licensed` entry declaring
+`redistribution_tier: unrestricted` is *flagged for review*, not rejected. So the mechanism does
+not enforce what an earlier draft said it enforced — a human would have to catch it. **That is a
+real gap in #31 and it is logged here as a follow-up**: `PROPRIETARY_LICENSE_ID` should be
+treated as attribution-bearing-until-proven-otherwise for the tier consistency check, since the
+whole point of that route is that we do not know the terms mechanically.
 
 **Inference, and labelled as one.** Datasets published through `data.seoul.go.kr` are typically
 issued under the Korea Open Government Licence, whose common Type 1 is attribution-required. KOGL
@@ -299,6 +334,10 @@ work the earlier draft deferred**, and the real dependency order is:
 
 1. Establish S-DoT's actual licence and type from the source, not from portal convention.
    Nothing in either repo records it, and the KOGL expectation above is an inference.
+   **Then branch on the answer rather than presuming it**, which an earlier version of this list
+   failed to do: if it is `CC0-1.0` or `PDDL-1.0`, Seoul takes the `unrestricted` path and needs
+   neither a labelled tier nor the attribution mechanism, and steps 2–3 do not gate it. Only if
+   it is attribution-bearing or has no SPDX identifier do the remaining steps apply.
 2. Build the attribution-notice mechanism that consumes `redistribution_tier`.
 3. Build a re-derivation path for data outside the snapshot layout (the `promote_from_public.py`
    gap above).
