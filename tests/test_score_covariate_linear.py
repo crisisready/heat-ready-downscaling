@@ -35,7 +35,7 @@ class _Adapter:
         return out
 
 
-def _rows(n=60, *, zone="BSh", slope=-0.04, intercept=0.8, cov_name="coast_dist_km",
+def _rows(n=60, *, zone="BSh", slope=-0.04, intercept=0.8, cov_name="lst_warm_season_anomaly_c",
           noise=0.0, hot_from=None, cov_values=None, target="tmax"):
     """n rows across n//6 stations, where the raw grid error is EXACTLY
     intercept + slope*covariate (plus optional alternating noise), so a
@@ -72,7 +72,7 @@ def _rows(n=60, *, zone="BSh", slope=-0.04, intercept=0.8, cov_name="coast_dist_
     return rows, deltas
 
 
-def _entry(slope=-0.04, intercept=0.8, cov="coast_dist_km", basis="raw_grid", **kw):
+def _entry(slope=-0.04, intercept=0.8, cov="lst_warm_season_anomaly_c", basis="raw_grid", **kw):
     e = {"basis": basis, "intercept": intercept,
          "terms": [{"covariate": cov, "slope": slope}]}
     e.update(kw)
@@ -195,7 +195,7 @@ def test_rows_outside_valid_range_are_excluded():
 
 def test_a_covariate_absent_from_every_row_scores_nothing():
     rows, deltas = _rows(cov_name="elevation_mean_m")
-    res = _score(rows, deltas, _entry(cov="coast_dist_km"))
+    res = _score(rows, deltas, _entry(cov="lst_warm_season_anomaly_c"))
     block = res["proposed_correction_by_stratum"]["all"]
 
     assert block["n_covariate_missing"] == len(rows)
@@ -245,7 +245,7 @@ def test_a_correction_that_only_helps_on_hot_days_reads_that_way():
         rows.append({
             "climate_zone": "BSh", "station_id": f"STN{i % 20:03d}",
             "grid_tmax_c": grid_val, "station_tmax_c": grid_val + raw_err,
-            "coast_dist_km": cov,
+            "lst_warm_season_anomaly_c": cov,
         })
         rows[-1]["station_tmax_c"] = grid_val + raw_err
         rows[-1]["station_tmax_c"] = grid_val + raw_err
@@ -316,7 +316,7 @@ def test_verdict_is_candidate_when_the_interval_includes_zero():
         rows.append({
             "climate_zone": "BSh", "station_id": f"STN{sid:03d}",
             "grid_tmax_c": grid_val, "station_tmax_c": grid_val + raw_err,
-            "coast_dist_km": cov,
+            "lst_warm_season_anomaly_c": cov,
         })
         deltas.append(0.0)
     block = _score(rows, deltas, _entry())["proposed_correction_by_stratum"]["all"]
@@ -373,13 +373,13 @@ def test_flat_shapes_report_no_covariate_verdict():
     (_entry(basis="nonsense"), "not one of"),
     ({"basis": "raw_grid", "intercept": 0.0, "terms": []}, "no terms"),
     ({"basis": "raw_grid", "intercept": 0.0, "terms": [
-        {"covariate": "coast_dist_km", "slope": 1.0},
+        {"covariate": "lst_warm_season_anomaly_c", "slope": 1.0},
         {"covariate": "elevation_mean_m", "slope": 1.0},
         {"covariate": "slope_deg", "slope": 1.0},
     ]}, "MAX_COVARIATE_TERMS"),
     ({"basis": "raw_grid", "intercept": 0.0, "terms": [
-        {"covariate": "coast_dist_km", "slope": 1.0},
-        {"covariate": "coast_dist_km", "slope": 2.0},
+        {"covariate": "lst_warm_season_anomaly_c", "slope": 1.0},
+        {"covariate": "lst_warm_season_anomaly_c", "slope": 2.0},
     ]}, "more than once"),
     (_entry(cov="grid_diurnal_range_c"), "STATIC_COVARIATE_ALLOWLIST"),
     (_entry(cov="nighttime_wind_ms"), "STATIC_COVARIATE_ALLOWLIST"),
@@ -403,7 +403,7 @@ def test_an_entry_matching_two_shapes_is_ambiguous():
     with pytest.raises(ValueError, match="multiple shapes"):
         _score(rows, deltas, {
             "basis": "raw_grid", "intercept": 0.0,
-            "terms": [{"covariate": "coast_dist_km", "slope": 1.0}],
+            "terms": [{"covariate": "lst_warm_season_anomaly_c", "slope": 1.0}],
             "bias_correction_c": 0.5,
         })
 
@@ -528,7 +528,7 @@ class TestRoundOneReviewFindings:
             rows.append({
                 "climate_zone": "BSh", "station_id": f"STN{i % 20:03d}",
                 "grid_tmax_c": grid_val, "station_tmax_c": grid_val + raw_err,
-                "coast_dist_km": cov,
+                "lst_warm_season_anomaly_c": cov,
             })
             deltas.append(0.0)
         res = _score(rows, deltas, _entry(valid_range=[[0.0, float(cov_cap - 1)]]),
@@ -612,7 +612,7 @@ class TestRoundOneReviewFindings:
             }
 
         base = {"basis": "raw_grid", "intercept": 0.0,
-                "terms": [{"covariate": "coast_dist_km", "slope": 1.0}]}
+                "terms": [{"covariate": "lst_warm_season_anomaly_c", "slope": 1.0}]}
 
         with pytest.raises(ValueError, match="one \\[min, max\\] per term"):
             submission.validate_manifest(manifest({**base, "valid_range": [[0.0, 1.0], [0.0, 1.0]]}))
@@ -621,6 +621,74 @@ class TestRoundOneReviewFindings:
         with pytest.raises(ValueError, match="more than once"):
             submission.validate_manifest(manifest({
                 "basis": "raw_grid", "intercept": 0.0,
-                "terms": [{"covariate": "coast_dist_km", "slope": 1.0},
-                          {"covariate": "coast_dist_km", "slope": 2.0}],
+                "terms": [{"covariate": "lst_warm_season_anomaly_c", "slope": 1.0},
+                          {"covariate": "lst_warm_season_anomaly_c", "slope": 2.0}],
             }))
+
+
+class TestAllowlistMatchesTheSnapshotContract:
+    """The invariant that would have caught the PR #27 defect, and the reason
+    it did not: score_band reads a covariate off the paired row, so
+    snapshot._pa_schema() is the authority on what names can possibly resolve.
+    The original allowlist was built from features.FEATURE_ORDER (the model's
+    DERIVED feature names) instead, and four entries -- aspect_sin, aspect_cos,
+    log1p_pop_density, latitude -- named keys no row has. Every test at the
+    time used synthetic rows whose keys the test itself chose, so the tests
+    and the code agreed with each other and both disagreed with the data."""
+
+    def test_every_allowlisted_covariate_is_a_real_snapshot_column(self):
+        from heatready_downscaling import snapshot
+
+        columns = {f.name for f in snapshot._pa_schema()}
+        missing = [c for c in score.STATIC_COVARIATE_ALLOWLIST if c not in columns]
+        assert missing == [], (
+            f"allowlisted covariates that no snapshot row can supply: {missing}. "
+            "score_band reads these off the row, so a name absent from "
+            "snapshot._pa_schema() silently excludes every row instead of erroring."
+        )
+
+    def test_the_model_only_derived_feature_names_are_not_allowlisted(self):
+        """Explicit regression on the four that broke, so a future edit that
+        reaches for FEATURE_ORDER again fails here rather than in production."""
+        for derived in ("aspect_sin", "aspect_cos", "log1p_pop_density", "latitude"):
+            assert derived not in score.STATIC_COVARIATE_ALLOWLIST
+
+    def test_aspect_is_excluded_entirely_not_remapped(self):
+        """aspect_deg IS a snapshot column, so the schema check above would
+        pass if it were remapped. It is excluded on a different ground: a
+        linear slope on a compass bearing is not interpretable."""
+        from heatready_downscaling import snapshot
+
+        assert "aspect_deg" in {f.name for f in snapshot._pa_schema()}
+        assert "aspect_deg" not in score.STATIC_COVARIATE_ALLOWLIST
+
+    def test_no_day_varying_covariate_is_allowlisted(self):
+        for day_varying in (
+            "grid_tmax_c", "grid_tmin_c", "grid_specific_humidity_kgkg",
+            "nighttime_wind_ms", "date",
+        ):
+            assert day_varying not in score.STATIC_COVARIATE_ALLOWLIST
+
+
+def test_a_covariate_that_resolves_on_no_row_is_reported_not_just_silent():
+    """The defect's real damage was silence: a mistyped covariate produced a
+    'not scored' block indistinguishable from an empty cell. It now names the
+    offending covariate."""
+    rows, deltas = _rows(cov_name="wc_tree_frac")
+    block = _score(rows, deltas, _entry(cov="lst_warm_season_anomaly_c"),
+                   applied_idx=set())["proposed_correction_by_stratum"]["all"]
+
+    assert block["n_scored"] == 0
+    assert block["covariates_absent_from_every_row"] == ["lst_warm_season_anomaly_c"]
+
+
+def test_a_partially_present_covariate_is_not_reported_as_absent():
+    """Genuine sparsity must stay distinguishable from a name error."""
+    cov = [(i % 30) for i in range(60)]
+    for i in range(0, 30):
+        cov[i] = None
+    rows, deltas = _rows(cov_values=cov)
+    block = _score(rows, deltas, _entry(), applied_idx=set())["proposed_correction_by_stratum"]["all"]
+
+    assert block["n_covariate_missing"] == 30
+    assert block["covariates_absent_from_every_row"] == []

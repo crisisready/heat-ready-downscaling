@@ -162,9 +162,9 @@ small enough to fake it. Declare `basis`, an `intercept`, and one covariate term
         basis: raw_grid                # or model_delta -- see below, this choice matters
         intercept: 0.782
         terms:
-          - covariate: coast_dist_km
+          - covariate: lst_warm_season_anomaly_c
             slope: -0.0413
-        valid_range: [[0.0, 25.0]]     # the covariate range your fit is actually evidence over
+        valid_range: [[-2.0, 6.0]]     # the covariate range your fit is actually evidence over
 ```
 
 Three things to know before you use it:
@@ -176,10 +176,14 @@ Three things to know before you use it:
   one with no measured stations -- then a `model_delta` correction has nothing to attach to and
   will score as "not scored", while a `raw_grid` one is scoreable. Several of the darkest cells
   are exactly like this.
-- **Your covariate must be static per location**, and it must be on the allowlist in
-  `score.STATIC_COVARIATE_ALLOWLIST`. Day-varying covariates (wind, humidity, the grid value
-  itself) are excluded on purpose: a static covariate lets a promotion precompute one value per
-  served polygon, so nothing new has to run inside the serving path.
+- **Your covariate must be on the allowlist in `score.STATIC_COVARIATE_ALLOWLIST`**, and every
+  name there is a real column of the published snapshot. Two separate reasons. Day-varying
+  covariates (wind, humidity, the grid value itself) are excluded because a static covariate lets
+  a promotion precompute one value per served polygon, so nothing new has to run inside the
+  serving path. And the allowlist names snapshot *columns*, not the model's internal derived
+  feature names, because that is what the scorer actually reads off each row. Compass bearing
+  (`aspect_deg`) is excluded on a third ground: a straight-line slope on a circular variable is
+  not interpretable.
 - **One covariate term, two at the most.** This is a low cap on purpose. Our own two-covariate
   fit for Valencia was measurably *worse* on held-out stations than the one-covariate version --
   three free parameters against eight training stations per fold. The referee also reports what
