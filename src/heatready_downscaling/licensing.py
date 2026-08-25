@@ -29,12 +29,26 @@ Two checkable surfaces, one shared rule set:
                                 now formalises.
 
 Split by what needs the network, deliberately. Everything here is OFFLINE and
-pure, so validate_manifest can call it and so score_forward_eval.py's monthly
-re-scoring -- which reads merged manifests straight off disk without
-re-running jsonschema -- is covered by the same rules. The
-`reproducible_fetch` reachability check lives in scripts/check_data_licensing.py
-because it makes real HTTP requests, and a validator that silently depends on
-the network is a validator that fails for the wrong reasons.
+pure, so validate_manifest can call it. The `reproducible_fetch` reachability
+check lives in scripts/check_data_licensing.py because it makes real HTTP
+requests, and a validator that silently depends on the network is a validator
+that fails for the wrong reasons.
+
+WHERE THESE RULES DO AND DO NOT APPLY, stated precisely because getting this
+wrong is the very thing this module exists to correct. They are an ADMISSION
+gate: enforced by validate_manifest, which the referee runs on a submission's
+own PR, and by the Data licensing workflow. They are deliberately NOT applied
+by score_forward_eval.py's monthly cycle, which passes check_licensing=False --
+see validate_manifest's own comment for why re-litigating admission at scoring
+time would silently drop already-admitted candidates.
+
+The practical consequence, so nobody has to infer it: a licence hand-edited
+into a manifest AFTER merge is not caught by the official cycle. It is caught
+by the review of the PR making that edit, which is the only place a human sees
+it. An earlier draft of this docstring claimed the monthly cycle was covered.
+It was true when written and false after the round-2 fix, and leaving it would
+have documented a control this module no longer applies -- exactly the failure
+described above.
 """
 
 # SPDX identifiers a submission may declare for data it brings. Deliberately
@@ -52,13 +66,47 @@ SPDX_ALLOWLIST = frozenset({
     "CC0-1.0",
     "CC-BY-4.0",
     "CC-BY-3.0",
-    "ODbL-1.0",
     "ODC-BY-1.0",
     "PDDL-1.0",
     "Apache-2.0",
     "MIT",
     "BSD-3-Clause",
     "OGL-UK-3.0",
+})
+
+# Licenses that are real and usable but cannot AUTO-pass, because honouring
+# them requires a decision this gate cannot make on its own. They route to a
+# maintainer exactly like the proprietary escape hatch does.
+#
+# ODbL-1.0 is the motivating case (code-review finding, PR #31 round 2): it is
+# share-alike for databases -- a derivative database must itself be offered
+# under ODbL -- while DATA_LICENSE publishes contributed data as CC BY 4.0
+# with an explicit "No additional restrictions" clause. Auto-passing ODbL
+# would admit data and then republish it on terms that conflict with its own
+# licence. That is a licensing decision with legal weight, not a checkbox, and
+# the allowlist comment three lines up already said the list excludes copyleft
+# we cannot honour -- ODbL was on it anyway.
+SPDX_NEEDS_REVIEW = frozenset({
+    "ODbL-1.0",
+    "CC-BY-SA-4.0",
+    "CC-BY-SA-3.0",
+    "GPL-3.0-only",
+    "GPL-3.0-or-later",
+    "AGPL-3.0-only",
+    "AGPL-3.0-or-later",
+})
+
+# SPDX ids that carry an attribution obligation. A source under one of these
+# cannot be declared redistribution_tier: unrestricted, because the snapshot
+# would then republish it with no attribution notice.
+SPDX_ATTRIBUTION_REQUIRED = frozenset({
+    "CC-BY-4.0",
+    "CC-BY-3.0",
+    "ODC-BY-1.0",
+    "OGL-UK-3.0",
+    "Apache-2.0",
+    "MIT",
+    "BSD-3-Clause",
 })
 
 # The escape hatch CONTRIBUTING.md promises. It is NOT a way around the
@@ -69,9 +117,18 @@ SPDX_ALLOWLIST = frozenset({
 # silently.
 PROPRIETARY_LICENSE_ID = "proprietary-licensed"
 
-# What a data_sources entry must carry. redistribution_tier is the field that
-# actually decides whether contributed data can enter a published snapshot at
-# all, so it is required rather than inferred from the license string.
+# What a data_sources entry must carry. redistribution_tier is required rather
+# than inferred from the licence string because it records a DECISION about
+# what may be republished, and the licence alone does not determine that for
+# dual-licensed or partially-restricted sources.
+#
+# Note what does NOT yet exist, since an earlier version of this module
+# asserted it: nothing reads redistribution_tier or attribution_required
+# outside this module and coastline.py. There is no code generating the
+# snapshot's attribution notices from the tier -- that is a real follow-up, and
+# claiming it already worked was the same documented-but-absent-mechanism
+# mistake this module was written to correct (code-review finding, PR #31
+# round 2, the third instance in this PR alone).
 REDISTRIBUTION_TIERS = ("unrestricted", "attribution-required", "no-redistribution")
 
 _REQUIRED_DATA_SOURCE_KEYS = ("name", "license", "reproducible_fetch", "redistribution_tier")
@@ -108,6 +165,9 @@ def check_license_id(license_id, *, where: str, licensor=None) -> bool:
                 "agreements without an SPDX identifier, not as a way past the allowlist, "
                 "so the claim has to be attributable to somebody.",
             )
+        return True
+
+    if license_id in SPDX_NEEDS_REVIEW:
         return True
 
     if license_id not in SPDX_ALLOWLIST:
@@ -150,11 +210,29 @@ def check_data_source(entry: dict, *, where: str) -> bool:
     if tier == "no-redistribution":
         needs_review = True
 
+    # The HARMFUL direction, which the first version left unguarded
+    # (code-review finding, PR #31 round 2): a CC-BY-4.0 source declared
+    # `unrestricted` with attribution_required omitted passed silently, so an
+    # attribution-obligated dataset was admitted as needing none. The
+    # previously-checked direction (declaring MORE attribution than the tier
+    # implies) is the harmless one.
+    license_id = (entry.get("license") or "").strip()
+    if license_id in SPDX_ATTRIBUTION_REQUIRED and tier == "unrestricted":
+        raise LicensingError(
+            f"{where}: license {license_id!r} carries an attribution obligation, so "
+            "redistribution_tier cannot be 'unrestricted' -- use "
+            "'attribution-required' (see DATA_LICENSE, which carries LandScan/ORNL's "
+            "attribution forward for exactly this reason)",
+        )
     if entry.get("attribution_required") is True and tier == "unrestricted":
         raise LicensingError(
             f"{where}: attribution_required is true but redistribution_tier is "
-            "'unrestricted' -- these contradict each other, and the snapshot's own "
-            "attribution notices are generated from the tier",
+            "'unrestricted' -- these contradict each other",
+        )
+    if entry.get("attribution_required") is False and license_id in SPDX_ATTRIBUTION_REQUIRED:
+        raise LicensingError(
+            f"{where}: attribution_required is false but license {license_id!r} requires "
+            "attribution",
         )
     return needs_review
 
@@ -183,6 +261,21 @@ def _entries(method: dict, key: str) -> list:
     if not isinstance(value, list):
         raise LicensingError(
             f"method.{key} must be a list, got {type(value).__name__}",
+        )
+    # Every ITEM must be a mapping too, and this raises rather than being
+    # collected as a per-entry violation, so the two categories stay crisp:
+    # a SHAPE problem is "your file is malformed" (the caller reports it as
+    # unreadable, exit 4), and a violation is "your licence is not
+    # acceptable" (exit 1). A list of strings under data_sources is a YAML
+    # mistake, not a licensing claim, and telling a contributor they have a
+    # licensing violation when they have a mis-indentation is the mis-report
+    # this whole exit-code split exists to prevent (code-review finding, PR
+    # #31 round 2).
+    bad = [i for i, entry in enumerate(value) if not isinstance(entry, dict)]
+    if bad:
+        raise LicensingError(
+            f"method.{key} entries must be objects; entr{'ies' if len(bad) > 1 else 'y'} "
+            f"{bad} {'are' if len(bad) > 1 else 'is'} not",
         )
     return value
 

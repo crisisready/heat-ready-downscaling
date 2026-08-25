@@ -246,10 +246,16 @@ MANIFEST_SCHEMA: dict = {
                 #
                 # Shape-checked here; the licensing RULES (SPDX allowlist,
                 # the named-licensor escape hatch, tier/attribution
-                # consistency) live in heatready_downscaling.licensing and
-                # are enforced by validate_manifest below, so the monthly
-                # re-scoring path that reads merged manifests off disk
-                # without re-running jsonschema is covered too.
+                # consistency) live in heatready_downscaling.licensing and are
+                # enforced by validate_manifest below. They are an ADMISSION
+                # gate only -- score_forward_eval.py's monthly cycle passes
+                # check_licensing=False on purpose, so a licence hand-edited
+                # into a manifest after merge is caught by the review of that
+                # edit's PR, not by the official cycle. An earlier version of
+                # this comment claimed the cycle was covered; it stopped being
+                # true when check_licensing landed, and a comment asserting a
+                # control that is not applied is the exact problem this whole
+                # module was written to fix.
                 "data_sources": {
                     "type": "array",
                     "items": {

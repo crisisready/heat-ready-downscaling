@@ -57,7 +57,7 @@ import tempfile
 import requests
 import yaml
 
-from heatready_downscaling import contract, ledger, report, score, snapshot, submission
+from heatready_downscaling import contract, ledger, licensing, report, score, snapshot, submission
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("run_submission")
@@ -101,20 +101,39 @@ def find_submission_dir(root: str = "submissions") -> str:
     return candidates[0]
 
 
-def load_submission(submission_dir: str) -> tuple[dict, dict]:
+def load_submission(submission_dir: str) -> tuple[dict, dict, list[str]]:
     """Load + schema-validate manifest.yaml and claimed_report.json.
     Raises (jsonschema.ValidationError / ValueError) on a structurally
     invalid submission -- these are hard rejects, not violations to report
-    alongside a provisional score."""
+    alongside a provisional score.
+
+    Returns (manifest, claimed_report, licensing_rejects). Licensing
+    violations come back as strings rather than raising, so main() can render
+    them as a rejection comment; see the inline comment for why that
+    distinction is load-bearing rather than stylistic."""
     with open(os.path.join(submission_dir, "manifest.yaml")) as f:
         manifest = yaml.safe_load(f)
-    submission.validate_manifest(manifest)
+    # Licensing is validated separately from the rest, and the difference is
+    # the whole point (code-review finding, PR #31 round 2, HIGH): a licensing
+    # violation has to become a READABLE REJECTION on the contributor's PR,
+    # which was the stated justification for enforcing it here at all. Letting
+    # LicensingError escape did the opposite -- the referee died before writing
+    # comment.md, referee-report.yml then threw on the missing file, and the
+    # contributor got a red workflow and no explanation whatsoever. So the
+    # rules run first, and their verdict is returned for main() to fold into
+    # hard_rejects rather than raised.
+    licensing_rejects: list[str] = []
+    submission.validate_manifest(manifest, check_licensing=False)
+    try:
+        licensing.check_manifest_licensing(manifest)
+    except licensing.LicensingError as exc:
+        licensing_rejects.append(str(exc))
 
     with open(os.path.join(submission_dir, manifest["claimed_report"])) as f:
         claimed_report = json.load(f)
     report.validate_report(claimed_report)
 
-    return manifest, claimed_report
+    return manifest, claimed_report, licensing_rejects
 
 
 def cross_check(manifest: dict, claimed_report: dict, submission_dir: str, pr_author: str | None) -> list[str]:
@@ -478,9 +497,11 @@ def render_comment(
     licensing_error = None
     flagged: list[str] = []
     try:
-        from heatready_downscaling import licensing
+        # Violations are NOT folded in here (code-review finding, PR #31
+        # round 2): they render under the rejection header via hard_rejects,
+        # and listing them beneath "Not a rejection -- these entries are
+        # admissible" told the contributor the opposite of the truth.
         _violations, flagged = licensing.audit_manifest_licensing(manifest)
-        flagged = list(flagged) + [f"VIOLATION: {v}" for v in _violations]
     except Exception as exc:  # noqa: BLE001
         licensing_error = f"{type(exc).__name__}: {exc}"
     if licensing_error:
@@ -551,8 +572,9 @@ def main() -> None:
     submission_dir = find_submission_dir(args.submission_root)
     logger.info("Scoring submission at %s", submission_dir)
 
-    manifest, claimed_report_data = load_submission(submission_dir)
-    hard_rejects = cross_check(manifest, claimed_report_data, submission_dir, args.pr_author)
+    manifest, claimed_report_data, licensing_rejects = load_submission(submission_dir)
+    hard_rejects = list(licensing_rejects)
+    hard_rejects += cross_check(manifest, claimed_report_data, submission_dir, args.pr_author)
     hard_rejects.extend(check_submission_id_unique(manifest["submission_id"], args.ledger_dir))
 
     tolerance_result = None

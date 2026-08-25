@@ -64,6 +64,27 @@ class TestDataSource:
         base.update(over)
         return base
 
+    def test_an_attribution_licence_cannot_be_declared_unrestricted(self):
+        """The harmful direction: a CC-BY source declared unrestricted would be
+        republished with no attribution notice."""
+        with pytest.raises(licensing.LicensingError, match="attribution obligation"):
+            licensing.check_data_source(
+                self._entry(license="CC-BY-4.0", redistribution_tier="unrestricted"),
+                where="x",
+            )
+
+    def test_an_attribution_licence_with_the_right_tier_clears(self):
+        assert licensing.check_data_source(
+            self._entry(license="CC-BY-4.0", redistribution_tier="attribution-required"),
+            where="x",
+        ) is False
+
+    def test_a_share_alike_licence_needs_review_rather_than_auto_passing(self):
+        """ODbL is share-alike for databases, while DATA_LICENSE republishes as
+        CC BY 4.0 with 'No additional restrictions' -- auto-passing it would
+        republish data on terms conflicting with its own licence."""
+        assert licensing.check_license_id("ODbL-1.0", where="x") is True
+
     def test_a_complete_permissive_entry_clears(self):
         assert licensing.check_data_source(self._entry(), where="x") is False
 
@@ -152,10 +173,13 @@ def test_the_real_coastline_provenance_block_passes_its_own_gate():
 
 
 def test_validate_manifest_enforces_licensing():
-    """The rule has to hold at validate_manifest, not only in a workflow:
-    score_forward_eval.py's monthly re-scoring reads merged manifests off
-    disk without re-running jsonschema, so a merge-time-only check would not
-    bind the official cycle."""
+    """The rule has to hold at validate_manifest, not only in a workflow --
+    that is where the referee runs it on a submission's own PR, so a violation
+    becomes a readable rejection rather than a silent pass.
+
+    Note it is an ADMISSION gate and nothing more: score_forward_eval.py
+    passes check_licensing=False deliberately (see test_the_monthly_cycle_
+    does_not_re_litigate_licensing below)."""
     from heatready_downscaling import submission
 
     manifest = {
@@ -256,11 +280,13 @@ class TestScriptExitCodes:
         path = tmp_path / "manifest.yaml"
         path.write_text(manifest_text)
         root = os.path.join(os.path.dirname(__file__), "..")
-        env = dict(os.environ, PYTHONPATH=os.path.join(root, "src"))
+        # No PYTHONPATH: the script inserts its own ../src before importing
+        # (code-review finding, PR #31 round 2 -- two mechanisms for the same
+        # thing invites deleting the one that actually works).
         return subprocess.run(
             [sys.executable, os.path.join(root, "scripts", "check_data_licensing.py"),
              "--no-network", str(path)],
-            capture_output=True, text=True, env=env,
+            capture_output=True, text=True,
         )
 
     def test_clean_manifest_exits_zero(self, tmp_path):
@@ -318,3 +344,158 @@ def test_the_referee_comment_says_so_when_licensing_cannot_be_evaluated():
         {"by_target": {}}, [],
     )
     assert "Licensing could not be evaluated" in body
+
+
+class TestRoundTwoReviewFindings:
+    """Round 2 caught two instances of the same shape as round 1: a function
+    hardened while its sibling on the same data was not, and a comment left
+    asserting a control that had just been removed."""
+
+    def test_a_non_dict_entry_reports_a_violation_instead_of_crashing_the_script(self, tmp_path):
+        """audit_manifest_licensing tolerated a non-dict entry; the very next
+        call on the same manifest, declared_fetch_urls, did not. The result was
+        a traceback, exit 1, and a bare 'LICENSING VIOLATION' with no message
+        -- the precise mis-report exit code 4 was added to eliminate. Run WITH
+        network enabled, because that is the branch that crashed."""
+        import subprocess
+        import sys
+        import os
+
+        path = tmp_path / "manifest.yaml"
+        path.write_text(
+            "method:\n  kind: parameters\n  data_sources:\n"
+            "    - \"https://example.invalid/data.zip\"\n",
+        )
+        root = os.path.join(os.path.dirname(__file__), "..")
+        result = subprocess.run(
+            [sys.executable, os.path.join(root, "scripts", "check_data_licensing.py"), str(path)],
+            capture_output=True, text=True,
+        )
+        assert "Traceback" not in result.stderr, result.stderr
+        assert "UNREADABLE" in result.stdout, result.stdout
+        assert "LICENSING VIOLATIONS" not in result.stdout, result.stdout
+        assert "must be objects" in result.stdout, result.stdout
+        assert result.returncode == 4, result.stdout
+
+    def test_declared_fetch_urls_skips_non_mappings(self):
+        import sys
+        import os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+        import check_data_licensing as cdl
+
+        # A list containing a non-mapping is a SHAPE problem, so _entries
+        # raises and the whole key yields nothing -- the manifest is malformed,
+        # not partly usable.
+        manifest = {"method": {"data_sources": [
+            "not-a-mapping",
+            {"reproducible_fetch": "https://example.invalid/ok"},
+        ]}}
+        assert cdl.declared_fetch_urls(manifest) == []
+
+        clean = {"method": {"data_sources": [
+            {"reproducible_fetch": "https://example.invalid/ok"},
+        ]}}
+        assert cdl.declared_fetch_urls(clean) == [
+            ("method.data_sources[0]", "https://example.invalid/ok"),
+        ]
+
+    def test_declared_fetch_urls_tolerates_a_non_dict_method(self):
+        import sys
+        import os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+        import check_data_licensing as cdl
+
+        assert cdl.declared_fetch_urls({"method": "parameters"}) == []
+
+
+def test_the_monthly_cycle_does_not_re_litigate_licensing():
+    """Licensing is an ADMISSION gate. score_forward_eval.py passes
+    check_licensing=False on purpose: it wraps validate_manifest in
+    `except Exception: continue`, so re-checking would silently drop an
+    already-admitted candidate from the cycle if the allowlist were later
+    tightened. Pinned as a test because three separate comments previously
+    asserted the opposite, which is the documented-but-nonexistent-control
+    failure this whole module exists to correct."""
+    from heatready_downscaling import submission
+
+    manifest = {
+        "schema_version": 1, "submission_id": "2026-08-006",
+        "author": {"github": "x", "name": "X", "orcid": None, "affiliation": None},
+        "track": "research", "rung": "A",
+        "snapshot": {"version": "v2026.07", "manifest_sha256": "a" * 64},
+        "claims": [{"model_version": "ds-2026.07-rf5", "band_key": "lag_fill",
+                    "targets": ["tmax"], "zones": ["Cfb"]}],
+        "method": {
+            "kind": "rerun-validator", "entrypoint": "scripts/run_submission.py",
+            "args": [], "package_version": "0.1.0", "code_ref": None,
+            "extra_covariates": [{
+                "name": "grandfathered", "source": "s", "license": "AllRightsReserved",
+                "global": True, "reproducible_fetch": "https://example.invalid/x",
+            }],
+        },
+        "claimed_report": "claimed_report.json",
+        "tolerance": {"rmse_qrf_c": 0.005},
+        "reproducibility": {"seed": None, "runtime_notes": None},
+    }
+    # Admission rejects it.
+    with pytest.raises(licensing.LicensingError):
+        submission.validate_manifest(manifest)
+    # The monthly cycle does not, so an already-admitted candidate is never
+    # silently dropped by a later tightening.
+    submission.validate_manifest(manifest, check_licensing=False)
+
+
+def test_a_licensing_violation_becomes_a_rendered_rejection_not_a_dead_referee(tmp_path):
+    """code-review finding, PR #31 round 2 (HIGH), and the sharpest one in this
+    PR: letting LicensingError escape load_submission killed the referee before
+    it wrote comment.md. referee-report.yml then threw on the missing file, so
+    the contributor got a red workflow and NO explanation at all -- the exact
+    opposite of the 'readable rejection at the door' that was my whole stated
+    justification for enforcing licensing in validate_manifest.
+
+    So this asserts the plumbing, not just the rule: the violation comes back
+    as a string for main() to fold into hard_rejects."""
+    import json
+    import os
+    import sys
+    import yaml
+
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+    import run_submission as rs
+
+    manifest = {
+        "schema_version": 1, "submission_id": "2026-08-007",
+        "author": {"github": "x", "name": "X", "orcid": None, "affiliation": None},
+        "track": "research", "rung": "A",
+        "snapshot": {"version": "v2026.07", "manifest_sha256": "a" * 64},
+        "claims": [{"model_version": "ds-2026.07-rf5", "band_key": "lag_fill",
+                    "targets": ["tmax"], "zones": ["Cfb"]}],
+        "method": {
+            "kind": "rerun-validator", "entrypoint": "scripts/run_submission.py",
+            "args": [], "package_version": "0.1.0", "code_ref": None,
+            "extra_covariates": [{
+                "name": "bad", "source": "s", "license": "AllRightsReserved",
+                "global": True, "reproducible_fetch": "https://example.invalid/x",
+            }],
+        },
+        "claimed_report": "claimed_report.json",
+        "tolerance": {"rmse_qrf_c": 0.005},
+        "reproducibility": {"seed": None, "runtime_notes": None},
+    }
+    (tmp_path / "manifest.yaml").write_text(yaml.safe_dump(manifest))
+    (tmp_path / "claimed_report.json").write_text(json.dumps({
+        "report_schema_version": 1, "model_version": "ds-2026.07-rf5",
+        "band_key": "lag_fill", "snapshot_version": "v2026.07",
+        "sample_requested": 1, "rows_sampled": 1, "rows_paired": 1,
+        "fidelity_check": {"n": 0}, "by_target": {},
+    }))
+
+    _m, _r, licensing_rejects = rs.load_submission(str(tmp_path))
+    assert licensing_rejects, "the violation must come back, not be raised"
+    assert "not on the allowlist" in licensing_rejects[0]
+
+    # And it renders under the rejection header, which is what a contributor
+    # actually reads.
+    body = rs.render_comment(manifest, licensing_rejects, None, None, [])
+    assert "Rejected" in body
+    assert "AllRightsReserved" in body

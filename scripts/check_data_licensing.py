@@ -50,15 +50,32 @@ from heatready_downscaling import licensing  # noqa: E402
 
 
 def declared_fetch_urls(manifest: dict) -> list[tuple[str, str]]:
-    """(where, url) for every reproducible_fetch in a manifest."""
-    method = manifest.get("method") or {}
+    """(where, url) for every reproducible_fetch in a manifest.
+
+    Skips any entry that is not a mapping. audit_manifest_licensing already
+    tolerates a non-dict entry -- it records a violation and continues -- and
+    this function running afterwards on the SAME manifest used to crash with
+    AttributeError instead (code-review finding, PR #31 round 2). The
+    consequence was the exact mis-report exit code 4 was added to eliminate: a
+    `data_sources` list of strings produced a traceback, exit 1, and a bare
+    "LICENSING VIOLATION" with no message. Hardening one function and not its
+    sibling on the same data is not hardening.
+
+    Traversal routed through licensing._entries so the two stay in step rather
+    than duplicating the (data_sources, extra_covariates) walk.
+    """
+    method = manifest.get("method")
+    if not isinstance(method, dict):
+        return []
     out: list[tuple[str, str]] = []
-    for i, entry in enumerate(method.get("data_sources") or []):
-        if entry.get("reproducible_fetch"):
-            out.append((f"method.data_sources[{i}]", entry["reproducible_fetch"]))
-    for i, entry in enumerate(method.get("extra_covariates") or []):
-        if entry.get("reproducible_fetch"):
-            out.append((f"method.extra_covariates[{i}]", entry["reproducible_fetch"]))
+    for key in ("data_sources", "extra_covariates"):
+        try:
+            entries = licensing._entries(method, key)
+        except licensing.LicensingError:
+            continue
+        for i, entry in enumerate(entries):
+            if isinstance(entry, dict) and entry.get("reproducible_fetch"):
+                out.append((f"method.{key}[{i}]", entry["reproducible_fetch"]))
     return out
 
 

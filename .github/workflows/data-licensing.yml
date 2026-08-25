@@ -54,6 +54,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Needed to diff against the base ref below.
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -72,10 +75,48 @@ jobs:
       # runner without egress is not the contributor's fault, and rejecting a
       # correct submission for it would be a false negative on exactly the
       # kind of good-faith entry this program wants.
-      - name: Check declared data licensing
+      # Two passes, for a reason the round-2 review caught: the script's own
+      # comment said a CI caller "should pass only the manifests its PR
+      # actually touched", and the workflow then invoked it with no paths --
+      # documenting the failure instead of fixing it. Widening the paths
+      # trigger made it worse, because a dead upstream in an OLD merged
+      # submission would produce an unreachable-URL warning on every PR that
+      # touched the gate.
+      #
+      # So: reachability is checked ONLY for the manifests this PR changed,
+      # and the whole-corpus sweep runs rules-only (--no-network). A gate
+      # tightening therefore still reveals that merged submissions now
+      # violate it, without dragging every historical URL along.
+      - name: Changed manifests
+        id: changed
+        run: |
+          base="${{ github.event.pull_request.base.sha }}"
+          if [ -z "$base" ]; then base="${{ github.event.before }}"; fi
+          if [ -z "$base" ] || ! git cat-file -e "$base" 2>/dev/null; then
+            echo "paths=" >> "$GITHUB_OUTPUT"
+          else
+            paths=$(git diff --name-only --diff-filter=d "$base" HEAD -- 'submissions/*/*/manifest.yaml' | tr '\n' ' ')
+            echo "paths=$paths" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Rules for every submission (no network)
         run: |
           set +e
-          PYTHONPATH=src python scripts/check_data_licensing.py
+          python scripts/check_data_licensing.py --no-network
+          status=$?
+          set -e
+          case "$status" in
+            0) exit 0 ;;
+            3) echo "::warning::A declared data source needs a maintainer licensing decision before promotion. Admissible, but not automatic -- see the log." ; exit 0 ;;
+            4) echo "::error::A manifest could not be parsed. This is a YAML/structure problem, not a licensing violation." ; exit 1 ;;
+            *) exit "$status" ;;
+          esac
+
+      - name: Reachability for the manifests this change touches
+        if: steps.changed.outputs.paths != ''
+        run: |
+          set +e
+          python scripts/check_data_licensing.py ${{ steps.changed.outputs.paths }}
           status=$?
           set -e
           case "$status" in

@@ -264,6 +264,18 @@ method:
 `DATA_LICENSE` carries no such restriction, so accepting NC data would make the published
 snapshot's stated terms wrong for part of its own contents.
 
+**Your tier has to match your licence.** A licence carrying an attribution obligation
+(`CC-BY-4.0`, `CC-BY-3.0`, `ODC-BY-1.0`, `OGL-UK-3.0`, `Apache-2.0`, `MIT`, `BSD-3-Clause`)
+cannot be declared `unrestricted` -- use `attribution-required`, so the snapshot carries the
+notice forward the way `DATA_LICENSE` already does for LandScan/ORNL. Declaring
+`unrestricted` for one of those is rejected rather than quietly accepted, because the
+alternative is republishing someone's data with the attribution stripped.
+
+**Share-alike licences route to a maintainer rather than passing automatically.** `ODbL-1.0`
+and the `CC-BY-SA`/`GPL`/`AGPL` family are real and usable, but they impose terms on
+derivative work that conflict with `DATA_LICENSE`'s CC BY 4.0 "No additional restrictions"
+clause. That is a decision with legal weight, so it goes to a person.
+
 If your data has a real licence with no SPDX identifier -- common for municipal and
 national-agency agreements -- use `license: proprietary-licensed` and name who granted it in
 `licensor`. That is not a way around the allowlist; it routes the submission to a maintainer
