@@ -1,8 +1,13 @@
 # P0 design: Rung B scoring + `replay_downscaling.py` + `promote_from_public.py`
 
-Status: **design only, no code**. Per `CLAUDE.md`'s Tier 2 workflow, this plan is posted for
-review before any of the three pieces below gets implemented. Nothing in this PR touches
-`score.py`, adds `replay_downscaling.py`, or changes `heat-risk-data-api`.
+Status: **design only, no code**. This plan is posted for review before any of the three pieces
+below gets implemented, per the Tier 2 ("new pipeline mechanism, cross-repo, real blast radius")
+plan-before-code convention this session is operating under. **Correction (code-review finding,
+2026-08-25): that tier convention is the machine-wide gu-dev baseline
+(`~/.claude-harvard/CLAUDE.md`), explicitly scoped there to homestead work — this repo's own
+`CLAUDE.md` does not define any tier system.** Cited here as the actual standard this design PR
+follows, not as something `CLAUDE.md` itself specifies. Nothing in this PR touches `score.py`,
+adds `replay_downscaling.py`, or changes `heat-risk-data-api`.
 
 Scope: the three pieces `task-inventory.md` §3 named as the crowdsourced model-improvement
 program's "engine room": (1) `score_band` accepting a contributor-proposed correction (Rung B),
@@ -52,8 +57,15 @@ central finding this design has to reckon with, not design around.
 
 **Conclusion driving the recommendation below**: build the engine room for the Rung B shape
 CONTRIBUTING.md already publicly promised (a discrete `bias_correction` float or `delta_scale`
-`{scale, offset}`, optionally subzone-scoped, mirroring the live `Cfb.FR` fit and the staged `SP`
-subzone path) — that's small, well-precedented, and matches a real pending contribution. Do not
+`{scale, offset}`, optionally subzone-scoped) — that's small, well-precedented, and matches a
+real pending contribution. **Correction (code-review finding, 2026-08-25): there is no live
+`Cfb.FR` fit anywhere** — `Cfb.FR` only appears as an illustrative value in test fixtures
+(`tests/test_gates.py`, `tests/test_publish_band_gate.py`). The one real, shipped Cfb correction
+(`README.md`) is zone-level, not subzone-scoped. The `delta_scale_subzone`/`bias_correction_subzone`
+mechanism itself is real and shipped (`gates.py`), but has never yet been exercised with real
+production data — Valencia's own Phase 8 finding is exactly "the mechanism is fine, only the
+evidence is missing." The staged `SP` subzone path is what this design should unblock; it is not
+already proven in production, and this doc should not imply otherwise. Do not
 try to make Rung B also swallow Seoul's retrained model or Valencia's covariate correction; both
 would require either executing contributor code (Rung C's open question) or inventing a new
 correction vocabulary (a real future extension, not P0). `replay_downscaling.py` and
@@ -88,8 +100,17 @@ best-fit one) — and reports it alongside the existing mechanically-derived num
 ```python
 "proposed_correction_rmse_cv_c": ...,     # out-of-fold RMSE using the contributor's number
 "proposed_correction_beats_grid": ...,    # vs rmse_grid_c
-"proposed_vs_best_fit_gap_c": ...,        # |proposed - bias_qrf| or |proposed.scale - fit.scale|, for referee transparency
+"proposed_vs_best_fit_gap_c": ...,        # for referee transparency, see correction below
 ```
+
+**Correction (Codex adversarial review, 2026-08-25):** for the affine (`{scale, offset}`) shape,
+`proposed_vs_best_fit_gap_c` must account for *both* parameters, not scale alone — a proposal that
+matches the fitted `scale` exactly but carries a wildly wrong `offset` (e.g. +100°C) would
+otherwise report a near-zero gap despite being nowhere near the fitted correction. Report it as a
+combined distance over the *effect on delta_c*, not the raw parameters (which live on different
+scales) — e.g. the RMS difference between `proposed.scale * d + proposed.offset` and
+`fit.scale * d + fit.offset` evaluated at the zone's actual observed `d` (delta_c) range, not a
+bare parameter-space distance.
 
 `gates.build_gate`/`build_subzone_patch` stay unchanged — they still only ever publish the
 mechanically-derived number, never a submission's raw claim, matching `GOVERNANCE.md`'s "a
@@ -112,6 +133,24 @@ smaller change to `validate_station_blend.py`'s scoring path, not `score_band`.
 becomes conditional — Rung B is accepted when `method.kind == "parameters"` and the manifest
 declares exactly the value(s) being proposed (schema addition to `submission.MANIFEST_SCHEMA`,
 not sketched further here).
+
+**Real gap, found by Codex adversarial review, 2026-08-25 — the single most important fix to this
+section:** the paragraphs above only wire `proposed_correction` into `run_submission.py`'s
+*provisional* referee path. `scripts/score_forward_eval.py` — the **monthly official cycle that
+actually determines wins and drives promotion** (`main()`'s `score_cell`/`consecutive_wins` call
+sites) — calls `score.score_band` with no `proposed_correction` at all today, and decides
+`metrics["status"] == "win"` from the mechanically-*fitted* `qrf_beats_grid_with_margin`, not from
+the contributor's declared value. **Left as originally scoped, a Rung B candidate would earn or
+lose every official cycle based on the auto-derived correction, never its own submitted
+parameter** — the entire mechanism this design exists to build would be inert at the one stage
+that actually matters for promotion. Fix: `score_forward_eval.py` must read the winning
+candidate's `proposed_correction` back out of its archived submission manifest (`load_active_candidates`
+already loads `submissions/{...}/manifest.yaml` per candidate cell — the value is already sitting
+right there) and pass it through to `score_band` on every monthly re-score, using the *same*
+fixed, declared value every cycle (never re-fit it from that cycle's own data, for the identical
+leakage reason `score_band`'s own CV discipline already exists) — `consecutive_wins`/promotion
+must be scored against "does the contributor's specific number keep generalizing," not "does some
+better-fit number exist this month."
 
 **Open question for Nishant**: should a Rung B submission's `proposed_correction` be allowed to
 also include the subzone key (i.e., can a public contributor propose a subzone-scoped fix, or is
@@ -136,8 +175,20 @@ Grounded directly in what both cases' own ad hoc tooling already had to check by
   even after the numbers clear tolerance — i.e. the review step is explicitly about
   *distribution* shifts, not just the headline metric.
 
-**Proposal**: a CLI, `scripts/replay_downscaling.py --snapshot-dir <dir> --band-key <band> --old
-<model_version|gate-json> --new <model_version|gate-json>`, that:
+**Proposal**: a CLI, `scripts/replay_downscaling.py --snapshot-dir <dir> --band-key <band>
+--model-version <model_version> --old <gate-json|none> --new <gate-json>`, that:
+
+**Correction (Codex adversarial review, 2026-08-25):** the original sketch let each side be
+"either a model_version or a gate-json" independently — this doesn't work.
+`FrozenPredictionAdapter.from_snapshot` needs a `model_version` to pick the right predictions
+partition, and `BAND_GATE_SCHEMA`/`BLEND_GATE_SCHEMA` carry no `model_version` field at all — a
+gate JSON alone can never say which frozen-prediction partition it should be replayed against
+(and the whole point of replaying old-vs-new is comparing two *corrections* under the *same*
+`model_version`, never two different models at once, which is a different, harder question this
+tool doesn't attempt). Fixed shape: `--model-version` is always required and shared by both
+sides; `--old`/`--new` are each a gate JSON (`bias_correction`/`delta_scale`/`blend params`) to
+apply on top of that one shared model's frozen predictions — `--old` may be omitted to mean "no
+correction" (today's already-served baseline, for a first-ever promotion in a zone).
 
 1. Loads the same band-paired snapshot rows both arms would score against
    (`snapshot.read_predictions_partitions`-style, reproducible, no live inference needed when
@@ -195,7 +246,17 @@ produces before confirming the publish."
    copy of the snapshot's `ghcn_training` data — not the public snapshot the contributor scored
    against — using the identical `fold_salt`. If the re-derived metric doesn't match the winning
    cycle's claim within the manifest's `tolerance`, hard stop; this never proceeds on a "close
-   enough, ship it" basis.
+   enough, ship it" basis. **This private copy must be pinned to the exact station-days the
+   winning official cycle actually scored (its own `current_snapshot_version` from
+   `score_forward_eval.py`'s `cycles.jsonl` line), a frozen snapshot-equivalent extract, never the
+   live/growing `ghcn_training` table (Codex adversarial review finding, 2026-08-25, resolving
+   the open question this section originally left unanswered in the wrong direction): re-deriving
+   against a superset that has grown since the winning cycle ran legitimately shifts RMSE/bias by
+   more than tight tolerances like `0.005°C`, which would silently and permanently block a
+   genuinely valid winner on more-data-arrived-since noise, not a real discrepancy.** The
+   "cheaper, no second copy to maintain" framing this section originally floated is exactly the
+   failure mode to avoid — tolerance comparison is only meaningful against the identical dataset
+   the claim was made against.
 3. Calls `replay_downscaling.py` (old = currently-published gate, new = the candidate correction)
    and surfaces the diff.
 4. **Human-in-the-loop, no exceptions**: presents the re-derivation result and the diff, and waits
@@ -211,12 +272,10 @@ produces before confirming the publish."
    or drop an unrelated zone/subzone's already-published correction. A whole-gate rebuild is a
    separate, larger operation this script should refuse to do implicitly.
 
-**Open question for Nishant**: does "private copy of the snapshot" mean a literal second copy of
-`ghcn_training` frozen at promotion time, or just "the live production `ghcn_training` table,
-which is a superset of whatever the public snapshot contained at submission time"? The latter is
-cheaper (no second copy to maintain) and arguably a *stronger* check (more data than the
-contributor had), but needs to be stated explicitly since "private copy" implies something
-snapshot-frozen rather than live in `GOVERNANCE.md`'s current wording.
+**Resolved above (was an open question in the original draft):** "private copy of the snapshot"
+means a literal, frozen extract pinned to the winning cycle's own station-days, not the live
+production `ghcn_training` table — see the correction in point 2. A live superset is not a
+"stronger check," it's a different, uncontrolled dataset that breaks tolerance comparison.
 
 ---
 
@@ -225,7 +284,11 @@ snapshot-frozen rather than live in `GOVERNANCE.md`'s current wording.
 1. Extend `score_band` with `proposed_correction` (Section 1) — small, precedented, unblocks
    exactly the Rung B shape CONTRIBUTING.md already promised and the staged Valencia `SP` subzone
    path actually needs. Do not extend Rung B's vocabulary to cover Valencia's covariate-affine
-   correction or Seoul's retrained model in this pass.
+   correction or Seoul's retrained model in this pass. **Critically, this must include wiring
+   `score_forward_eval.py`'s monthly official cycle to the same declared value, not just
+   `run_submission.py`'s provisional referee** (Codex finding, Section 1) — otherwise promotion
+   is decided by the auto-derived number regardless of what a Rung B submission actually proposed,
+   making the whole extension inert where it matters most.
 2. Build `replay_downscaling.py` (Section 2) general enough to diff *any* old-vs-new correction
    pair (a parameter change today, a swapped model_version later) on tier-mix, delta-distribution,
    and boundary discontinuity — because the promotion review step has to hold regardless of which
