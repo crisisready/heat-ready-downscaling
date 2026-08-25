@@ -166,3 +166,42 @@ class TestAgainstRealCoastline:
             f"Chicago measured {km:.1f} km; if this is now small, the coastline "
             "layer has started including lakes and coast_dist_km's meaning changed"
         )
+
+
+class TestRoundOneReviewFindings:
+    """Regressions for the PR #29 review findings in this module."""
+
+    def test_swapped_lat_lon_query_raises_instead_of_returning_a_plausible_number(self):
+        """The failure the module docstring says it fears: CoastlineIndex takes
+        (lon, lat) and distance_km takes (lats, lons). Measured on the real
+        archive, Seoul is 21.2 km correct and 608.0 km swapped -- plausible
+        either way, and about to be baked into a published column."""
+        idx = coastline.CoastlineIndex([[126.978, 37.5665]])
+        with pytest.raises(ValueError, match="out of range"):
+            idx.distance_km(126.978, 37.5665)  # arguments swapped
+
+    def test_out_of_range_vertices_raise(self):
+        with pytest.raises(ValueError, match="out of range"):
+            coastline.CoastlineIndex([[0.0, 91.0]])
+
+    def test_a_truncated_shapefile_raises_instead_of_reading_past_the_record(self):
+        shp = bytearray(_polyline_shp([(1.0, 2.0), (3.0, 4.0)]))
+        del shp[-16:]  # lop off the last vertex, leaving num_points overstated
+        with pytest.raises(ValueError, match="malformed|runs past"):
+            coastline.parse_shapefile_polyline_vertices(bytes(shp))
+
+    def test_a_bad_payload_is_not_written_to_the_cache(self, tmp_path, monkeypatch):
+        """The checksum's own motivating failure -- an HTML error page served
+        with 200 -- must not be persisted before being rejected."""
+        cache = tmp_path / "ne.zip"
+
+        class _Resp:
+            content = b"<html>404</html>"
+            def raise_for_status(self):
+                return None
+
+        import requests
+        monkeypatch.setattr(requests, "get", lambda *a, **k: _Resp())
+        with pytest.raises(ValueError):
+            coastline.fetch_coastline_vertices(str(cache))
+        assert not cache.exists(), "a payload that failed verification was cached anyway"

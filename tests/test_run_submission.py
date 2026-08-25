@@ -371,3 +371,26 @@ class TestAbsentCovariateReachesTheContributor:
             self._manifest(), [], report_mod.ToleranceResult(True, {}, []), report, [],
         )
         assert "resolved on no row" not in body
+
+
+def test_a_non_scalar_tolerance_violation_does_not_crash_the_comment():
+    """code-review finding, PR #29: the manifest's tolerance block accepts
+    arbitrary keys, so a contributor can name a nested metric like
+    proposed_correction_by_stratum. compare_reports reports that as a
+    violation with abs_diff=None and dict values, and formatting it with :.5f
+    raised TypeError -- crashing the referee instead of posting a rejection,
+    on fully contributor-controlled input."""
+    result = report_result(
+        passed=False, max_abs_deviation={},
+        violations=[{
+            "target": "tmin", "zone": "BSh",
+            "metric": "proposed_correction_by_stratum",
+            "claimed": {"all": {}}, "reproduced": {"all": {}},
+            "abs_diff": None, "allowed": 0.01,
+            "reason": "metric is not a scalar -- cannot be compared against a numeric tolerance",
+        }],
+    )
+    reproduced = {"by_target": {"tmin": {"BSh": _metrics()}}}
+    body = rs.render_comment(_manifest(), [], result, reproduced, [])
+    assert "not a scalar" in body
+    assert "proposed_correction_by_stratum" in body

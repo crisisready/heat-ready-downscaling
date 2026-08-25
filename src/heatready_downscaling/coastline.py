@@ -67,8 +67,12 @@ NATURAL_EARTH_COASTLINE_SHA256 = (
     "bfa04cdbcbef07ef90dfca1dabb48062eca29900a113df0f389303e255484017"
 )
 NATURAL_EARTH_COASTLINE_BYTES = 3069451
-# Machine-readable provenance, the same shape a submission's own
-# method.data_sources entry must take (see submission.DATA_SOURCE_SCHEMA).
+# Machine-readable provenance for this data source. Intended to be the first
+# entry the roadmap's data_sources licensing CI consumes -- that checker and
+# its schema do NOT exist yet (they are a separate, later PR), so these key
+# names are this module's proposal, not conformance to an existing contract.
+# Stated plainly because the alternative is a comment citing a schema nobody
+# can find (code-review finding, PR #29).
 NATURAL_EARTH_COASTLINE_DATA_SOURCE = {
     "name": "Natural Earth 1:10m physical coastline",
     "version": "10m",
@@ -87,6 +91,34 @@ NATURAL_EARTH_COASTLINE_DATA_SOURCE = {
 _SHAPEFILE_HEADER_BYTES = 100
 _SHAPE_TYPE_POLYLINE = 3
 EARTH_RADIUS_KM = 6371.0088  # IUGG mean radius, matching what haversine assumes
+
+
+def _check_ranges(lats, lons, *, what: str) -> None:
+    """Raise if latitudes/longitudes are out of range.
+
+    This is the cheap guard against the one mistake this module's own
+    docstring says it fears, and which a caller WILL eventually make:
+    CoastlineIndex takes vertices as (lon, lat) while distance_km takes
+    (lats, lons). Swapping them produces a confidently plausible wrong
+    number, not an error -- measured on the real archive, Seoul is 21.2 km
+    correct and 608.0 km swapped. Since the caller is a snapshot builder that
+    bakes one number per station into a published column, a wrong-but-
+    plausible value is the worst possible outcome (code-review finding, PR
+    #29). Only |lat| > 90 is strictly detectable, but that catches the
+    realistic swap for every station outside the tropics.
+    """
+    import numpy as np
+
+    lat_arr, lon_arr = np.asarray(lats, dtype=float), np.asarray(lons, dtype=float)
+    bad_lat = np.abs(lat_arr) > 90.0
+    bad_lon = np.abs(lon_arr) > 180.0
+    if bad_lat.any() or bad_lon.any():
+        raise ValueError(
+            f"{what} out of range: {int(bad_lat.sum())} with |lat| > 90 and "
+            f"{int(bad_lon.sum())} with |lon| > 180. Note that CoastlineIndex takes "
+            "vertices as (lon, lat) while distance_km takes (lats, lons) -- a swap here "
+            "otherwise yields a plausible but wrong distance rather than an error.",
+        )
 
 
 def parse_shapefile_polyline_vertices(shp_bytes: bytes):
@@ -114,14 +146,31 @@ def parse_shapefile_polyline_vertices(shp_bytes: bytes):
         _record_number, content_len_words = struct.unpack_from(">ii", shp_bytes, offset)
         body = offset + 8
         shape_type = struct.unpack_from("<i", shp_bytes, body)[0]
+        record_end = body + content_len_words * 2
+        if record_end > total or content_len_words <= 0:
+            raise ValueError(
+                f"shapefile record at offset {offset} claims {content_len_words} 16-bit "
+                f"words, which runs past the {total}-byte file -- truncated or malformed",
+            )
         if shape_type == _SHAPE_TYPE_POLYLINE:
             num_parts, num_points = struct.unpack_from("<ii", shp_bytes, body + 4 + 32)
             points_at = body + 4 + 32 + 8 + 4 * num_parts
+            # Bounds-checked rather than trusted (code-review finding, PR #29):
+            # a record whose num_points overstates its own content would
+            # otherwise read the FOLLOWING record's bytes as coordinates and
+            # report them as coastline, with no error. Unreachable through
+            # fetch_coastline_vertices, whose checksum is verified first, but
+            # this is a public function and a direct caller has no such guard.
+            if num_points < 0 or points_at + 16 * num_points > record_end:
+                raise ValueError(
+                    f"shapefile PolyLine at offset {offset} claims {num_points} points, "
+                    "which runs past the end of its own record -- malformed",
+                )
             flat = np.frombuffer(
                 shp_bytes, dtype="<f8", count=2 * num_points, offset=points_at,
             )
             parts.append(flat.reshape(num_points, 2))
-        offset = body + content_len_words * 2
+        offset = record_end
 
     if not parts:
         raise ValueError(
@@ -160,12 +209,17 @@ def fetch_coastline_vertices(cache_path: str | None = None):
         response = requests.get(NATURAL_EARTH_COASTLINE_URL, timeout=120)
         response.raise_for_status()
         payload = response.content
+        # Verify BEFORE writing the cache (code-review finding, PR #29). The
+        # motivating failure this checksum exists for -- an HTML error page
+        # served with 200 -- would otherwise be persisted to disk and, in CI,
+        # uploaded by any cache-save step, before being rejected.
+        verify_coastline_archive(payload)
         if cache_path:
             os.makedirs(os.path.dirname(os.path.abspath(cache_path)), exist_ok=True)
             with open(cache_path, "wb") as fh:
                 fh.write(payload)
-
-    verify_coastline_archive(payload)
+    else:
+        verify_coastline_archive(payload)
 
     import io
     import zipfile
@@ -210,6 +264,7 @@ class CoastlineIndex:
             raise ValueError(f"vertices must be (N, 2) (lon, lat), got {vertices.shape}")
         if not len(vertices):
             raise ValueError("vertices is empty -- nothing to measure distance to")
+        _check_ranges(vertices[:, 1], vertices[:, 0], what="vertices")
         self.n_vertices = len(vertices)
         # BallTree's haversine metric expects (lat, lon) IN RADIANS and
         # returns angular distance, hence the column swap and the radius
@@ -225,17 +280,23 @@ class CoastlineIndex:
         snapshot build."""
         import numpy as np
 
-        lat_arr = np.atleast_1d(np.asarray(
-            [np.nan if v is None else float(v) for v in np.atleast_1d(lats)], dtype=float,
-        ))
-        lon_arr = np.atleast_1d(np.asarray(
-            [np.nan if v is None else float(v) for v in np.atleast_1d(lons)], dtype=float,
-        ))
+        def _coords(values):
+            # None -> NaN so a single unusable station cannot fail a whole
+            # snapshot build; atleast_1d so scalars and sequences take the
+            # same path.
+            return np.array(
+                [np.nan if v is None else float(v) for v in np.atleast_1d(values)],
+                dtype=float,
+            )
+
+        lat_arr = _coords(lats)
+        lon_arr = _coords(lons)
         if lat_arr.shape != lon_arr.shape:
             raise ValueError(
                 f"lats and lons must be the same length, got {lat_arr.shape} and {lon_arr.shape}",
             )
 
+        _check_ranges(lat_arr, lon_arr, what="query coordinates")
         out = np.full(lat_arr.shape, np.nan)
         usable = np.isfinite(lat_arr) & np.isfinite(lon_arr)
         if usable.any():

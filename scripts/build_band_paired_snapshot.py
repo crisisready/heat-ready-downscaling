@@ -370,6 +370,69 @@ def _stations_from_export(export_rows: list[dict]) -> list[dict]:
     return list(seen.values())
 
 
+def stamp_coast_dist_km(
+    stations: list[dict], band_rows: dict[str, list[dict]], *,
+    archive_path: str | None = None, required: bool = True,
+) -> int:
+    """Compute coast_dist_km once per distinct station and stamp it onto both
+    stations.parquet's rows and every band row.
+
+    NOT a _PASSTHROUGH_COLUMNS entry, deliberately: every other static
+    covariate is copied from ghcn_training's export, but coast distance does
+    not exist there -- it is derived from lat/lon here. Missing this
+    distinction is exactly how the column was added to the schema and the
+    allowlist in PR #29 while nothing ever wrote it (code-review finding), so
+    a snapshot built after that change still had it null on every row and a
+    contributor following CONTRIBUTING.md's own example would have been told
+    their covariate name was wrong.
+
+    `required` (default True) makes an unobtainable coastline a hard failure
+    rather than a silently null column. That default is the whole point: a
+    build that quietly emits nulls here reproduces the original bug. Pass
+    required=False only for a deliberately offline build, and note that it
+    logs at WARNING and the resulting snapshot cannot score any
+    coast_dist_km proposal.
+    """
+    from heatready_downscaling import coastline
+
+    try:
+        vertices = coastline.fetch_coastline_vertices(archive_path)
+    except Exception:
+        if required:
+            raise
+        logger.warning(
+            "Could not obtain the Natural Earth coastline; coast_dist_km will be NULL on "
+            "every row of this snapshot, and no coast_dist_km correction can be scored "
+            "against it. This is only acceptable for a deliberately offline build.",
+            exc_info=True,
+        )
+        return 0
+
+    index = coastline.CoastlineIndex(vertices)
+    lats = [s.get("lat") for s in stations]
+    lons = [s.get("lon") for s in stations]
+    distances = index.distance_km(lats, lons)
+
+    import math
+
+    by_station: dict[str, float | None] = {}
+    for station, km in zip(stations, distances):
+        value = None if (km is None or math.isnan(km)) else float(km)
+        station["coast_dist_km"] = value
+        by_station[station["station_id"]] = value
+
+    for rows in band_rows.values():
+        for row in rows:
+            row["coast_dist_km"] = by_station.get(row["station_id"])
+
+    resolved = sum(1 for v in by_station.values() if v is not None)
+    logger.info(
+        "Stamped coast_dist_km on %d/%d station(s) (%d coastline vertices)",
+        resolved, len(by_station), index.n_vertices,
+    )
+    return resolved
+
+
 def _write_sample_csv(path: str, station_id: str, band_rows_by_band: dict[str, list[dict]]) -> None:
     """1 station x every fetched band x however many days that station has
     -- a small, git-committable illustration of the schema (plan section
@@ -402,6 +465,12 @@ def _phase_pack(args: argparse.Namespace) -> None:
         logger.info("Loaded %d row(s) for band=%s from %s", len(rows), band, path)
 
     stations = _stations_from_export(export_rows)
+    # Before the holdout split and before anything is written, so both
+    # snapshot copies and every band partition carry the same values.
+    stamp_coast_dist_km(
+        stations, band_rows,
+        archive_path=args.coastline_archive, required=not args.no_coast_dist,
+    )
     holdout = snap.compute_holdout(stations)
     logger.info("Computed provisional holdout: %d station(s) across %d zone(s)",
                 len(holdout), len({s["climate_zone"] for s in stations}))
@@ -546,6 +615,18 @@ def main() -> None:
     parser.add_argument("--bucket", default=None,
                          help="defaults to VULNERABILITY_DATA_BUCKET env var (--phase export/predict)")
     parser.add_argument("--model-version", default=None, help="--phase predict only")
+    parser.add_argument(
+        "--coastline-archive", default=None,
+        help="--phase pack: path to a locally-cached ne_10m_coastline.zip. Verified against "
+             "the pinned checksum either way; fetched from Natural Earth when omitted.",
+    )
+    parser.add_argument(
+        "--no-coast-dist", action="store_true",
+        help="--phase pack: build WITHOUT coast_dist_km rather than failing when the "
+             "coastline cannot be obtained. The resulting snapshot has that column null on "
+             "every row and cannot score any coast_dist_km correction -- only for a "
+             "deliberately offline build.",
+    )
     parser.add_argument("--snapshot-dir", default=None,
                          help="--phase predict: an already-packed snapshot directory (from --phase pack)")
     parser.add_argument("--run-id", default=None, help="export-ghcn-training run_id (--phase export)")

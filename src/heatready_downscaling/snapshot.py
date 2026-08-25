@@ -35,14 +35,19 @@ import hashlib
 import json
 import os
 
-SNAPSHOT_SCHEMA_VERSION = 1
+# Bumped to 2 (2026-08-25) for the coast_dist_km column. A consumer reading a
+# v1 snapshot can now tell "this snapshot predates the column" from "this
+# column is genuinely null for this station", which is a real distinction --
+# score_band reports an all-null covariate as a probable NAME error, advice
+# that would be wrong for a pre-v2 snapshot (code-review finding, PR #29).
+SNAPSHOT_SCHEMA_VERSION = 2
 
 _BANDS = ("era5", "lag_fill") + tuple(f"forecast_lead{n}" for n in range(1, 8))
 
 
 def _pa_schema():
-    """Lazy-built pyarrow schema -- matches plan section 6.1's column list
-    exactly. A function, not a module-level constant, so importing this
+    """Lazy-built pyarrow schema -- plan section 6.1's column list, plus
+    coast_dist_km (added 2026-08-25, SNAPSHOT_SCHEMA_VERSION 2). A function, not a module-level constant, so importing this
     module never requires pyarrow unless a caller actually reads/writes a
     partition."""
     import pyarrow as pa
