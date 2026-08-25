@@ -149,23 +149,31 @@ def cross_check(manifest: dict, claimed_report: dict, submission_dir: str, pr_au
                 f"manifest author.github {github!r} doesn't match the PR's actual author {pr_author!r}"
             )
 
-    # Rung B (published parameters) is schema-valid but not yet scoreable:
-    # score.score_band has no input for a CONTRIBUTOR-proposed
-    # bias_correction/blend-kernel triple -- extra_zone_gate/bias_correction
-    # are today only ever supplied by the SERVING side (predict_downscaled's
-    # own already-published gate), not something a submission can hand in
-    # for scoring. Restricting intake to Rung A now (rather than accepting
-    # Rung B submissions the referee can't actually score correctly) is a
-    # deliberate, documented v1 scope decision -- design-consult finding,
-    # 2026-07-28 -- not an oversight; extending score_band to accept a
-    # candidate correction is real, not-yet-scoped future work.
-    if manifest["rung"] != "A":
+    # Rung C (new model code) stays closed by design -- GOVERNANCE.md's own
+    # unresolved-security-question gate (how untrusted model code would
+    # execute safely), not a scoring limitation this referee can lift on
+    # its own. Rung B (published parameters) opened 2026-08-25:
+    # score.score_band's proposed_correction extension can now score a
+    # CONTRIBUTOR-declared bias_correction_c/scale+offset value -- see
+    # docs/plan-2026-08-25-crowdsourced-model-improvement-p0.md.
+    if manifest["rung"] == "C":
         violations.append(
-            f"rung {manifest['rung']!r} is not yet open -- only Rung A (evaluation coverage) is "
-            "scoreable by the automated referee today; Rung B needs score_band extended to accept "
-            "a contributor-proposed correction first (see CONTRIBUTING.md)"
+            "rung 'C' (new model code) is not yet open -- see GOVERNANCE.md's unresolved "
+            "security question about executing untrusted model code"
+        )
+    elif manifest["rung"] == "B" and manifest["method"]["kind"] != "parameters":
+        violations.append(
+            f"rung 'B' requires method.kind == 'parameters', got {manifest['method']['kind']!r}"
         )
 
+    # 2026-08-25: submission.MANIFEST_SCHEMA now also enforces maxItems: 1
+    # on claims (Codex adversarial review finding, PR #24 round 2) -- in
+    # the real pipeline, load_submission's own validate_manifest call
+    # already rejects a multi-claim manifest before cross_check ever runs,
+    # making this check unreachable there. Kept here anyway: cross_check
+    # is called directly (bypassing schema validation) by its own test
+    # suite, and this is still the more specific, contributor-readable
+    # message if that ever changes.
     if len(manifest["claims"]) != 1:
         violations.append(
             f"exactly one claims[] entry is supported in v1, found {len(manifest['claims'])} -- "
@@ -312,12 +320,20 @@ def fidelity_rows_for_band(band_rows: list[dict], era5_rows: list[dict]) -> list
     return out
 
 
-def reproduce(snapshot_dir: str, model_version: str, band_key: str, snapshot_version: str) -> dict:
+def reproduce(
+    snapshot_dir: str, model_version: str, band_key: str, snapshot_version: str,
+    candidate: dict | None = None,
+) -> dict:
     """Independently reproduce a full report for (model_version, band_key)
     against the downloaded public snapshot. Scores BOTH targets across
     EVERY zone the band's data covers -- not just the manifest's claimed
     zones, since it costs nothing extra and gives the contributor free
-    feedback on adjacent zones (design-consult recommendation)."""
+    feedback on adjacent zones (design-consult recommendation).
+
+    candidate (2026-08-25, Rung B): the manifest's own `method.candidate`
+    block ({target: {zone: {...}}}), forwarded to score.score_band as
+    `proposed_correction` per target -- None (the default, every Rung A
+    call) means no candidate to score, exactly today's behavior unchanged."""
     band_rows = snapshot.read_band_partitions(snapshot_dir, band_key)
     if not band_rows:
         raise SystemExit(f"snapshot has no rows for band={band_key!r}")
@@ -330,7 +346,10 @@ def reproduce(snapshot_dir: str, model_version: str, band_key: str, snapshot_ver
         fidelity_check = score.fidelity_report(fidelity_rows_for_band(band_rows, era5_rows))
 
     by_target = {
-        target: score.score_band(adapter, band_rows, target, fold_salt=snapshot_version)
+        target: score.score_band(
+            adapter, band_rows, target, fold_salt=snapshot_version,
+            proposed_correction=(candidate or {}).get(target),
+        )
         for target in ("tmax", "tmin")
     }
 
@@ -459,7 +478,10 @@ def main() -> None:
 
     if not hard_rejects:
         claim = manifest["claims"][0]
-        reproduced_report = reproduce(snapshot_dir, claim["model_version"], claim["band_key"], manifest["snapshot"]["version"])
+        reproduced_report = reproduce(
+            snapshot_dir, claim["model_version"], claim["band_key"], manifest["snapshot"]["version"],
+            candidate=manifest.get("method", {}).get("candidate"),
+        )
         tolerance_result = report.compare_reports(claimed_report_data, reproduced_report, manifest["tolerance"])
         coverage = coverage_violations(manifest, reproduced_report)
 

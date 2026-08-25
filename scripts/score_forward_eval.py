@@ -83,7 +83,20 @@ def load_active_candidates(ledger_dir: str, submissions_root: str = "submissions
     latest reproduced=true submission covering each cell. Later
     submissions (by ts) supersede earlier ones for the same cell, matching
     "a new claim replaces an old one until it's scored," not any kind of
-    permanent lock-in."""
+    permanent lock-in.
+
+    proposed_correction_entry (2026-08-25, Rung B -- Codex adversarial
+    review finding on the original design: this monthly official cycle is
+    what actually decides promotion, and had NO path to the contributor's
+    declared value at all before this fix): a Rung B submission's own
+    manifest.yaml carries method.candidate ({target: {zone: {...}}}), the
+    same shape score.score_band's proposed_correction takes per target --
+    read back out here (this is the ONLY place the full manifest, as
+    opposed to the flattened submissions.jsonl ledger line, is available)
+    so every monthly re-score uses the SAME fixed, contributor-declared
+    value every cycle, never re-fit from that cycle's own data. None for
+    a Rung A candidate (no candidate block at all) -- score_cell then
+    scores the mechanically-derived correction exactly as it always has."""
     with open(os.path.join(ledger_dir, "submissions.jsonl")) as f:
         submission_lines = ledger.parse_jsonl(f.read())
 
@@ -97,13 +110,33 @@ def load_active_candidates(ledger_dir: str, submissions_root: str = "submissions
             continue
         with open(manifest_path) as f:
             manifest = yaml.safe_load(f)
+        # Code-review finding, PR #24: this reads a manifest straight off
+        # disk with no re-validation. A merged submission predates this
+        # schema, or was hand-edited post-merge, could otherwise crash
+        # score_band (a candidate zone entry with neither/both shapes) or
+        # this function itself (a non-dict zone value) -- which would abort
+        # the ENTIRE monthly cycle for every other active cell, not just
+        # this one. Skip (log + continue), matching the existing "no
+        # manifest.yaml found" convention just above, never let one bad
+        # manifest take down the whole cron run.
+        try:
+            submission.validate_manifest(manifest)
+        except Exception:
+            logger.warning(
+                "submission %s's manifest.yaml at %s failed validate_manifest -- skipping this "
+                "candidate entirely rather than risk scoring a malformed candidate",
+                line["submission_id"], manifest_path, exc_info=True,
+            )
+            continue
         claim = manifest["claims"][0]
+        manifest_candidate = manifest.get("method", {}).get("candidate") or {}
         for target in claim["targets"]:
             for zone in claim["zones"]:
                 cell_key = (claim["model_version"], claim["band_key"], target, zone)
                 active[cell_key] = {
                     "submission_id": line["submission_id"], "author_github": line["author_github"],
                     "snapshot_version": line["snapshot_version"],
+                    "proposed_correction_entry": manifest_candidate.get(target, {}).get(zone),
                 }
     return active
 
@@ -127,10 +160,19 @@ def new_months_since_submission(current_snapshot_dir: str, submission_snapshot_d
 def score_cell(
     current_snapshot_dir: str, submission_snapshot_dir: str, model_version: str, band_key: str,
     target: str, zone: str, current_snapshot_version: str,
+    proposed_correction_entry: dict | None = None,
 ) -> dict | None:
     """Scores ONE cell against its new-data months. Returns None (skip,
     not a loss) if there's no new data yet for this band since the
-    candidate's own submission."""
+    candidate's own submission.
+
+    proposed_correction_entry (2026-08-25, Rung B): this cell's own
+    {"bias_correction_c": float} or {"scale": float, "offset": float}
+    entry from the winning submission's manifest, from
+    load_active_candidates -- forwarded to score.score_band so a Rung B
+    candidate's win/loss status is decided by ITS OWN declared value,
+    never a freshly-derived one. None (every Rung A cell, unchanged) means
+    score exactly as this function always has."""
     new_months = new_months_since_submission(current_snapshot_dir, submission_snapshot_dir, band_key)
     if not new_months:
         return None
@@ -143,13 +185,29 @@ def score_cell(
         return None
 
     adapter = contract.FrozenPredictionAdapter.from_snapshot(current_snapshot_dir, model_version, band_key)
-    by_zone = score.score_band(adapter, rows, target, fold_salt=current_snapshot_version)
+    proposed_correction = {zone: proposed_correction_entry} if proposed_correction_entry is not None else None
+    by_zone = score.score_band(
+        adapter, rows, target, fold_salt=current_snapshot_version, proposed_correction=proposed_correction,
+    )
     metrics = by_zone.get(zone)
     if metrics is None:
         return None
 
+    # Rung B: a candidate with a declared correction wins/loses on ITS
+    # OWN out-of-sample performance (proposed_correction_beats_grid_with_
+    # margin), never the mechanically-derived qrf_beats_grid_with_margin --
+    # that field reflects a value this cell's OWN forward-eval rows would
+    # produce if re-fit, which is a different question from "does the
+    # contributor's specific number keep generalizing" (the whole point
+    # of Rung B, and the gap Codex's adversarial review on the original
+    # design caught: this cycle previously had no path to the declared
+    # value at all). A Rung A cell (proposed_correction_entry is None)
+    # falls through to the original qrf_beats_grid_with_margin check,
+    # byte-for-byte unchanged.
     if metrics["gated_insufficient_n"]:
         status = "insufficient_n"
+    elif proposed_correction_entry is not None:
+        status = "win" if metrics["proposed_correction_beats_grid_with_margin"] else "loss"
     elif metrics["qrf_beats_grid_with_margin"]:
         status = "win"
     else:
@@ -168,6 +226,12 @@ def score_cell(
         "bias_correction_c": metrics["bias_correction_c"],
         "spatial_skill": metrics.get("qrf_beats_grid"), "gated_insufficient_n": metrics["gated_insufficient_n"],
         "status": status,
+        # None for every Rung A cell (proposed_correction_entry is None,
+        # score_band never computed these) -- see this function's own
+        # docstring for why status is decided from these, not
+        # qrf_beats_grid_with_margin, whenever a candidate declared a value.
+        "proposed_correction_rmse_c": metrics.get("proposed_correction_rmse_c"),
+        "proposed_correction_beats_grid_with_margin": metrics.get("proposed_correction_beats_grid_with_margin"),
     }
 
 
@@ -272,11 +336,26 @@ def main() -> None:
         if candidate["snapshot_version"] == args.current_snapshot_version:
             continue  # candidate submitted against the CURRENT snapshot -- nothing new to score yet
 
-        submission_snapshot_dir = rs.download_snapshot(candidate["snapshot_version"], args.cache_root)
-        metrics = score_cell(
-            current_snapshot_dir, submission_snapshot_dir, model_version, band_key, target, zone,
-            args.current_snapshot_version,
-        )
+        # Code-review finding, PR #24: one cell's failure (a transient
+        # download error, an unexpected data shape) must never abort the
+        # WHOLE monthly cycle for every other active candidate -- isolate
+        # per cell, log, and move on. load_active_candidates already
+        # validates each manifest before it becomes a `candidate` here, so
+        # this is defense in depth against everything ELSE that can go
+        # wrong scoring one cell, not a substitute for that check.
+        try:
+            submission_snapshot_dir = rs.download_snapshot(candidate["snapshot_version"], args.cache_root)
+            metrics = score_cell(
+                current_snapshot_dir, submission_snapshot_dir, model_version, band_key, target, zone,
+                args.current_snapshot_version,
+                proposed_correction_entry=candidate.get("proposed_correction_entry"),
+            )
+        except Exception:
+            logger.error(
+                "Failed to score cell %s (submission %s) -- skipping this cell for cycle %s, "
+                "continuing with the rest", cell_key, candidate["submission_id"], args.cycle, exc_info=True,
+            )
+            continue
         if metrics is None:
             continue
 

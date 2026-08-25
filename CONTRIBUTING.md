@@ -42,9 +42,9 @@ author:
   orcid: null                # optional; used for credit attribution if present
   affiliation: null
 track: serving-ready          # serving-ready | research
-rung: A                       # A | B | C -- only A is scoreable by the automated referee today (B needs
-                              # score_band extended to accept a contributor-proposed correction; C is
-                              # not yet open at all, see README)
+rung: A                       # A | B | C -- A and B (bias_correction/delta_scale shape only, see
+                              # "What Rung B actually asks of you" below) are scoreable by the
+                              # automated referee today; C is not yet open at all, see README
 snapshot:
   version: "v2026.07"          # the current real snapshot version -- check the latest GitHub Release
   manifest_sha256: "e0660fff6397c5e4760927fdeb6f40b4cc241562df82d5cfca2e54f2e084a204"  # v2026.07's real, current value (post --phase predict); pins the exact data, mismatch = auto-reject
@@ -60,6 +60,7 @@ method:
          "--model-version", "ds-2026.07-rf5", "--band-key", "lag_fill"]
   package_version: "0.1.0"
   code_ref: null               # rung C only, once opened
+  candidate: null               # rung B only -- see the Rung B example below
   extra_covariates: []         # research track only: {name, source, url, license, global,
                                 #   cadence, reproducible_fetch}
 claimed_report: "claimed_report.json"
@@ -137,11 +138,38 @@ numbers before writing a manifest, not just whether a cell is dark.
 
 ## What "Rung B" actually asks of you
 
-Rung B is a published parameter: a `bias_correction[target][zone]` float (station-grouped-CV
-validated, see `heatready_downscaling.score.score_band`'s own docstring for the exact
-recalibration this represents), or a blend-kernel `(L_km, R_km, tau)` triple for the
-distance-weighted nearby-station residual blend. Same scoring path as Rung A. The difference is
-what your `manifest.yaml`'s `method` block declares you ran.
+**Status (2026-08-25): open for a `bias_correction[target][zone]` float or a `delta_scale`
+`{scale, offset}` affine correction.** Declare your proposed value in `manifest.yaml`'s
+`method.candidate` (`{target: {zone: {"bias_correction_c": float}}}` or
+`{target: {zone: {"scale": float, "offset": float}}}`, `method.kind: parameters`) -- the referee
+scores that DECLARED value out-of-sample (`heatready_downscaling.score.score_band`'s
+`proposed_correction` parameter; see its own docstring for the exact scoring, and
+`score_forward_eval.py`'s docstring for how the monthly official cycle uses the same declared
+value, not a freshly re-derived one). This is deliberately a smaller bar than Rung A's own
+mechanical fit: the referee never trusts your claimed numbers, but it also never fits a value for
+you -- station-grouped CV validates whether YOUR number generalizes, not whether some other number
+would have scored better.
+
+**Not yet open**: the blend-kernel `(L_km, R_km, tau)` triple for the distance-weighted
+nearby-station residual blend (`validate_station_blend.py`'s own scoring path needs a parallel
+extension to accept a declared triple instead of only grid-searching one -- tracked separately,
+not part of the 2026-08-25 Rung B opening above).
+
+A Rung B manifest's `method` block declares its candidate alongside the other Rung A fields:
+
+```yaml
+rung: B
+method:
+  kind: parameters
+  entrypoint: "scripts/validate_lagfill_downscaling.py"   # what you ran locally to arrive at this value -- provenance only, not executed
+  args: []
+  package_version: "0.1.0"
+  candidate:
+    tmax:
+      Cfb: {bias_correction_c: 0.8}
+    tmin:
+      Cfb: {scale: 0.92, offset: 0.1}
+```
 
 ## Research track
 

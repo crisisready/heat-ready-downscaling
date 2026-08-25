@@ -12,6 +12,7 @@ already documents the intended manifest.yaml shape; this module is that
 documentation made enforceable. See PROVENANCE.md.
 """
 
+from heatready_downscaling import score as _score
 from heatready_downscaling import snapshot as _snapshot
 
 MANIFEST_SCHEMA_VERSION = 1
@@ -30,6 +31,30 @@ _TOLERANCE_MAXIMA = {
     "rmse_qrf_c": 0.02,
     "rmse_grid_c": 0.02,
     "rmse_debiased_cv_c": 0.02,
+    # 2026-08-25, Rung B: same treatment as the mechanically-derived metrics
+    # above -- without a listed ceiling, a Rung B manifest's tolerance block
+    # could set e.g. proposed_correction_rmse_c: 999 and always "reproduce."
+    "proposed_correction_rmse_c": 0.02,
+    "proposed_correction_bias_c": 0.05,
+    "proposed_correction_margin_pct": 0.01,
+    "proposed_vs_best_fit_gap_c": 0.05,
+}
+
+# One zone's declared Rung B value -- exactly one of the two shapes, never
+# both. Built FROM score.PROPOSED_CORRECTION_BIAS_KEYS/AFFINE_KEYS
+# (code-review finding, PR #24) rather than re-listing the key names here
+# independently -- score_band's own runtime dispatch and this schema are
+# now guaranteed to agree on what the two valid shapes are, so a future
+# third shape can't add itself to one without the other noticing.
+_CANDIDATE_ZONE_SCHEMA: dict = {
+    "type": "object",
+    "oneOf": [
+        {
+            "type": "object", "required": list(keys), "additionalProperties": False,
+            "properties": {k: {"type": "number"} for k in keys},
+        }
+        for keys in (_score.PROPOSED_CORRECTION_BIAS_KEYS, _score.PROPOSED_CORRECTION_AFFINE_KEYS)
+    ],
 }
 
 MANIFEST_SCHEMA: dict = {
@@ -70,7 +95,21 @@ MANIFEST_SCHEMA: dict = {
             },
         },
         "claims": {
-            "type": "array", "minItems": 1,
+            # maxItems: 1 (Codex adversarial review finding, PR #24 round 2):
+            # "exactly one claims[] entry per submission" was already a
+            # stated v1 restriction (run_submission.py's own module
+            # docstring), but was previously enforced only by
+            # run_submission.py's cross_check, a SEPARATE runtime check --
+            # not by this schema. That meant validate_manifest (and
+            # anything built on it, like this schema's own rung-B coverage
+            # check just below, and score_forward_eval.py's
+            # load_active_candidates) could see a multi-claim manifest as
+            # "structurally valid" while only ever reading claims[0] --
+            # a second claim's cells would silently never be coverage-
+            # checked or scored. Making it a schema-level invariant means
+            # every caller of validate_manifest gets the same guarantee,
+            # not just the one script that happened to add its own check.
+            "type": "array", "minItems": 1, "maxItems": 1,
             "items": {
                 "type": "object",
                 "required": ["model_version", "band_key", "targets", "zones"],
@@ -117,6 +156,32 @@ MANIFEST_SCHEMA: dict = {
                         },
                     },
                 },
+                # 2026-08-25, Rung B scoring extension (docs/plan-2026-08-25-
+                # crowdsourced-model-improvement-p0.md): the actual DECLARED
+                # value a Rung B submission proposes -- same shape
+                # score.score_band's own proposed_correction param takes per
+                # target, one level up (keyed by target here since a single
+                # manifest's claims[0].targets can list both). Required when
+                # rung=="B", disallowed otherwise (checked in validate_manifest
+                # below, not in this schema -- same "cross-field checks live in
+                # Python" convention _TOLERANCE_MAXIMA's own ceiling check
+                # already uses here, not a jsonschema if/then).
+                "candidate": {
+                    "type": "object",
+                    # additionalProperties: False (code-review finding, PR #24) --
+                    # without this, a mistyped target key (e.g. "Tmax") passes
+                    # schema validation silently and is simply never read by
+                    # reproduce()'s per-target .get(target) lookup, so the
+                    # contributor's declared correction goes unscored with no
+                    # error surfaced anywhere. validate_manifest below adds a
+                    # SECOND, stronger check: not just "no unknown keys" but
+                    # "every claimed (target, zone) actually has an entry."
+                    "additionalProperties": False,
+                    "properties": {
+                        target_key: {"type": "object", "additionalProperties": _CANDIDATE_ZONE_SCHEMA}
+                        for target_key in ("tmax", "tmin")
+                    },
+                },
             },
         },
         "claimed_report": {"type": "string", "minLength": 1},
@@ -141,10 +206,45 @@ def validate_manifest(manifest: dict) -> None:
     """Raises jsonschema.ValidationError on a structurally invalid
     manifest, or ValueError if a `tolerance` value exceeds its documented
     ceiling (a check jsonschema's own vocabulary can't express per-key
-    against a table like _TOLERANCE_MAXIMA)."""
+    against a table like _TOLERANCE_MAXIMA), or if `method.candidate`'s
+    presence doesn't match `rung` (required for Rung B, disallowed
+    otherwise -- see MANIFEST_SCHEMA's own comment on `candidate`)."""
     import jsonschema
 
     jsonschema.validate(manifest, MANIFEST_SCHEMA)
+
+    rung = manifest.get("rung")
+    candidate = manifest.get("method", {}).get("candidate")
+    if rung == "B" and not candidate:
+        raise ValueError(
+            "rung 'B' requires a non-empty method.candidate (the actual bias_correction_c/"
+            "scale+offset value(s) being proposed) -- a Rung B submission with no declared "
+            "value has nothing for the referee to score",
+        )
+    if rung != "B" and candidate:
+        raise ValueError(
+            f"method.candidate is only meaningful for rung 'B', got rung {rung!r} -- "
+            "a Rung A submission (evaluation coverage only) proposes no correction of its own",
+        )
+    if rung == "B":
+        # Coverage check (Codex adversarial review finding, PR #24): every
+        # (target, zone) this manifest CLAIMS must have its own candidate
+        # entry -- not just "candidate is non-empty." Without this, a
+        # submission could declare a value for one claimed cell and leave
+        # others uncovered; score_forward_eval.py treats an uncovered cell's
+        # proposed_correction_entry as None, silently falling back to a
+        # Rung-A-style mechanical fit -- letting a contributor win/get
+        # credit on a cell they never actually proposed a value for.
+        claim = manifest["claims"][0]
+        missing_cells = [
+            (target, zone) for target in claim["targets"] for zone in claim["zones"]
+            if zone not in (candidate.get(target) or {})
+        ]
+        if missing_cells:
+            raise ValueError(
+                f"method.candidate is missing an entry for claimed cell(s) {missing_cells!r} -- "
+                "a Rung B submission must declare a value for EVERY (target, zone) it claims",
+            )
 
     tolerance = manifest.get("tolerance", {})
     too_loose = {

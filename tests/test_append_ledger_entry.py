@@ -2,11 +2,20 @@
 build_submission_line + append_line. The full main() (re-running the
 referee against a real snapshot download) is not exercised here, same as
 run_submission.py's own network-touching functions -- this script was
-hand-verified separately."""
+hand-verified separately.
+
+TestMainCandidateWiring (2026-08-25) is the one exception: it DOES drive
+main() end to end, with the network/heavy pieces (download_snapshot,
+verify_snapshot, reproduce) mocked out -- added specifically to cover the
+single most important fix in PR #24 (round-2 code review's own explicit
+observation: this wiring "has no direct unit test... a future regression
+there wouldn't be caught")."""
 
 import json
 import os
 import sys
+
+import yaml
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
@@ -90,3 +99,80 @@ class TestAppendLine:
         with pytest.raises(Exception):
             ale.append_line(str(tmp_path), "submissions", bad_line)
         assert not (tmp_path / "submissions.jsonl").exists()
+
+
+class TestMainCandidateWiring:
+    """main()'s reproduce() call must forward the manifest's own
+    method.candidate, exactly like run_submission.py's PR-time call --
+    the fix for the most severe finding on PR #24 (Codex adversarial
+    review): without it, "reproduced": true could be written to the
+    ledger having never actually verified a Rung B submission's declared
+    correction. download_snapshot/verify_snapshot/reproduce are mocked --
+    this is about the WIRING (what main() passes to reproduce), not
+    re-testing reproduce()'s own scoring logic (covered in
+    test_run_submission.py)."""
+
+    def _write_full_submission(self, tmp_path, candidate):
+        sub_dir = tmp_path / "submissions" / "2026-08" / "001-alice-lagfill-cfb"
+        sub_dir.mkdir(parents=True)
+        manifest = {
+            "schema_version": 1, "submission_id": "2026-08-001",
+            "author": {"github": "alice", "name": None, "orcid": None, "affiliation": None},
+            "track": "serving-ready", "rung": "B" if candidate is not None else "A",
+            "snapshot": {"version": "v2026.08", "manifest_sha256": "a" * 64},
+            "claims": [{"model_version": "ds-test", "band_key": "lag_fill", "targets": ["tmax"], "zones": ["Cfb"]}],
+            "method": {
+                "kind": "parameters" if candidate is not None else "rerun-validator",
+                "entrypoint": "scripts/run_submission.py", "args": [], "package_version": "0.1.0",
+                "code_ref": None, "extra_covariates": [],
+                **({"candidate": candidate} if candidate is not None else {}),
+            },
+            "claimed_report": "claimed_report.json",
+            "tolerance": {"rmse_qrf_c": 0.005},
+        }
+        (sub_dir / "manifest.yaml").write_text(yaml.dump(manifest))
+        (sub_dir / "claimed_report.json").write_text(json.dumps({
+            "report_schema_version": 1, "model_version": "ds-test", "band_key": "lag_fill",
+            "snapshot_version": "v2026.08", "sample_requested": 0, "rows_sampled": 10, "rows_paired": 10,
+            "fidelity_check": {"n": 0}, "by_target": {"tmax": {}, "tmin": {}},
+        }))
+        return sub_dir
+
+    def _run_main_capturing_reproduce_kwargs(self, tmp_path, sub_dir, monkeypatch):
+        captured = {}
+
+        def fake_reproduce(snapshot_dir, model_version, band_key, snapshot_version, candidate=None):
+            captured["candidate"] = candidate
+            return {
+                "report_schema_version": 1, "model_version": model_version, "band_key": band_key,
+                "snapshot_version": snapshot_version, "sample_requested": 0, "rows_sampled": 10,
+                "rows_paired": 10, "fidelity_check": {"n": 0}, "by_target": {"tmax": {}, "tmin": {}},
+            }
+
+        ledger_dir = tmp_path / "ledger"
+        ledger_dir.mkdir()
+        monkeypatch.setattr(ale.rs, "download_snapshot", lambda version, cache_root=None: str(tmp_path / "cache"))
+        monkeypatch.setattr(ale.rs, "verify_snapshot", lambda snapshot_dir, sha: [])
+        monkeypatch.setattr(ale.rs, "reproduce", fake_reproduce)
+        monkeypatch.setattr(ale.rs, "_package_version", lambda: "0.1.0")
+        monkeypatch.setattr(sys, "argv", [
+            "append_ledger_entry.py", "--submission-dir", str(sub_dir),
+            "--repo", "crisisready/heat-ready-downscaling", "--pr-number", "24", "--pr-author", "alice",
+            "--ledger-dir", str(ledger_dir),
+        ])
+        ale.main()
+        return captured
+
+    def test_reproduce_called_with_manifest_candidate(self, tmp_path, monkeypatch):
+        candidate = {"tmax": {"Cfb": {"bias_correction_c": 0.8}}}
+        sub_dir = self._write_full_submission(tmp_path, candidate)
+        captured = self._run_main_capturing_reproduce_kwargs(tmp_path, sub_dir, monkeypatch)
+        assert captured["candidate"] == candidate
+
+    def test_reproduce_called_with_none_for_rung_a(self, tmp_path, monkeypatch):
+        """A Rung A submission has no method.candidate at all -- must
+        pass None through, not KeyError or an empty dict standing in for
+        "no candidate.\""""
+        sub_dir = self._write_full_submission(tmp_path, candidate=None)
+        captured = self._run_main_capturing_reproduce_kwargs(tmp_path, sub_dir, monkeypatch)
+        assert captured["candidate"] is None

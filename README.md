@@ -32,9 +32,10 @@ above -- the `lag_fill` band's base data source doesn't match what the model was
 so its learned correction overshoots. Fixed via `delta_scale`, a maintainer-side generalization of
 `bias_correction` to a per-zone affine (scale + offset) correction (not a Rung A/B/C contribution
 itself -- a change to the scoring library's own correction vocabulary). `Cfb` now clears the gate
-with real margin on both targets. This is the mechanism a future Rung B submission would use to
-propose the same kind of correction externally, once `score_band` is extended to accept a
-contributor-proposed one (see the Contribution ladder below) -- today it's still maintainer-only.
+with real margin on both targets. This is the same mechanism a Rung B submission can now use to
+propose this kind of correction externally (see the Contribution ladder below and
+`CONTRIBUTING.md`) -- this specific `Cfb` fix itself was maintainer-side, but the vocabulary it
+introduced is exactly what Rung B scores today.
 
 The model drifts heterogeneously. There is no single global summer, and every region continuously
 accrues new ground-truth observations (GHCN-Daily, free and public) that could re-validate a dark
@@ -58,7 +59,7 @@ Two properties make this cheap rather than risky:
 | Rung | What | Status |
 |---|---|---|
 | **A** | Evaluation coverage: run the validator on a dark cell using the published snapshot | open, scoreable by the automated referee today |
-| **B** | Published parameters: bias constants, blend-kernel `L_km`/`R_km`/`tau` | designed, not yet scoreable (`score_band` needs extending to accept a contributor-proposed correction; see `CONTRIBUTING.md`) |
+| **B** | Published parameters: a `bias_correction`/`delta_scale` value | open as of 2026-08-25 for the bias/affine shape (see `CONTRIBUTING.md`); the blend-kernel `L_km`/`R_km`/`tau` triple is not yet wired |
 | **C** | New model code | deferred; see `docs/rung-c.md` (not yet published) |
 
 **v1 executes only this repository's own code.** A submission declares what to run (an entrypoint
