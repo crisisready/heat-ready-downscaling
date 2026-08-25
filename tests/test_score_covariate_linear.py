@@ -770,3 +770,43 @@ def test_a_snapshot_predating_the_coast_column_reports_it_absent_not_zero():
 
     assert block["n_scored"] == 0
     assert block["covariates_absent_from_every_row"] == ["coast_dist_km"]
+
+
+def test_the_tests_workflow_installs_every_declared_extra():
+    """Guard for the CI failure this repo's Tests workflow hit on main: it
+    installed .[snapshot,dev] on my claim that conftest.py ignored everything
+    needing [train]. It does not, and 11 tests failed with
+    ModuleNotFoundError.
+
+    The invariant checked here is deliberately simpler than the first attempt,
+    which scanned every collected test module's raw text for the words
+    "lightgbm"/"pykrige"/"pyarrow". That version matched ITSELF -- those words
+    appear in its own docstring and its own lookup table -- so it would have
+    failed while naming the wrong file as the culprit (code-review finding, PR
+    #30). Following imports properly is no better: test_sweep_gbm.py does not
+    import lightgbm directly, it imports scripts/sweep_gbm.py which does, so
+    any static scan of the test modules alone misses the real case.
+
+    So: CI must install EVERY extra declared in pyproject.toml. That has no
+    false positives, needs no static analysis, and encodes the actual rule --
+    a test suite CI cannot fully run is not a test suite CI is checking.
+    """
+    import pathlib
+    import re
+    import tomllib
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    with open(root / "pyproject.toml", "rb") as fh:
+        declared = set(tomllib.load(fh)["project"]["optional-dependencies"])
+
+    workflow = (root / ".github" / "workflows" / "tests.yml").read_text()
+    match = re.search(r"pip install -e '\.\[([^\]]+)\]'", workflow)
+    assert match, "could not find the Tests workflow's pip install line"
+    installed = {e.strip() for e in match.group(1).split(",")}
+
+    missing = sorted(declared - installed)
+    assert missing == [], (
+        f"pyproject declares extras the Tests workflow does not install: {missing}. "
+        "Every extra must be installed in CI, or some of the suite silently does not run "
+        "there -- which is how 11 tests failed on main."
+    )

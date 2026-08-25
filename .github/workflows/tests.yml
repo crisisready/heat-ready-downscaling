@@ -43,13 +43,19 @@ jobs:
         with:
           python-version: "3.11"
 
-      # [snapshot] for pyarrow (snapshot.py's partition read/write, which
-      # test_snapshot.py and the allowlist/schema drift test both need) and
-      # [dev] for pytest itself. [train] is deliberately omitted: lightgbm and
-      # pykrige are training-only, and conftest.py already ignores the four
-      # test modules that need the private repo's own environment.
+      # ALL extras, and why [train] is here is worth stating: the first
+      # version of this workflow omitted it, claiming lightgbm and pykrige
+      # were covered by conftest.py's collect_ignore. They are not. conftest
+      # ignores the four modules needing the PRIVATE repo's environment;
+      # test_sweep_gbm (lightgbm) and test_train_downscaling (pykrige) are
+      # collected and run, and failed 11 tests on main. The first version
+      # passed locally only because a developer venv happens to have both
+      # installed -- the same local-environment masking that has bitten this
+      # work before. tests/test_score_covariate_linear.py now checks the
+      # collected modules' real imports against this line, so the claim is
+      # verified rather than asserted.
       - name: Install
-        run: pip install -e '.[snapshot,dev]'
+        run: pip install -e '.[snapshot,dev,train]'
 
       - name: pytest
         run: pytest -q
