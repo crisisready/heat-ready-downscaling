@@ -322,26 +322,39 @@ def _covariate_linear_effect(entry: dict, covariates: dict, n: int):
 
     for term, bounds in zip(entry["terms"], valid_range):
         raw = covariates.get(term["covariate"])
-        if raw is None or all(v is None for v in raw):
-            # The covariate resolves on NO row. Almost always a name error
-            # rather than genuine data sparsity, so it is logged loudly and
-            # reported as its own flag: the fail-closed path alone made this
-            # indistinguishable from an empty cell, which is how the PR #27
-            # allowlist defect stayed invisible.
+        # One path for every way a covariate can fail to resolve. An earlier
+        # version special-cased `None` values and missed two neighbours of the
+        # same bug (both code-review findings, PR #28): all() is vacuously True
+        # on an empty list, so an empty scoring subset was misreported as a
+        # name error; and a column of genuine float NaN never hit the
+        # `v is None` check at all, so it excluded every row while leaving the
+        # diagnostic empty -- the exact silence this flag exists to remove.
+        # Deriving `term_missing` once, then asking whether it covers
+        # everything, makes all three cases fall out of the same expression
+        # instead of needing a special case each.
+        if raw is None:
+            values = None
+            term_missing = np.ones(n, dtype=bool)
+        else:
+            values = np.array([np.nan if v is None else float(v) for v in raw], dtype=float)
+            term_missing = np.isnan(values)
+
+        # `n > 0` matters: with no rows at all there is nothing to diagnose,
+        # and claiming a name error would be a confidently wrong signal.
+        if n > 0 and term_missing.all():
             logger.warning(
                 "covariate %r resolved on 0 of %d rows -- check the name against "
                 "snapshot._pa_schema()'s columns; the correction will not be scored",
                 term["covariate"], n,
             )
             absent_covariates.append(term["covariate"])
-            missing[:] = True
-            continue
-        values = np.array([np.nan if v is None else float(v) for v in raw])
-        missing |= np.isnan(values)
-        if bounds is not None:
-            lo, hi = bounds
-            out_of_range |= (~np.isnan(values)) & ((values < lo) | (values > hi))
-        effect = effect + float(term["slope"]) * np.nan_to_num(values, nan=0.0)
+
+        missing |= term_missing
+        if values is not None:
+            if bounds is not None:
+                lo, hi = bounds
+                out_of_range |= (~term_missing) & ((values < lo) | (values > hi))
+            effect = effect + float(term["slope"]) * np.nan_to_num(values, nan=0.0)
 
     scoreable &= ~missing & ~out_of_range
     return effect, scoreable, missing, out_of_range, absent_covariates

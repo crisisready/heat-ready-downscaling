@@ -692,3 +692,42 @@ def test_a_partially_present_covariate_is_not_reported_as_absent():
 
     assert block["n_covariate_missing"] == 30
     assert block["covariates_absent_from_every_row"] == []
+
+
+def test_an_empty_scoring_subset_is_not_misdiagnosed_as_a_missing_covariate():
+    """code-review finding, PR #28: all() is vacuously True on an empty list,
+    so a model_delta proposal in a zone where the adapter applied to zero rows
+    would report covariates_absent_from_every_row and tell the reader to check
+    the snapshot schema -- a confidently wrong diagnosis. The flag exists to
+    replace silence with signal, and a wrong signal is its own failure."""
+    rows, deltas = _rows(n=60)
+    block = _score(rows, deltas, _entry(basis="model_delta"),
+                   applied_idx=set())["proposed_correction_by_stratum"]["all"]
+
+    assert block["n_scored"] == 0, "sanity: the model applied to nothing"
+    assert block["covariates_absent_from_every_row"] == [], (
+        "the covariate is present on every source row -- the empty subset is "
+        "the model's doing, not a name error"
+    )
+
+
+def test_an_all_nan_covariate_is_reported_as_absent():
+    """code-review finding, PR #28: a column of genuine float NaN never hit
+    the `v is None` check, so it excluded every row while leaving the
+    diagnostic empty -- the same silence the flag exists to remove, reached by
+    a different route than a name error."""
+    cov = [float("nan")] * 60
+    rows, deltas = _rows(cov_values=cov)
+    block = _score(rows, deltas, _entry(), applied_idx=set())["proposed_correction_by_stratum"]["all"]
+
+    assert block["n_scored"] == 0
+    assert block["covariates_absent_from_every_row"] == ["lst_warm_season_anomaly_c"]
+
+
+def test_a_partially_nan_covariate_is_not_reported_as_absent():
+    cov = [float("nan") if i % 2 else (i % 30) for i in range(60)]
+    rows, deltas = _rows(cov_values=cov)
+    block = _score(rows, deltas, _entry(), applied_idx=set())["proposed_correction_by_stratum"]["all"]
+
+    assert block["n_covariate_missing"] == 30
+    assert block["covariates_absent_from_every_row"] == []
