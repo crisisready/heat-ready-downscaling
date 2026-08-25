@@ -141,17 +141,77 @@ what the referee executes. Rung D admits *data*, and contributed code still neve
 `GOVERNANCE.md`'s "no contributor Python executes anywhere" stands untouched, and a Rung D
 dossier is a declaration plus a QC report, not a program.
 
-## Two decisions that are Nishant's, not mine
+## Both open decisions, as decided by Nishant (2026-08-25)
 
-1. **Is `no-redistribution` data admissible at all for a cell that appears on the public
-   leaderboard?** My recommendation is yes, with the label above, because the alternative
-   excludes most municipal partners — and a labelled weaker guarantee is more useful than a
-   missing city. But it is a genuine trust-model choice about what the leaderboard means, and
-   the conservative answer (private cells only, never on the public board) is defensible.
-2. **Consumer-network sources** (Netatmo-class). The approved roadmap says admissible only
-   with a validated bias treatment, and that the default expectation given the record is
-   rejection. Worth confirming that stands rather than inheriting it silently, since it is the
-   difference between "a few municipal partners" and "a very large amount of noisy data".
+**1. `no-redistribution` data is admissible on the public leaderboard, with the visible label.**
+My recommendation, adopted.
+
+**2. The program is OPEN to consumer networks (Netatmo-class).** This overrides the approved
+roadmap's standing default-rejection, and it was chosen against the conservative option and
+against my own framing, so it is recorded here as his explicit call rather than as an inherited
+default. The rest of this section is what that decision requires, because admitting
+consumer data unconditioned would be the one reading of it that does not work.
+
+## Consumer networks: the bar that makes an open door safe
+
+Consumer weather stations fail in ways institutional ones do not, and the failures are
+systematic rather than random: sun-exposed siting reads warm by day, balcony and indoor siting
+suppresses the diurnal range, and proximity to walls, vents and vehicles adds a persistent
+night-time warm bias. Unscreened, a dense consumer network does not add noise around the truth,
+it moves the estimate.
+
+**Our own record already contains the sharpest version of this problem, and it is not about
+consumer data at all.** Valencia's correction was fitted on 9 tight-cluster stations. Widening
+to 31 real, high-quality regional stations made every candidate correction *worse* — whole-year
+tmin reduction fell from 19.4% to 3.5–4.2%, and the bootstrap CI stopped excluding zero for
+both targets. More good data, correctly measured, degraded the result, because it diluted a
+local signal with a different microclimate. A city contributing 5,000 consumer sensors against
+9 reference stations is that dilution by three orders of magnitude, before any siting bias is
+considered.
+
+So five conditions, each traceable to something already measured rather than to caution:
+
+1. **Source class is declared, not inferred.** A dossier states `source_class:
+   institutional | consumer`. The QC bar, the weighting, and the labelling all differ, and
+   guessing from the endpoint would be exactly the kind of silent inference this program keeps
+   getting burned by.
+
+2. **A siting screen, not just a plausibility screen.** Physical-plausibility bounds catch a
+   sensor reading −40 °C in July; they do not catch a sensor in direct sun. The screens that do,
+   all computable without site metadata: daytime warm bias against the local cohort, suppressed
+   diurnal range against the cohort, persistent night-time warm offset, and correlation breakdown
+   with cohort neighbours. This generalises the check that already earned its keep — S-DoT's
+   black-globe-below-ambient test flagged 20 real badly-sited sensors out of 1,044.
+
+3. **Cohort screening needs density, so density is a precondition.** Every screen above is
+   relative to neighbours. A sparse consumer feed cannot be screened this way and is therefore
+   not admissible as a consumer source — which is a genuine gate, not a formality: the thin
+   feeds are exactly the ones whose bias cannot be characterised.
+
+4. **The bias treatment must be validated against INDEPENDENT reference data.** This is the
+   methodological crux, and it is where a plausible design goes wrong: a correction fitted and
+   evaluated on consumer data alone will look excellent and mean nothing, because the reference
+   it is being judged against carries the same bias. Validation requires held-out
+   institutional stations — GHCN, ECA&D, an official municipal network. A city with no
+   institutional reference at all cannot have its consumer network validated, only described.
+
+5. **Weighting is explicit, and consumer data never silently outvotes reference data.** Given
+   the Valencia dilution result, a pooled fit that lets sensor count decide influence is the
+   known-bad option. Consumer contributions are spatially thinned or down-weighted, and the
+   scheme is declared in the dossier and recorded in the attestation rather than left to
+   whatever the fitting code happens to do.
+
+## One consequence worth resolving now rather than accumulating
+
+This design now carries two separate labels: one for cells resting on `no-redistribution` data,
+one for cells resting on consumer-derived evidence. Two is where a pattern should be named
+rather than extended a third time.
+
+Proposal: a single **evidence-provenance label** on every cell, recording what kind of ground
+truth its claim rests on — publicly reproducible, maintainer-attested, consumer-derived, or a
+combination — instead of a growing set of one-off badges. Same purpose as before: the
+leaderboard's value comes from its categories staying distinct, and a reader deciding whether to
+trust a number needs to know which kind it is without reading the manifest.
 
 ## Explicitly out of scope here
 
