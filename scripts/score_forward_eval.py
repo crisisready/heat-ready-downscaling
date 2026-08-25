@@ -120,7 +120,15 @@ def load_active_candidates(ledger_dir: str, submissions_root: str = "submissions
         # manifest.yaml found" convention just above, never let one bad
         # manifest take down the whole cron run.
         try:
-            submission.validate_manifest(manifest)
+            # check_licensing=False deliberately: licensing is an ADMISSION
+            # rule, already enforced on the submission's own PR, and this
+            # call sits inside `except Exception: continue`. Re-checking it
+            # here would mean a later allowlist tightening, or a manifest
+            # merged before the gate existed, silently drops an
+            # already-admitted candidate from the cycle with only a log line
+            # (code-review finding, PR #31). See validate_manifest's own
+            # comment for the full reasoning.
+            submission.validate_manifest(manifest, check_licensing=False)
         except Exception:
             logger.warning(
                 "submission %s's manifest.yaml at %s failed validate_manifest -- skipping this "

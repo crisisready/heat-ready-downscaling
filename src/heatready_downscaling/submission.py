@@ -316,7 +316,7 @@ MANIFEST_SCHEMA: dict = {
 }
 
 
-def validate_manifest(manifest: dict) -> None:
+def validate_manifest(manifest: dict, *, check_licensing: bool = True) -> None:
     """Raises jsonschema.ValidationError on a structurally invalid
     manifest, or ValueError if a `tolerance` value exceeds its documented
     ceiling (a check jsonschema's own vocabulary can't express per-key
@@ -389,14 +389,26 @@ def validate_manifest(manifest: dict) -> None:
         )
 
     # Licensing, for every data input beyond the published snapshot. Raises
-    # licensing.LicensingError (a ValueError) on a violation. Called HERE
-    # rather than only from a workflow because CONTRIBUTING.md's promise was
-    # never implemented anywhere, and because score_forward_eval.py's monthly
-    # re-scoring reads merged manifests off disk without re-running
-    # jsonschema -- a rule enforced only at merge time would not hold for the
-    # official cycle. The entries needing human review are returned rather
-    # than raised; run_submission.py surfaces them in the referee comment.
-    _licensing.check_manifest_licensing(manifest)
+    # licensing.LicensingError (a ValueError) on a violation.
+    #
+    # check_licensing=False exists for ONE caller, score_forward_eval.py, and
+    # the reason is a code-review finding on PR #31 that corrected my own
+    # original justification for putting this here at all. I argued the check
+    # had to run in validate_manifest because the monthly cycle reads merged
+    # manifests off disk without re-running jsonschema, so a merge-time-only
+    # rule would not bind the official cycle. That over-reached. Licensing is
+    # an ADMISSION decision: it belongs at the door, where the referee can
+    # turn a violation into a readable rejection on the contributor's own PR.
+    # Re-litigating it at scoring time is actively harmful, because
+    # score_forward_eval wraps this call in `except Exception: continue` (by
+    # design -- one bad manifest must not take down a cron run for every
+    # other cell). So tightening SPDX_ALLOWLIST later, or a manifest merged
+    # under the old nonexistent gate, would SILENTLY drop an already-admitted
+    # candidate from the monthly cycle with nothing but a log warning: the
+    # cell loses its active candidate and nobody is rejected or notified.
+    # Admission stays strict; scoring does not re-open it.
+    if check_licensing:
+        _licensing.check_manifest_licensing(manifest)
 
 
 def parse_submission_id(submission_id: str) -> tuple[str, int]:

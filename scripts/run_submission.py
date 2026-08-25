@@ -470,11 +470,25 @@ def render_comment(
     # with a named licensor, and no-redistribution data a local model may
     # legitimately train on, are both admissible with a maintainer's call.
     # They just cannot pass silently.
+    # Fails LOUD, not open (code-review finding, PR #31). The first version
+    # swallowed every exception into flagged=[], which silently erased the one
+    # contributor-visible surface for the manual-review flag -- and that flag
+    # is the entire "routes to a human" mechanism. An unexpected error here
+    # now says so in the comment rather than looking like "nothing to flag".
+    licensing_error = None
+    flagged: list[str] = []
     try:
         from heatready_downscaling import licensing
-        flagged = licensing.check_manifest_licensing(manifest)
-    except Exception:
-        flagged = []
+        _violations, flagged = licensing.audit_manifest_licensing(manifest)
+        flagged = list(flagged) + [f"VIOLATION: {v}" for v in _violations]
+    except Exception as exc:  # noqa: BLE001
+        licensing_error = f"{type(exc).__name__}: {exc}"
+    if licensing_error:
+        lines.append(
+            "**Licensing could not be evaluated** -- treat this as unresolved, not as clear: "
+            f"`{licensing_error}`",
+        )
+        lines.append("")
     if flagged:
         lines.append(
             "**Licensing: needs a maintainer decision before promotion.** Not a rejection -- "

@@ -179,3 +179,142 @@ def test_validate_manifest_enforces_licensing():
     }
     with pytest.raises(licensing.LicensingError, match="not on the allowlist"):
         submission.validate_manifest(manifest)
+
+
+class TestRoundOneReviewFindings:
+    """Regressions for the PR #31 review. Several of these are cases where a
+    check reported the WRONG thing rather than nothing, which is the failure
+    mode this whole gate exists to avoid."""
+
+    def test_every_violation_is_reported_not_just_the_first(self):
+        m = {"method": {"extra_covariates": [
+            {"name": "a", "license": "WTFPL"},
+            {"name": "b", "license": "AlsoBad"},
+        ]}}
+        violations, _ = licensing.audit_manifest_licensing(m)
+        assert len(violations) == 2, "a contributor should learn about all of them in one run"
+
+    def test_a_violation_does_not_discard_the_needs_review_list(self):
+        """Raising on the first violation meant the entry that must 'always
+        reach a human' was never printed."""
+        m = {"method": {
+            "extra_covariates": [{"name": "bad", "license": "WTFPL"}],
+            "data_sources": [{
+                "name": "municipal", "license": licensing.PROPRIETARY_LICENSE_ID,
+                "licensor": "A City", "reproducible_fetch": "u",
+                "redistribution_tier": "no-redistribution",
+            }],
+        }}
+        violations, flagged = licensing.audit_manifest_licensing(m)
+        assert len(violations) == 1
+        assert len(flagged) == 1 and "municipal" in flagged[0]
+
+    def test_check_manifest_licensing_reports_all_violations_in_its_message(self):
+        m = {"method": {"extra_covariates": [
+            {"name": "a", "license": "WTFPL"}, {"name": "b", "license": "AlsoBad"},
+        ]}}
+        with pytest.raises(licensing.LicensingError) as exc:
+            licensing.check_manifest_licensing(m)
+        assert "WTFPL" in str(exc.value) and "AlsoBad" in str(exc.value)
+
+    @pytest.mark.parametrize("method", ["parameters", ["a"], 7])
+    def test_a_non_object_method_raises_licensing_error_not_attribute_error(self, method):
+        """The module promises to 'fail loudly enough that the referee can turn
+        it into a readable rejection rather than a crash'. It is reachable from
+        two paths that never ran jsonschema."""
+        with pytest.raises(licensing.LicensingError, match="method must be an object"):
+            licensing.audit_manifest_licensing({"method": method})
+
+    def test_a_mapping_where_a_list_belongs_raises_rather_than_iterating_keys(self):
+        m = {"method": {"data_sources": {"name": "x"}}}
+        with pytest.raises(licensing.LicensingError, match="must be a list"):
+            licensing.audit_manifest_licensing(m)
+
+    def test_a_non_object_manifest_raises_licensing_error(self):
+        with pytest.raises(licensing.LicensingError, match="manifest must be an object"):
+            licensing.audit_manifest_licensing("not a manifest")
+
+    def test_a_trailing_space_still_gets_the_case_hint(self):
+        """A trailing space inside YAML quotes is an easy typo, and comparing
+        the raw value meant it missed both the allowlist and the near-miss
+        hint -- producing the full allowed-list dump for the likeliest
+        mistake there is."""
+        assert licensing.check_license_id("CC-BY-4.0 ", where="x") is False
+        with pytest.raises(licensing.LicensingError, match="case-sensitive"):
+            licensing.check_license_id(" cc-by-4.0 ", where="x")
+
+
+class TestScriptExitCodes:
+    """The exit contract is what CI acts on, so it is tested rather than
+    assumed."""
+
+    def _run(self, tmp_path, manifest_text):
+        import subprocess
+        import sys
+        import os
+
+        path = tmp_path / "manifest.yaml"
+        path.write_text(manifest_text)
+        root = os.path.join(os.path.dirname(__file__), "..")
+        env = dict(os.environ, PYTHONPATH=os.path.join(root, "src"))
+        return subprocess.run(
+            [sys.executable, os.path.join(root, "scripts", "check_data_licensing.py"),
+             "--no-network", str(path)],
+            capture_output=True, text=True, env=env,
+        )
+
+    def test_clean_manifest_exits_zero(self, tmp_path):
+        r = self._run(tmp_path, "method:\n  kind: parameters\n")
+        assert r.returncode == 0, r.stdout
+
+    def test_a_violation_exits_one(self, tmp_path):
+        r = self._run(tmp_path, 'method:\n  extra_covariates:\n    - name: x\n      license: WTFPL\n')
+        assert r.returncode == 1
+        assert "LICENSING VIOLATIONS" in r.stdout
+
+    def test_a_flagged_entry_exits_three_not_zero(self, tmp_path):
+        """Flagged entries previously exited 0, so CI showed an ordinary green
+        tick a maintainer would merge straight past -- while CONTRIBUTING.md
+        promised such data never passes silently."""
+        r = self._run(tmp_path, (
+            "method:\n  data_sources:\n"
+            "    - name: municipal\n      license: proprietary-licensed\n"
+            "      licensor: A City\n      reproducible_fetch: https://example.invalid/x\n"
+            "      redistribution_tier: no-redistribution\n"
+        ))
+        assert r.returncode == 3, r.stdout
+        assert "NEEDS A MAINTAINER DECISION" in r.stdout
+
+    def test_an_empty_manifest_exits_four_not_one(self, tmp_path):
+        """An empty file previously raised AttributeError, exited 1, and the
+        workflow reported a YAML typo as a LICENSING VIOLATION."""
+        r = self._run(tmp_path, "")
+        assert r.returncode == 4, r.stdout
+        assert "UNREADABLE" in r.stdout
+        assert "LICENSING VIOLATIONS" not in r.stdout
+
+    def test_a_scalar_manifest_exits_four(self, tmp_path):
+        r = self._run(tmp_path, "just a string\n")
+        assert r.returncode == 4, r.stdout
+
+
+def test_the_referee_comment_says_so_when_licensing_cannot_be_evaluated():
+    """Failing open silently erased the only contributor-visible surface for
+    the manual-review flag, which is the entire routes-to-a-human mechanism."""
+    import sys, os
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+    import run_submission as rs
+    from heatready_downscaling import report as report_mod
+
+    manifest = {
+        "submission_id": "2026-08-005", "track": "research", "rung": "A",
+        "author": {"github": "x"}, "snapshot": {"version": "v2026.07"},
+        "claims": [{"model_version": "m", "band_key": "lag_fill",
+                    "targets": ["tmax"], "zones": ["Cfb"]}],
+        "method": "not-an-object",  # forces the licensing audit to raise
+    }
+    body = rs.render_comment(
+        manifest, [], report_mod.ToleranceResult(True, {}, []),
+        {"by_target": {}}, [],
+    )
+    assert "Licensing could not be evaluated" in body

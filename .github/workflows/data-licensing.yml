@@ -16,15 +16,30 @@
 # contributor-authored input must not hold a writable token or repo secrets.
 name: Data licensing
 
+# Paths include the GATE itself, not just submissions (code-review finding,
+# PR #31). Filtered on submissions alone, a PR that removed an identifier from
+# SPDX_ALLOWLIST, or added a library-level data-source block, got no licensing
+# run at all -- so a tightening change could never reveal that already-merged
+# submissions now violate it.
 on:
   pull_request:
     types: [opened, synchronize, reopened]
     paths:
       - "submissions/**"
+      - "src/heatready_downscaling/licensing.py"
+      - "src/heatready_downscaling/submission.py"
+      - "src/heatready_downscaling/coastline.py"
+      - "scripts/check_data_licensing.py"
+      - ".github/workflows/data-licensing.yml"
   push:
     branches: [main]
     paths:
       - "submissions/**"
+      - "src/heatready_downscaling/licensing.py"
+      - "src/heatready_downscaling/submission.py"
+      - "src/heatready_downscaling/coastline.py"
+      - "scripts/check_data_licensing.py"
+      - ".github/workflows/data-licensing.yml"
 
 permissions:
   contents: read
@@ -44,8 +59,12 @@ jobs:
         with:
           python-version: "3.11"
 
+      # Only what this check actually needs. Installing the full
+      # geopandas/rasterio/scikit-learn tree for a pyyaml+requests script was
+      # wasteful (noted in the PR #31 review) -- and a lighter install is a
+      # faster, less flaky gate.
       - name: Install
-        run: pip install -e '.[snapshot,dev,train]'
+        run: pip install pyyaml requests
 
       # Exit 1 is a real licensing violation and fails the job. Exit 2 means
       # every RULE passed but a declared reproducible_fetch URL did not
@@ -56,11 +75,24 @@ jobs:
       - name: Check declared data licensing
         run: |
           set +e
-          python scripts/check_data_licensing.py
+          PYTHONPATH=src python scripts/check_data_licensing.py
           status=$?
           set -e
-          if [ "$status" -eq 2 ]; then
-            echo "::warning::A declared reproducible_fetch URL was unreachable. Rules passed; see the log."
-            exit 0
-          fi
-          exit "$status"
+          case "$status" in
+            0) exit 0 ;;
+            2)
+              echo "::warning::A declared reproducible_fetch URL was unreachable. Every rule passed; see the log."
+              exit 0 ;;
+            3)
+              # NOT a failure -- proprietary-licensed and no-redistribution
+              # data are both admissible. But CONTRIBUTING.md promises they
+              # "never pass silently", and exiting 0 with no annotation gave
+              # an ordinary green tick a maintainer would merge straight past
+              # (code-review finding, PR #31).
+              echo "::warning::A declared data source needs a maintainer licensing decision before promotion. Admissible, but not automatic -- see the log."
+              exit 0 ;;
+            4)
+              echo "::error::A manifest could not be parsed. This is a YAML/structure problem, not a licensing violation."
+              exit 1 ;;
+            *) exit "$status" ;;
+          esac

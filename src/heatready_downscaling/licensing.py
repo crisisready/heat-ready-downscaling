@@ -93,6 +93,12 @@ def check_license_id(license_id, *, where: str, licensor=None) -> bool:
     """
     if not isinstance(license_id, str) or not license_id.strip():
         raise LicensingError(f"{where}: license is missing or empty")
+    # Compared stripped (code-review finding, PR #31): a trailing space inside
+    # YAML quotes is an easy typo, and comparing the RAW value meant
+    # "CC-BY-4.0 " missed both the allowlist AND the case-insensitive
+    # near-miss hint, producing the full allowed-list dump for the most
+    # likely mistake there is.
+    license_id = license_id.strip()
 
     if license_id == PROPRIETARY_LICENSE_ID:
         if not (isinstance(licensor, str) and licensor.strip()):
@@ -165,25 +171,78 @@ def check_extra_covariate(entry: dict, *, where: str) -> bool:
     )
 
 
-def check_manifest_licensing(manifest: dict) -> list[str]:
-    """Validate every licensing-relevant entry in a manifest.
+def _entries(method: dict, key: str) -> list:
+    """The list under method[key], or [] -- never something that iterates
+    surprisingly. A mapping here would otherwise iterate its KEYS and check
+    strings as if they were entries (code-review finding, PR #31), and
+    check_manifest_licensing is reachable from two paths that never ran
+    jsonschema first."""
+    value = method.get(key)
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise LicensingError(
+            f"method.{key} must be a list, got {type(value).__name__}",
+        )
+    return value
 
-    Returns the list of entries needing human review (empty when everything
-    cleared automatically). Raises LicensingError on the first real
-    violation -- fail closed, and fail loudly enough that the referee can
-    turn it into a readable rejection rather than a crash.
+
+def audit_manifest_licensing(manifest: dict) -> tuple[list[str], list[str]]:
+    """(violations, needs_review) for every licensing-relevant entry.
+
+    Collects rather than raising, for two reasons the first version got wrong
+    (code-review findings, PR #31). Raising on the FIRST violation discarded
+    the needs-review list entirely, so a manifest with one bad SPDX id plus a
+    proprietary-licensed entry never printed the entry that is supposed to
+    "always reach a human" -- and a contributor with three bad licences
+    learned about them one CI run at a time.
+
+    Structural garbage still raises: a non-dict `method`, or a mapping where a
+    list belongs, is not a licensing verdict and must not be reported as one.
     """
-    method = manifest.get("method") or {}
+    if not isinstance(manifest, dict):
+        raise LicensingError(
+            f"manifest must be an object, got {type(manifest).__name__}",
+        )
+    method = manifest.get("method")
+    if method is None:
+        return [], []
+    if not isinstance(method, dict):
+        raise LicensingError(
+            f"manifest.method must be an object, got {type(method).__name__}",
+        )
+
+    violations: list[str] = []
     flagged: list[str] = []
 
-    for i, entry in enumerate(method.get("data_sources") or []):
-        where = f"method.data_sources[{i}]"
-        if check_data_source(entry, where=where):
-            flagged.append(f"{where} ({entry.get('name')}): {entry.get('license')}")
+    checks = (
+        ("data_sources", check_data_source),
+        ("extra_covariates", check_extra_covariate),
+    )
+    for key, check in checks:
+        for i, entry in enumerate(_entries(method, key)):
+            where = f"method.{key}[{i}]"
+            try:
+                needs_review = check(entry, where=where)
+            except LicensingError as exc:
+                violations.append(str(exc))
+                continue
+            if needs_review:
+                name = entry.get("name") if isinstance(entry, dict) else None
+                license_id = entry.get("license") if isinstance(entry, dict) else None
+                flagged.append(f"{where} ({name}): {license_id}")
 
-    for i, entry in enumerate(method.get("extra_covariates") or []):
-        where = f"method.extra_covariates[{i}]"
-        if check_extra_covariate(entry, where=where):
-            flagged.append(f"{where} ({entry.get('name')}): {entry.get('license')}")
+    return violations, flagged
 
+
+def check_manifest_licensing(manifest: dict) -> list[str]:
+    """audit_manifest_licensing, but raising on any violation -- the form
+    validate_manifest wants. Reports EVERY violation at once rather than the
+    first, so one round trip tells a contributor everything that is wrong.
+    Returns the needs-review list when nothing is violated."""
+    violations, flagged = audit_manifest_licensing(manifest)
+    if violations:
+        raise LicensingError(
+            "licensing violation(s):\n  - " + "\n  - ".join(violations),
+        )
     return flagged
