@@ -770,3 +770,43 @@ def test_a_snapshot_predating_the_coast_column_reports_it_absent_not_zero():
 
     assert block["n_scored"] == 0
     assert block["covariates_absent_from_every_row"] == ["coast_dist_km"]
+
+
+def test_no_collected_test_module_needs_an_uninstalled_extra():
+    """Guard for the CI failure this repo's own Tests workflow hit on main:
+    the workflow installed .[snapshot,dev] on the claim that conftest.py
+    ignored everything needing the [train] extra. It does not -- conftest
+    ignores the modules needing the PRIVATE repo's environment, while
+    test_sweep_gbm (lightgbm) and test_train_downscaling (pykrige) are
+    collected and run.
+
+    Rather than re-asserting that by hand, this checks the actual imports of
+    the actual collected modules against what conftest actually ignores. If a
+    future test module reaches for a new optional dependency, this fails here
+    with the module named instead of as a ModuleNotFoundError in CI."""
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    conftest = (root / "conftest.py").read_text()
+    ignored = set(re.findall(r'"tests/([^"]+\.py)"', conftest))
+
+    workflow = (root / ".github" / "workflows" / "tests.yml").read_text()
+    installed_extras = set()
+    match = re.search(r"pip install -e '\.\[([^\]]+)\]'", workflow)
+    if match:
+        installed_extras = {e.strip() for e in match.group(1).split(",")}
+
+    extra_of_module = {"lightgbm": "train", "pykrige": "train", "pyarrow": "snapshot"}
+    missing: list[str] = []
+    for path in sorted((root / "tests").glob("test_*.py")):
+        if path.name in ignored:
+            continue
+        text = path.read_text()
+        for module, extra in extra_of_module.items():
+            if re.search(rf"\b{module}\b", text) and extra not in installed_extras:
+                missing.append(f"{path.name} needs {module} (extra '{extra}')")
+    assert missing == [], (
+        "collected test modules need extras the Tests workflow does not install: "
+        f"{missing}"
+    )
