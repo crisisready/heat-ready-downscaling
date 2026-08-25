@@ -164,7 +164,8 @@ My recommendation, adopted.
 **2. Consumer networks (Netatmo-class) are admitted.**
 
 Recorded precisely, because an earlier draft misstated the governance change: this is **not** an
-override of the approved roadmap. `ROADMAP.md` already says consumer sources are "admissible
+override of the approved roadmap. `research/crowdsourced-modeling/ROADMAP.md` in the private
+`crisisready/heat-risk-data-api` repo already says consumer sources are "admissible
 only with a validated bias treatment — the default expectation, given the record, is rejection."
 The decision is that the door is open; the conditions below are that stated precondition made
 concrete. Calling it an override overstated what changed, in a section whose whole job is
@@ -211,7 +212,9 @@ settle it.
 
 ### An unresolved conflict with standing policy
 
-`ROADMAP.md`'s data-sourcing policy requires that sources carrying device-owner locations —
+The private `crisisready/heat-risk-data-api` repo's
+`research/crowdsourced-modeling/ROADMAP.md` data-sourcing policy requires that sources carrying
+device-owner locations —
 naming consumer crowd networks as the known case — be admissible "only after
 anonymization/aggregation that removes it, stated in the QC report."
 
@@ -273,9 +276,21 @@ S-DoT dataset specifically, and no admission decision may rest on it.**
 
 **Therefore a prerequisite, not an assumption.** Establishing S-DoT's actual licence and type is
 step one of the dependency order below — a real task with a real possible outcome that the
-expectation above is wrong. What is safe to say now is only the negative: **`unrestricted` is not
-available**, so Seoul's dossier goes through a labelled tier whichever of the remaining paths it
-takes.
+expectation above is wrong.
+
+And one more correction, because I made the same overreach a third time in the sentence that was
+supposed to be the careful one. An earlier version of this paragraph said "what is safe to say
+now is only the negative: `unrestricted` is not available." **That is still a licence conclusion
+drawn from an unknown licence.** `CC0-1.0` and `PDDL-1.0` are both on the allowlist and both
+permit `unrestricted`; if S-DoT turns out to carry either, Seoul needs no labelled tier and no
+attribution mechanism at all. The KOGL expectation makes that unlikely, and unlikely is not
+unavailable.
+
+So the genuinely safe statement is narrower than any I have written so far: **nothing about
+Seoul's tier is determinable until its licence is established**, and the dependency order below
+is written so that step one settles it rather than assuming it either way. Three drafts of this
+document reached three different confident conclusions about a fact none of them had checked;
+that is the actual lesson, and it belongs in the record next to the conclusion.
 
 `attribution-required` is the tier this document says cannot ship until something generates the
 snapshot's attribution notices from the field, since #31 validates `redistribution_tier` and
@@ -288,6 +303,21 @@ work the earlier draft deferred**, and the real dependency order is:
 3. Build a re-derivation path for data outside the snapshot layout (the `promote_from_public.py`
    gap above).
 4. Then the tiers, in whatever order their evidence allows.
+
+## Every binding rule cited here must be restated in this repository
+
+Round 1 caught the dossier checklist being cited as a private-repo filename, and I fixed that
+instance without checking its siblings. Round 2 found two more: both quoted policies — the
+consumer-admission precondition and the no-personal-data requirement — live only in the private
+`crisisready/heat-risk-data-api` roadmap, so a public contributor cannot read either rule they
+are being held to.
+
+They are attributed properly above, which fixes the citation but not the underlying problem.
+**Implementation must restate every binding rule in this public repository** — `CONTRIBUTING.md`
+for what a contributor must do, `GOVERNANCE.md` for what the program will and will not accept.
+A design that points at a private document for its own acceptance criteria is the
+documented-but-unreachable-control failure again, and this document has now produced three
+instances of it.
 
 ## Not proposed
 
