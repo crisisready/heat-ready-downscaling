@@ -772,41 +772,41 @@ def test_a_snapshot_predating_the_coast_column_reports_it_absent_not_zero():
     assert block["covariates_absent_from_every_row"] == ["coast_dist_km"]
 
 
-def test_no_collected_test_module_needs_an_uninstalled_extra():
-    """Guard for the CI failure this repo's own Tests workflow hit on main:
-    the workflow installed .[snapshot,dev] on the claim that conftest.py
-    ignored everything needing the [train] extra. It does not -- conftest
-    ignores the modules needing the PRIVATE repo's environment, while
-    test_sweep_gbm (lightgbm) and test_train_downscaling (pykrige) are
-    collected and run.
+def test_the_tests_workflow_installs_every_declared_extra():
+    """Guard for the CI failure this repo's Tests workflow hit on main: it
+    installed .[snapshot,dev] on my claim that conftest.py ignored everything
+    needing [train]. It does not, and 11 tests failed with
+    ModuleNotFoundError.
 
-    Rather than re-asserting that by hand, this checks the actual imports of
-    the actual collected modules against what conftest actually ignores. If a
-    future test module reaches for a new optional dependency, this fails here
-    with the module named instead of as a ModuleNotFoundError in CI."""
+    The invariant checked here is deliberately simpler than the first attempt,
+    which scanned every collected test module's raw text for the words
+    "lightgbm"/"pykrige"/"pyarrow". That version matched ITSELF -- those words
+    appear in its own docstring and its own lookup table -- so it would have
+    failed while naming the wrong file as the culprit (code-review finding, PR
+    #30). Following imports properly is no better: test_sweep_gbm.py does not
+    import lightgbm directly, it imports scripts/sweep_gbm.py which does, so
+    any static scan of the test modules alone misses the real case.
+
+    So: CI must install EVERY extra declared in pyproject.toml. That has no
+    false positives, needs no static analysis, and encodes the actual rule --
+    a test suite CI cannot fully run is not a test suite CI is checking.
+    """
     import pathlib
     import re
+    import tomllib
 
     root = pathlib.Path(__file__).resolve().parent.parent
-    conftest = (root / "conftest.py").read_text()
-    ignored = set(re.findall(r'"tests/([^"]+\.py)"', conftest))
+    with open(root / "pyproject.toml", "rb") as fh:
+        declared = set(tomllib.load(fh)["project"]["optional-dependencies"])
 
     workflow = (root / ".github" / "workflows" / "tests.yml").read_text()
-    installed_extras = set()
     match = re.search(r"pip install -e '\.\[([^\]]+)\]'", workflow)
-    if match:
-        installed_extras = {e.strip() for e in match.group(1).split(",")}
+    assert match, "could not find the Tests workflow's pip install line"
+    installed = {e.strip() for e in match.group(1).split(",")}
 
-    extra_of_module = {"lightgbm": "train", "pykrige": "train", "pyarrow": "snapshot"}
-    missing: list[str] = []
-    for path in sorted((root / "tests").glob("test_*.py")):
-        if path.name in ignored:
-            continue
-        text = path.read_text()
-        for module, extra in extra_of_module.items():
-            if re.search(rf"\b{module}\b", text) and extra not in installed_extras:
-                missing.append(f"{path.name} needs {module} (extra '{extra}')")
+    missing = sorted(declared - installed)
     assert missing == [], (
-        "collected test modules need extras the Tests workflow does not install: "
-        f"{missing}"
+        f"pyproject declares extras the Tests workflow does not install: {missing}. "
+        "Every extra must be installed in CI, or some of the suite silently does not run "
+        "there -- which is how 11 tests failed on main."
     )
