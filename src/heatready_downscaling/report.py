@@ -55,6 +55,17 @@ _SCORE_BAND_METRICS_SCHEMA: dict = {
             "properties": {"scale": {"type": "number"}, "offset": {"type": "number"}},
         },
         "gated_insufficient_n": {"type": "boolean"},
+        # 2026-08-25, score.score_band's Rung B proposed_correction extension --
+        # no additionalProperties restriction above means these were always
+        # accepted even before being listed here (same non-event delta_scale_c's
+        # own addition already was), listed for an accurate schema.
+        "proposed_correction_kind": {"enum": ["bias", "affine", None]},
+        "proposed_correction_rmse_c": {"type": ["number", "null"]},
+        "proposed_correction_bias_c": {"type": ["number", "null"]},
+        "proposed_correction_beats_grid": {"type": ["boolean", "null"]},
+        "proposed_correction_margin_pct": {"type": ["number", "null"]},
+        "proposed_correction_beats_grid_with_margin": {"type": ["boolean", "null"]},
+        "proposed_vs_best_fit_gap_c": {"type": ["number", "null"]},
     },
 }
 

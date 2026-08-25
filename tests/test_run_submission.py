@@ -101,13 +101,22 @@ class TestCrossCheck:
         violations = rs.cross_check(_manifest(rung="C"), _claimed_report(), self._DIR, "nishkishore")
         assert any("not yet open" in v for v in violations)
 
-    def test_rung_b_rejected(self):
-        """Rung B is schema-valid (submission.py) but not yet scoreable --
-        score_band has no input for a contributor-proposed correction. v1
-        intake is Rung A only, a deliberate scope decision, not an
-        oversight (see cross_check's own comment)."""
-        violations = rs.cross_check(_manifest(rung="B"), _claimed_report(), self._DIR, "nishkishore")
-        assert any("not yet open" in v for v in violations)
+    def test_rung_b_with_parameters_kind_accepted(self):
+        """2026-08-25: Rung B opened -- score.score_band's
+        proposed_correction extension can now score a contributor-declared
+        value, see docs/plan-2026-08-25-crowdsourced-model-improvement-p0.md."""
+        m = _manifest(rung="B")
+        m["method"] = dict(m["method"], kind="parameters", candidate={"tmax": {"Cfb": {"bias_correction_c": 0.5}}})
+        violations = rs.cross_check(m, _claimed_report(), self._DIR, "nishkishore")
+        assert not any("not yet open" in v or "requires method.kind" in v for v in violations)
+
+    def test_rung_b_with_wrong_method_kind_rejected(self):
+        """Rung B requires method.kind=='parameters' -- a Rung B manifest
+        that still declares 'rerun-validator' (Rung A's kind) is rejected,
+        not silently scored as if it were A."""
+        m = _manifest(rung="B")  # default method.kind is "rerun-validator"
+        violations = rs.cross_check(m, _claimed_report(), self._DIR, "nishkishore")
+        assert any("requires method.kind" in v for v in violations)
 
     def test_rung_a_accepted(self):
         violations = rs.cross_check(_manifest(rung="A"), _claimed_report(), self._DIR, "nishkishore")
@@ -293,6 +302,22 @@ class TestReproduceIntegration:
         assert result["fidelity_check"]["n"] == 1  # joined against the era5 row
         assert "Cfb" in result["by_target"]["tmax"]
         assert result["by_target"]["tmax"]["Cfb"]["n_qrf_applied"] == 1
+        assert result["by_target"]["tmax"]["Cfb"]["proposed_correction_kind"] is None  # no candidate given
+
+    def test_reproduce_forwards_candidate_to_score_band(self, tmp_path):
+        """2026-08-25: reproduce()'s new `candidate` kwarg must actually
+        reach score_band per-target, not just be accepted and dropped."""
+        d = date(2023, 7, 1)
+        snap.write_partition(str(tmp_path), "lag_fill", "2023-07", [self._row("A", d, "lag_fill", 30.5, 20.5)])
+        snap.write_predictions_partition(
+            str(tmp_path), "ds-test", "lag_fill", "2023-07",
+            [self._prediction_row("A", d, target, delta_c=1.0) for target in ("tmax", "tmin")],
+        )
+        candidate = {"tmax": {"Cfb": {"bias_correction_c": 0.5}}}
+        result = rs.reproduce(str(tmp_path), "ds-test", "lag_fill", "v2026.07", candidate=candidate)
+        assert result["by_target"]["tmax"]["Cfb"]["proposed_correction_kind"] == "bias"
+        # tmin got no candidate entry -- must stay untouched
+        assert result["by_target"]["tmin"]["Cfb"]["proposed_correction_kind"] is None
 
     def test_era5_band_has_no_fidelity_check(self, tmp_path):
         d = date(2023, 7, 1)

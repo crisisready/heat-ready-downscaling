@@ -30,6 +30,29 @@ _TOLERANCE_MAXIMA = {
     "rmse_qrf_c": 0.02,
     "rmse_grid_c": 0.02,
     "rmse_debiased_cv_c": 0.02,
+    # 2026-08-25, Rung B: same treatment as the mechanically-derived metrics
+    # above -- without a listed ceiling, a Rung B manifest's tolerance block
+    # could set e.g. proposed_correction_rmse_c: 999 and always "reproduce."
+    "proposed_correction_rmse_c": 0.02,
+    "proposed_correction_bias_c": 0.05,
+    "proposed_correction_margin_pct": 0.01,
+    "proposed_vs_best_fit_gap_c": 0.05,
+}
+
+# One zone's declared Rung B value -- exactly one of the two shapes, never
+# both, mirroring score.score_band's own proposed_correction docstring.
+_CANDIDATE_ZONE_SCHEMA: dict = {
+    "type": "object",
+    "oneOf": [
+        {
+            "type": "object", "required": ["bias_correction_c"], "additionalProperties": False,
+            "properties": {"bias_correction_c": {"type": "number"}},
+        },
+        {
+            "type": "object", "required": ["scale", "offset"], "additionalProperties": False,
+            "properties": {"scale": {"type": "number"}, "offset": {"type": "number"}},
+        },
+    ],
 }
 
 MANIFEST_SCHEMA: dict = {
@@ -117,6 +140,23 @@ MANIFEST_SCHEMA: dict = {
                         },
                     },
                 },
+                # 2026-08-25, Rung B scoring extension (docs/plan-2026-08-25-
+                # crowdsourced-model-improvement-p0.md): the actual DECLARED
+                # value a Rung B submission proposes -- same shape
+                # score.score_band's own proposed_correction param takes per
+                # target, one level up (keyed by target here since a single
+                # manifest's claims[0].targets can list both). Required when
+                # rung=="B", disallowed otherwise (checked in validate_manifest
+                # below, not in this schema -- same "cross-field checks live in
+                # Python" convention _TOLERANCE_MAXIMA's own ceiling check
+                # already uses here, not a jsonschema if/then).
+                "candidate": {
+                    "type": "object",
+                    "properties": {
+                        target_key: {"type": "object", "additionalProperties": _CANDIDATE_ZONE_SCHEMA}
+                        for target_key in ("tmax", "tmin")
+                    },
+                },
             },
         },
         "claimed_report": {"type": "string", "minLength": 1},
@@ -141,10 +181,26 @@ def validate_manifest(manifest: dict) -> None:
     """Raises jsonschema.ValidationError on a structurally invalid
     manifest, or ValueError if a `tolerance` value exceeds its documented
     ceiling (a check jsonschema's own vocabulary can't express per-key
-    against a table like _TOLERANCE_MAXIMA)."""
+    against a table like _TOLERANCE_MAXIMA), or if `method.candidate`'s
+    presence doesn't match `rung` (required for Rung B, disallowed
+    otherwise -- see MANIFEST_SCHEMA's own comment on `candidate`)."""
     import jsonschema
 
     jsonschema.validate(manifest, MANIFEST_SCHEMA)
+
+    rung = manifest.get("rung")
+    candidate = manifest.get("method", {}).get("candidate")
+    if rung == "B" and not candidate:
+        raise ValueError(
+            "rung 'B' requires a non-empty method.candidate (the actual bias_correction_c/"
+            "scale+offset value(s) being proposed) -- a Rung B submission with no declared "
+            "value has nothing for the referee to score",
+        )
+    if rung != "B" and candidate:
+        raise ValueError(
+            f"method.candidate is only meaningful for rung 'B', got rung {rung!r} -- "
+            "a Rung A submission (evaluation coverage only) proposes no correction of its own",
+        )
 
     tolerance = manifest.get("tolerance", {})
     too_loose = {

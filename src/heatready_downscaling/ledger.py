@@ -80,6 +80,12 @@ CYCLES_LINE_SCHEMA: dict = {
         "snapshot_version": {"type": "string"},
         "runner_commit": {"type": ["string", "null"]},  # None for a local/dry-run invocation outside CI
         "package_version": {"type": "string"},
+        # 2026-08-25, Rung B: None for every Rung A cycle line (no
+        # proposed_correction_entry) -- see score_forward_eval.score_cell's
+        # own docstring for why `status` is decided from these, not
+        # rmse_qrf_c/qrf_beats_grid_with_margin, whenever they're non-null.
+        "proposed_correction_rmse_c": {"type": ["number", "null"]},
+        "proposed_correction_beats_grid_with_margin": {"type": ["boolean", "null"]},
     },
 }
 

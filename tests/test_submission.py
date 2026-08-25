@@ -114,6 +114,60 @@ class TestToleranceCeilings:
         submission.validate_manifest(m)  # must not raise
 
 
+class TestRungBCandidate:
+    """method.candidate -- the actual declared Rung B value -- must be
+    present iff rung=='B' (2026-08-25, Rung B scoring extension)."""
+
+    def _rung_b_manifest(self, **method_overrides):
+        m = _manifest(rung="B")
+        m["method"] = {
+            "kind": "parameters", "entrypoint": "scripts/run_submission.py",
+            "args": [], "package_version": "0.1.0", "code_ref": None, "extra_covariates": [],
+            "candidate": {"tmax": {"Cfb": {"bias_correction_c": 0.8}}},
+        }
+        m["method"].update(method_overrides)
+        return m
+
+    def test_well_formed_rung_b_candidate_passes(self):
+        submission.validate_manifest(self._rung_b_manifest())  # must not raise
+
+    def test_affine_shape_candidate_passes(self):
+        m = self._rung_b_manifest(candidate={"tmin": {"Cfb": {"scale": 0.9, "offset": 0.2}}})
+        submission.validate_manifest(m)  # must not raise
+
+    def test_rung_b_with_no_candidate_raises(self):
+        m = self._rung_b_manifest(candidate=None)
+        del m["method"]["candidate"]
+        with pytest.raises(ValueError, match="requires a non-empty method.candidate"):
+            submission.validate_manifest(m)
+
+    def test_rung_b_with_empty_candidate_raises(self):
+        m = self._rung_b_manifest(candidate={})
+        with pytest.raises(ValueError, match="requires a non-empty method.candidate"):
+            submission.validate_manifest(m)
+
+    def test_rung_a_with_a_candidate_raises(self):
+        """A Rung A submission (evaluation coverage only) proposes no
+        correction of its own -- a candidate block there is a category
+        error, not a harmless extra field."""
+        m = self._rung_b_manifest()
+        m["rung"] = "A"
+        with pytest.raises(ValueError, match="only meaningful for rung 'B'"):
+            submission.validate_manifest(m)
+
+    def test_candidate_zone_entry_mixing_both_shapes_raises(self):
+        m = self._rung_b_manifest(
+            candidate={"tmax": {"Cfb": {"bias_correction_c": 0.8, "scale": 0.9, "offset": 0.2}}},
+        )
+        with pytest.raises(Exception):
+            submission.validate_manifest(m)
+
+    def test_candidate_zone_entry_with_neither_shape_raises(self):
+        m = self._rung_b_manifest(candidate={"tmax": {"Cfb": {"bogus": 1.0}}})
+        with pytest.raises(Exception):
+            submission.validate_manifest(m)
+
+
 class TestParseSubmissionId:
     def test_splits_year_month_and_sequence(self):
         assert submission.parse_submission_id("2026-08-001") == ("2026-08", 1)

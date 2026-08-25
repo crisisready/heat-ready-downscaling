@@ -55,7 +55,10 @@ BIAS_CV_FOLDS = 5  # station-grouped folds for validating the bias correction (s
 BIAS_CV_MIN_STATIONS = 2 * BIAS_CV_FOLDS  # need enough distinct stations for folds to mean anything
 
 
-def score_band(adapter, rows: list[dict], target: str, *, fold_salt: str) -> dict:
+def score_band(
+    adapter, rows: list[dict], target: str, *, fold_salt: str,
+    proposed_correction: dict[str, dict] | None = None,
+) -> dict:
     """Per-zone (plus overall) rmse_grid_c (raw base vs station) /
     rmse_qrf_c (corrected vs station) -- scored via adapter.predict
     directly against the SHIPPED model (no fold refitting), matching this
@@ -125,7 +128,38 @@ def score_band(adapter, rows: list[dict], target: str, *, fold_salt: str) -> dic
     either way. Whether to actually PUBLISH delta_scale_c for a zone (does
     it also clear AUTO_ENABLE_MARGIN) is gates.build_gate's decision, not
     this function's -- same division of responsibility as bias_correction_c
-    already has."""
+    already has.
+
+    proposed_correction (2026-08-25, Rung B scoring extension --
+    docs/plan-2026-08-25-crowdsourced-model-improvement-p0.md): a
+    contributor-DECLARED, fixed correction to score, as opposed to the
+    bias_correction_c/delta_scale_c above, which this function derives
+    itself. Shape: {zone: {"bias_correction_c": float}} (offset-only) OR
+    {zone: {"scale": float, "offset": float}} (affine) -- one shape per
+    zone, never both. Unlike bias_correction_c/delta_scale_c, this value is
+    never fit from `rows` -- it's applied as given and scored for whether
+    it actually reduces error on THESE rows, which is why no station-fold
+    CV loop is needed here: CV protects against overfitting a value FIT
+    from the same data it's tested on, and this value was never fit from
+    `rows` at all (its whole premise, per Seoul/Valencia, is that it came
+    from data outside this snapshot). Applying it once across every
+    qrf-applied row in the zone and applying it fold-by-fold to each fold's
+    held-out rows are mathematically identical here (nothing is refit
+    per-fold), so this deliberately does the simpler, single-pass
+    computation. Reports proposed_correction_rmse_c/bias_c/beats_grid/
+    beats_grid_with_margin (None, not 0/False, for a zone with no
+    proposed_correction entry or zero qrf-applied rows -- absence is never
+    silently treated as "the correction is fine") and
+    proposed_vs_best_fit_gap_c (the RMS difference, over the zone's own
+    observed delta_c range, between the proposed correction's effect and
+    the mechanically-fit one's -- comparing raw parameters directly would
+    be misleading for the affine shape, since scale and offset don't live
+    on comparable scales and a right-scale-wrong-offset proposal must not
+    report a near-zero gap). gates.build_gate/build_subzone_patch are
+    unaffected by this parameter -- they still only ever publish the
+    mechanically-derived bias_correction_c/delta_scale_c, never a
+    submission's raw declared value; see GOVERNANCE.md's "a submission's
+    own reported numbers are never trusted directly" language."""
     grid_col = "grid_tmax_c" if target == "tmax" else "grid_tmin_c"
     truth_col = "station_tmax_c" if target == "tmax" else "station_tmin_c"
 
@@ -173,6 +207,40 @@ def score_band(adapter, rows: list[dict], target: str, *, fold_salt: str) -> dic
             rmse_qrf = float(np.sqrt(np.mean(qrf_err ** 2)))
             bias_qrf = float(np.mean(qrf_err))
             se_bias_qrf = float(np.std(qrf_err, ddof=1) / np.sqrt(n_qrf)) if n_qrf > 1 else None
+
+            # Rung B: score a contributor-DECLARED, fixed correction, if one
+            # was given for this zone -- see this function's own docstring
+            # for why no station-fold CV loop is needed (nothing here is fit
+            # from `rows`, so a single-pass computation over every
+            # qrf-applied row is mathematically identical to a fold-by-fold
+            # one). Kept independent of BIAS_CV_MIN_STATIONS -- that gate
+            # exists to make FITTING honest, and nothing here is fit.
+            proposed_entry = (proposed_correction or {}).get(zone)
+            if proposed_entry is not None:
+                delta_c_arr = np.array(b["delta_c"])
+                true_err_arr = np.array(b["true_err"])
+                if "scale" in proposed_entry and "offset" in proposed_entry:
+                    proposed_correction_kind = "affine"
+                    proposed_new_err = true_err_arr - (
+                        delta_c_arr * proposed_entry["scale"] + proposed_entry["offset"]
+                    )
+                elif "bias_correction_c" in proposed_entry:
+                    proposed_correction_kind = "bias"
+                    # qrf_err already IS true_err - delta_c (see the row-build
+                    # loop above); adding a constant offset to delta_c
+                    # subtracts that same constant from the residual.
+                    proposed_new_err = qrf_err - proposed_entry["bias_correction_c"]
+                else:
+                    raise ValueError(
+                        f"proposed_correction[{zone!r}] has neither ('scale','offset') nor "
+                        f"'bias_correction_c' -- got keys {sorted(proposed_entry)!r}",
+                    )
+                proposed_correction_rmse_c = float(np.sqrt(np.mean(proposed_new_err ** 2)))
+                proposed_correction_bias_c = float(np.mean(proposed_new_err))
+            else:
+                proposed_correction_kind = None
+                proposed_correction_rmse_c = None
+                proposed_correction_bias_c = None
 
             unique_stations = np.unique(station_ids)
             if len(unique_stations) >= BIAS_CV_MIN_STATIONS:
@@ -235,6 +303,9 @@ def score_band(adapter, rows: list[dict], target: str, *, fold_salt: str) -> dic
                     delta_scale_c = {"scale": float(coef_full[0]), "offset": float(coef_full[1])}
         else:
             rmse_qrf = bias_qrf = se_bias_qrf = None
+            proposed_correction_kind = None
+            proposed_correction_rmse_c = None
+            proposed_correction_bias_c = None
         has_both = rmse_qrf is not None and rmse_grid is not None
         beats_grid = (rmse_qrf < rmse_grid) if has_both else None
         margin_pct = ((rmse_grid - rmse_qrf) / rmse_grid) if (has_both and rmse_grid > 0) else None
@@ -246,6 +317,43 @@ def score_band(adapter, rows: list[dict], target: str, *, fold_salt: str) -> dic
             (rmse_grid - rmse_affine_cv) / rmse_grid
             if (rmse_affine_cv is not None and rmse_grid and rmse_grid > 0) else None
         )
+        proposed_correction_beats_grid = (
+            (proposed_correction_rmse_c < rmse_grid)
+            if (proposed_correction_rmse_c is not None and rmse_grid is not None) else None
+        )
+        proposed_correction_margin_pct = (
+            (rmse_grid - proposed_correction_rmse_c) / rmse_grid
+            if (proposed_correction_rmse_c is not None and rmse_grid and rmse_grid > 0) else None
+        )
+        # Same MIN_ZONE_N/AUTO_ENABLE_MARGIN bar the mechanically-derived
+        # with_margin fields use -- a contributor's declared value gets no
+        # easier a bar than the maintainer's own fitted one.
+        proposed_correction_beats_grid_with_margin = (
+            (proposed_correction_margin_pct >= AUTO_ENABLE_MARGIN)
+            if (proposed_correction_margin_pct is not None and n_qrf >= MIN_ZONE_N) else None
+        )
+        # proposed_vs_best_fit_gap_c: how far the DECLARED value is from
+        # what this function would have fit itself, evaluated on the
+        # EFFECT (over the zone's own observed delta_c range), not raw
+        # parameters -- comparing scale/offset directly would be
+        # misleading (they don't live on comparable scales, and a
+        # right-scale-wrong-offset proposal would report a near-zero gap
+        # on scale alone). Referee-transparency only -- never gates
+        # anything; a large gap does not fail a proposal that otherwise
+        # clears the bar above, it's context for the human reading the
+        # report.
+        proposed_vs_best_fit_gap_c = None
+        if proposed_correction_kind == "bias" and bias_qrf is not None:
+            proposed_vs_best_fit_gap_c = abs(proposed_entry["bias_correction_c"] - bias_qrf)
+        elif proposed_correction_kind == "affine":
+            d_arr = np.array(b["delta_c"])
+            fit_scale, fit_offset = (
+                (delta_scale_c["scale"], delta_scale_c["offset"]) if delta_scale_c is not None
+                else (1.0, bias_qrf if bias_qrf is not None else 0.0)
+            )
+            proposed_effect = d_arr * proposed_entry["scale"] + proposed_entry["offset"]
+            fit_effect = d_arr * fit_scale + fit_offset
+            proposed_vs_best_fit_gap_c = float(np.sqrt(np.mean((proposed_effect - fit_effect) ** 2)))
         # Fallback ONLY for zones with too few distinct stations to run the
         # CV above (rmse_debiased_cv is None): the correction can't be
         # validated, so it is NOT applied or trusted -- but the raw bias
@@ -328,6 +436,20 @@ def score_band(adapter, rows: list[dict], target: str, *, fold_salt: str) -> dic
                 if n_qrf >= MIN_ZONE_N else None
             ),
             "gated_insufficient_n": n_qrf < MIN_ZONE_N,
+            # Rung B (2026-08-25): scoring a contributor-DECLARED, fixed
+            # correction, never the mechanically-derived one above -- see
+            # this function's own docstring. None (not 0/False) whenever no
+            # proposed_correction entry exists for this zone or n_qrf==0 --
+            # absence must never be silently treated as "the proposal is
+            # fine" (same fail-closed convention this module already uses
+            # for bias_correction_c/delta_scale_c).
+            "proposed_correction_kind": proposed_correction_kind,
+            "proposed_correction_rmse_c": proposed_correction_rmse_c,
+            "proposed_correction_bias_c": proposed_correction_bias_c,
+            "proposed_correction_beats_grid": proposed_correction_beats_grid,
+            "proposed_correction_margin_pct": proposed_correction_margin_pct,
+            "proposed_correction_beats_grid_with_margin": proposed_correction_beats_grid_with_margin,
+            "proposed_vs_best_fit_gap_c": proposed_vs_best_fit_gap_c,
         }
     return result
 

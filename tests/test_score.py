@@ -216,6 +216,117 @@ class TestScoreBandBiasCorrectionCv:
         assert result["Cfa"]["bias_correction_c"] == pytest.approx(0.5, abs=0.02)
 
 
+class TestScoreBandProposedCorrection:
+    """Rung B (2026-08-25): a contributor-DECLARED, fixed correction, never
+    fit from `rows` -- see score_band's own docstring for why no CV loop is
+    needed here."""
+
+    def test_zone_with_no_entry_gets_all_none(self):
+        rows, adapter = _bias_test_rows_and_adapter(bias_c=0.5)
+        result = score.score_band(
+            adapter, rows, "tmax", fold_salt="v-test",
+            proposed_correction={"SomeOtherZone": {"bias_correction_c": 0.5}},
+        )
+        m = result["Cfa"]
+        assert m["proposed_correction_kind"] is None
+        assert m["proposed_correction_rmse_c"] is None
+        assert m["proposed_correction_bias_c"] is None
+        assert m["proposed_correction_beats_grid"] is None
+        assert m["proposed_correction_beats_grid_with_margin"] is None
+        assert m["proposed_vs_best_fit_gap_c"] is None
+
+    def test_no_proposed_correction_at_all_gets_all_none(self):
+        rows, adapter = _bias_test_rows_and_adapter(bias_c=0.5)
+        result = score.score_band(adapter, rows, "tmax", fold_salt="v-test")
+        assert result["Cfa"]["proposed_correction_kind"] is None
+
+    def test_accurate_declared_bias_beats_grid_with_near_zero_gap(self):
+        """bias_c=0.5 fixture leaves qrf_err ~= 0.5 +- 0.01 (see
+        _bias_test_rows_and_adapter's own docstring) -- bias_qrf is
+        therefore ~0.5 exactly (the alternation cancels in the mean).
+        Declaring bias_correction_c=0.5 should nearly zero out the
+        residual and match bias_qrf almost exactly."""
+        rows, adapter = _bias_test_rows_and_adapter(bias_c=0.5)
+        result = score.score_band(
+            adapter, rows, "tmax", fold_salt="v-test",
+            proposed_correction={"Cfa": {"bias_correction_c": 0.5}},
+        )
+        m = result["Cfa"]
+        assert m["proposed_correction_kind"] == "bias"
+        assert m["proposed_correction_rmse_c"] == pytest.approx(0.01, abs=0.002)
+        assert m["proposed_correction_bias_c"] == pytest.approx(0.0, abs=0.002)
+        assert m["proposed_correction_beats_grid"] is True
+        assert m["proposed_correction_beats_grid_with_margin"] is True
+        assert m["proposed_vs_best_fit_gap_c"] == pytest.approx(0.0, abs=0.002)
+
+    def test_wildly_wrong_declared_bias_fails_to_beat_grid(self):
+        """Overcorrecting by 10C on top of the real ~0.5C bias should end
+        up WORSE than the raw 5.0C grid RMSE, not better."""
+        rows, adapter = _bias_test_rows_and_adapter(bias_c=0.5)
+        result = score.score_band(
+            adapter, rows, "tmax", fold_salt="v-test",
+            proposed_correction={"Cfa": {"bias_correction_c": -10.0}},
+        )
+        m = result["Cfa"]
+        assert m["proposed_correction_rmse_c"] == pytest.approx(10.5, abs=0.02)
+        assert m["proposed_correction_beats_grid"] is False
+        assert m["proposed_correction_beats_grid_with_margin"] is False
+        # the gap from what score_band would itself have fit (~0.5) must be large
+        assert m["proposed_vs_best_fit_gap_c"] == pytest.approx(10.5, abs=0.02)
+
+    def test_affine_scale_actually_applied_not_ignored(self):
+        """bias_c=0.0 fixture makes delta_c == true_err == raw_err exactly
+        (+-5.0). Proposing scale=0.5, offset=0.0 should halve the residual
+        to +-2.5 -- if the scale term were silently ignored (e.g. a bug
+        that only ever read 'offset'), this would come out as 5.0, not
+        2.5."""
+        rows, adapter = _bias_test_rows_and_adapter(bias_c=0.0)
+        result = score.score_band(
+            adapter, rows, "tmax", fold_salt="v-test",
+            proposed_correction={"Cfa": {"scale": 0.5, "offset": 0.0}},
+        )
+        m = result["Cfa"]
+        assert m["proposed_correction_kind"] == "affine"
+        assert m["proposed_correction_rmse_c"] == pytest.approx(2.5, abs=0.01)
+
+    def test_malformed_entry_raises(self):
+        rows, adapter = _bias_test_rows_and_adapter(bias_c=0.5)
+        with pytest.raises(ValueError, match="proposed_correction"):
+            score.score_band(
+                adapter, rows, "tmax", fold_salt="v-test",
+                proposed_correction={"Cfa": {"bogus_key": 1.0}},
+            )
+
+    def test_result_is_identical_across_fold_salts(self):
+        """The whole point of not needing a CV loop here: nothing is fit
+        from `rows`, so the declared value's score can never depend on how
+        rows are split into folds."""
+        rows, adapter = _bias_test_rows_and_adapter(bias_c=0.5)
+        proposed = {"Cfa": {"bias_correction_c": 0.3}}
+        results = [
+            score.score_band(adapter, rows, "tmax", fold_salt=salt, proposed_correction=proposed)["Cfa"]
+            for salt in ("v2026.08", "v2026.09", "v2026.10")
+        ]
+        rmses = {r["proposed_correction_rmse_c"] for r in results}
+        assert len(rmses) == 1
+
+    def test_insufficient_n_still_reports_but_never_auto_enables(self):
+        """Never silently hide a thin-zone result -- rmse/bias/beats_grid
+        must still be computed below MIN_ZONE_N, but the WITH_MARGIN
+        (auto-enable-shaped) verdict must stay None, mirroring
+        qrf_beats_grid_with_margin's own gated_insufficient_n discipline."""
+        rows, adapter = _bias_test_rows_and_adapter(bias_c=0.5, n=10)  # n_qrf=10 < MIN_ZONE_N=30
+        result = score.score_band(
+            adapter, rows, "tmax", fold_salt="v-test",
+            proposed_correction={"Cfa": {"bias_correction_c": 0.5}},
+        )
+        m = result["Cfa"]
+        assert m["gated_insufficient_n"] is True
+        assert m["proposed_correction_rmse_c"] is not None
+        assert m["proposed_correction_beats_grid"] is not None  # not gated by MIN_ZONE_N
+        assert m["proposed_correction_beats_grid_with_margin"] is None  # gated
+
+
 class TestScoreBandFoldSalt:
     """New behavior (not in the private repo's original score_band): fold
     assignment is salted by snapshot_version, so a station->fold split

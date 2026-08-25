@@ -47,13 +47,15 @@ class TestFindSubmissionManifest:
 
 
 class TestLoadActiveCandidates:
-    def _write_submission(self, tmp_path, submission_id, github, model_version, band_key, targets, zones):
+    def _write_submission(self, tmp_path, submission_id, github, model_version, band_key, targets, zones, candidate=None):
         year_month, seq = submission_id.rsplit("-", 1)
         d = tmp_path / "submissions" / year_month / f"{seq}-{github}-slug"
         d.mkdir(parents=True)
         manifest = {
             "claims": [{"model_version": model_version, "band_key": band_key, "targets": targets, "zones": zones}],
         }
+        if candidate is not None:
+            manifest["method"] = {"candidate": candidate}
         (d / "manifest.yaml").write_text(yaml.dump(manifest))
 
     def _ledger_line(self, submission_id, github, snapshot_version="v2026.08", reproduced=True, ts="2026-08-01T00:00:00Z"):
@@ -94,6 +96,34 @@ class TestLoadActiveCandidates:
 
         active = sfe.load_active_candidates(str(ledger_dir), str(tmp_path / "submissions"))
         assert active[("ds-test", "lag_fill", "tmax", "Cfb")]["author_github"] == "bob"
+
+    def test_rung_a_candidate_has_no_proposed_correction_entry(self, tmp_path):
+        """2026-08-25: a Rung A manifest has no method.candidate block at
+        all -- load_active_candidates must report None, not KeyError."""
+        self._write_submission(tmp_path, "2026-08-001", "alice", "ds-test", "lag_fill", ["tmax"], ["Cfb"])
+        ledger_dir = tmp_path / "ledger"
+        ledger_dir.mkdir()
+        (ledger_dir / "submissions.jsonl").write_text(json.dumps(self._ledger_line("2026-08-001", "alice")) + "\n")
+
+        active = sfe.load_active_candidates(str(ledger_dir), str(tmp_path / "submissions"))
+        assert active[("ds-test", "lag_fill", "tmax", "Cfb")]["proposed_correction_entry"] is None
+
+    def test_extracts_proposed_correction_entry_for_rung_b(self, tmp_path):
+        """The single most important wiring this Codex-review-fixed gap
+        was about: score_forward_eval must be able to read a Rung B
+        submission's OWN declared value back out of its manifest."""
+        self._write_submission(
+            tmp_path, "2026-08-001", "alice", "ds-test", "lag_fill", ["tmax", "tmin"], ["Cfb"],
+            candidate={"tmax": {"Cfb": {"bias_correction_c": 0.8}}},
+        )
+        ledger_dir = tmp_path / "ledger"
+        ledger_dir.mkdir()
+        (ledger_dir / "submissions.jsonl").write_text(json.dumps(self._ledger_line("2026-08-001", "alice")) + "\n")
+
+        active = sfe.load_active_candidates(str(ledger_dir), str(tmp_path / "submissions"))
+        assert active[("ds-test", "lag_fill", "tmax", "Cfb")]["proposed_correction_entry"] == {"bias_correction_c": 0.8}
+        # tmin has no entry in the candidate block -- must stay None, not inherit tmax's
+        assert active[("ds-test", "lag_fill", "tmin", "Cfb")]["proposed_correction_entry"] is None
 
 
 class TestBandMonthsAndNewMonths:
@@ -305,3 +335,51 @@ class TestMainIntegration:
         assert len(credit_after_2) == 1
         assert credit_after_2[0]["event"] == "tenure_start"
         assert credit_after_2[0]["author_github"] == "alice"
+
+    def test_rung_b_candidate_status_decided_by_declared_value_not_mechanical_fit(self, tmp_path, monkeypatch):
+        """The exact gap Codex's adversarial review caught in the original
+        design: this same fixture (grid=25, station=30, delta_c=4.0) is a
+        huge MECHANICAL win (qrf_err~=1.0 vs rmse_grid=5.0, way past
+        AUTO_ENABLE_MARGIN). A Rung B candidate that declares a wildly
+        wrong bias_correction_c must still LOSE the cycle -- if this
+        script fell back to qrf_beats_grid_with_margin (the mechanically-
+        fit number) instead of the candidate's own declared value, this
+        would incorrectly come out a 'win'."""
+        june_rows = [self._row(f"S{i:03d}", date(2023, 6, 1)) for i in range(40)]
+        july_rows = [self._row(f"S{i:03d}", date(2023, 7, 1)) for i in range(40)]
+
+        v1_dir = tmp_path / "cache" / "v2026.08"
+        v2_dir = tmp_path / "cache" / "v2026.10"
+        self._build_snapshot(v1_dir, {"2023-06": june_rows})
+        self._build_snapshot(v2_dir, {"2023-06": june_rows, "2023-07": july_rows})
+
+        submissions_root = tmp_path / "submissions"
+        sub_dir = submissions_root / "2026-08" / "001-alice-lagfill-cfb"
+        sub_dir.mkdir(parents=True)
+        (sub_dir / "manifest.yaml").write_text(yaml.dump({
+            "claims": [{"model_version": "ds-test", "band_key": "lag_fill", "targets": ["tmax"], "zones": ["Cfb"]}],
+            # Wildly wrong: overcorrects by 20C on top of an already-small ~1C residual.
+            "method": {"candidate": {"tmax": {"Cfb": {"bias_correction_c": -20.0}}}},
+        }))
+
+        ledger_dir = tmp_path / "ledger"
+        ledger_dir.mkdir()
+        (ledger_dir / "submissions.jsonl").write_text(json.dumps({
+            "ts": "2026-08-01T00:00:00Z", "submission_id": "2026-08-001", "author_github": "alice",
+            "snapshot_version": "v2026.08", "reproduced": True,
+        }) + "\n")
+        (ledger_dir / "cycles.jsonl").write_text("")
+        (ledger_dir / "credit.jsonl").write_text("")
+
+        monkeypatch.setattr(sfe.rs, "download_snapshot", lambda version, cache_root=None: str(tmp_path / "cache" / version))
+        monkeypatch.setattr(sys, "argv", [
+            "score_forward_eval.py", "--cycle", "2026-09", "--current-snapshot-version", "v2026.10",
+            "--ledger-dir", str(ledger_dir), "--submissions-root", str(submissions_root),
+        ])
+        sfe.main()
+
+        with open(ledger_dir / "cycles.jsonl") as f:
+            cycles_after_1 = [json.loads(line) for line in f if line.strip()]
+        assert len(cycles_after_1) == 1
+        assert cycles_after_1[0]["status"] == "loss"
+        assert cycles_after_1[0]["proposed_correction_beats_grid_with_margin"] is False
