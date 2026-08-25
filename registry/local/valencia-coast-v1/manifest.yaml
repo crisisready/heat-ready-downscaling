@@ -1,0 +1,95 @@
+registry_schema_version: 1
+model_id: "local/valencia-coast-v1"
+version: "1.0.0"
+title: "Valencia coast-distance local correction"
+description: >-
+  corrected_grid = raw_grid + intercept + slope * coast_dist_km, fit on real ECA&D station
+  data for a tight 9-station Valencia-city cluster, station-grouped leave-one-out
+  cross-validated with a 2,000-draw cluster bootstrap.
+
+  Two things this entry records that the prose record makes easy to lose. The correction never
+  used the model's own delta and never depended on a Koppen zone label -- it was fit directly
+  on station-minus-grid deltas at real Valencia coordinates. And the 2-covariate version was
+  TESTED and was worse out-of-fold than this 1-covariate one, which is why the entry claims a
+  single term.
+authors:
+  - name: "Nishant Kishore"
+    github: "nish-kishore"
+    affiliation: "CrisisReady"
+method:
+  kind: "covariate-linear-local"
+  compile_to: "polygon_params"
+  summary: >-
+    Depends on a static per-location covariate, so it cannot be expressed as zone-keyed
+    parameters -- two polygons at different coast distances need different corrections. Compiles
+    at promotion time into one precomputed offset per served polygon.
+  data_sources:
+    - name: "ECA&D daily station observations (Valencia region)"
+      license: "CC-BY-4.0"
+      redistribution_tier: "attribution-required"
+      reproducible_fetch: "https://www.ecad.eu/dailydata/predefinedseries.php"
+      attribution_required: true
+      license_note: >-
+        ECA&D's own terms require acknowledgement of the data providers. Declared
+        attribution-required rather than unrestricted for that reason; see #31's tier rules.
+    - name: "Natural Earth 1:10m physical coastline"
+      license: "CC0-1.0"
+      redistribution_tier: "unrestricted"
+      reproducible_fetch: "https://naciscdn.org/naturalearth/10m/physical/ne_10m_coastline.zip"
+      sha256: "bfa04cdbcbef07ef90dfca1dabb48062eca29900a113df0f389303e255484017"
+      attribution_required: false
+claims:
+  - target: "tmin"
+    zone: "BSh"
+    band: "lag_fill"
+    geography: "Valencia city cluster (9 ECA&D stations)"
+    evidence:
+      metric: "rmse_reduction_pct_hot_day"
+      value: 0.310
+      ci95: [0.204, 0.392]
+      n_stations: 9
+      n_clusters: 9
+      stratum: "hot_day"
+      holdout_design: "station_salted_fold"
+      provenance: "publicly_reproducible"
+      report: null
+      report_sha256: null
+      notes: >-
+        Hot days (observed tmax >= 30C), 810 held-out station-days. Raw grid tmin error is much
+        worse on hot nights than its whole-year average (2.213C vs 1.794C) and this closes
+        roughly a third of that gap. Whole-year tmin is 19.4%, CI [0.104, 0.252] -- also
+        significant, and the basis this sharpens. Evidence lives in the private
+        crisisready/heat-risk-data-api repo at
+        research/valencia-local-model-evaluation/PHASE6_REAL_LOCAL_MODEL.md and
+        data/ecad_valencia_region/valencia_local_correction_cv_result.json; report is null here
+        rather than copied, because republishing that data into a public repo is a DATA_LICENSE
+        question nobody has answered. BAND ATTRIBUTION IS PROVISIONAL: the fit used Open-Meteo
+        archive grid values, which correspond to the lag_fill band, but the research never
+        stated a band and this should be confirmed before the cell is promoted.
+  - target: "tmax"
+    zone: "BSh"
+    band: "lag_fill"
+    geography: "Valencia city cluster (9 ECA&D stations)"
+    evidence:
+      metric: "rmse_reduction_pct"
+      value: 0.118
+      ci95: [-0.118, 0.294]
+      n_stations: 9
+      n_clusters: 9
+      stratum: "all"
+      holdout_design: "station_salted_fold"
+      provenance: "publicly_reproducible"
+      report: null
+      report_sha256: null
+      notes: >-
+        A CANDIDATE, not a validated cell: the point estimate is positive but the interval
+        includes zero, so it is registered as claimed evidence rather than as a result. Recorded
+        because the honest per-target split (tmin validated, tmax not) is exactly what a
+        single boolean would have lost. More stations is the concrete lever.
+status_history:
+  - status: "registered"
+    at: "2026-08-25"
+    by: "nish-kishore"
+    note: >-
+      Retroactive registration, roadmap Phase 1. Not validated and not serving: no gate has been
+      published and no production write has occurred.
