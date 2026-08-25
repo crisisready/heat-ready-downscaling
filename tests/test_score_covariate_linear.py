@@ -754,3 +754,19 @@ def test_the_specific_columns_the_reviewers_caught_are_excluded():
     for name in ("elevation_m", "pop_density_per_km2", "aspect_deg"):
         assert name not in score.STATIC_COVARIATE_ALLOWLIST
         assert name in score.COVARIATE_EXCLUSIONS
+
+
+def test_a_snapshot_predating_the_coast_column_reports_it_absent_not_zero():
+    """coast_dist_km was added to snapshot._pa_schema() in the same change
+    that allowlisted it, but snapshots BUILT BEFORE that have no such column,
+    and read_band_partitions returns whatever columns a file actually has. A
+    correction proposing coast_dist_km against an old snapshot must therefore
+    say so by name -- which is exactly what the absent-covariate flag added
+    for the PR #27 allowlist defect now buys, on a case it was not written
+    for."""
+    rows, deltas = _rows(cov_name="lst_warm_season_anomaly_c")  # no coast_dist_km key
+    block = _score(rows, deltas, _entry(cov="coast_dist_km"),
+                   applied_idx=set())["proposed_correction_by_stratum"]["all"]
+
+    assert block["n_scored"] == 0
+    assert block["covariates_absent_from_every_row"] == ["coast_dist_km"]

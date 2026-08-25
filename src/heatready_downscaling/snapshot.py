@@ -89,6 +89,15 @@ def _pa_schema():
         ("elevation_mean_m", pa.float64()),
         ("slope_deg", pa.float64()),
         ("aspect_deg", pa.float64()),
+        # 2026-08-25: distance to the nearest OCEAN coastline, from Natural
+        # Earth 1:10m (public domain). Added because Valencia's real validated
+        # correction is affine in this quantity and there was no column for it
+        # to be scored against -- see heatready_downscaling.coastline, whose
+        # own docstring also records what this does NOT measure (lakes, so a
+        # Great Lakes city reads as ~950km inland). Nullable: a snapshot built
+        # before this column existed simply has no value, which score_band
+        # fails closed on and reports by name rather than treating as zero.
+        ("coast_dist_km", pa.float64()),
         # covariate provenance
         ("pop_density_source", pa.string()),  # "landscan_global"
         ("pop_density_buffer_deg", pa.float64()),  # 0.01

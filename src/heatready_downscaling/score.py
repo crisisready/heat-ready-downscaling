@@ -113,6 +113,14 @@ MAX_COVARIATE_TERMS = 2
 # added here and to the snapshot schema together, so this list never again
 # promises a covariate the data cannot supply.
 STATIC_COVARIATE_ALLOWLIST = (
+    # Distance to the nearest OCEAN coastline (Natural Earth 1:10m, public
+    # domain). The covariate Valencia's real validated correction is affine
+    # in. Admitted here and added to snapshot._pa_schema() in the same change,
+    # which is the invariant test_the_allowlist... enforces. See
+    # heatready_downscaling.coastline for what it does not measure -- lakes
+    # are excluded, so this is the wrong covariate for a Great Lakes city and
+    # right for a maritime one.
+    "coast_dist_km",
     "elevation_mean_m",
     "elevation_rel_to_gridcell_m",
     "slope_deg",
