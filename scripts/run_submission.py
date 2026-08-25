@@ -373,8 +373,22 @@ def coverage_violations(manifest: dict, reproduced_report: dict) -> list[str]:
             metrics = by_zone.get(zone)
             if metrics is None:
                 violations.append(f"claimed zone {zone!r} (target={target}) is not present in the reproduced report at all")
-            elif metrics.get("n_qrf_applied", 0) == 0:
-                violations.append(f"claimed zone {zone!r} (target={target}) has zero applied rows in the reproduction")
+            elif (
+                metrics.get("n_qrf_applied", 0) == 0
+                and (metrics.get("proposed_correction_n_scored") or 0) == 0
+            ):
+                # A raw_grid-basis Rung B proposal is DESIGNED to be scored in
+                # a zone where the model applies to nothing -- that is the
+                # case it exists for (BSh lag_fill has zero measured stations;
+                # Cwa tmin fails its own CV gate). Rejecting zero-applied
+                # zones unconditionally would have made every such submission
+                # fail coverage no matter how well its proposal scored. Zero
+                # applied rows AND zero scored proposal rows is still a real
+                # coverage violation.
+                violations.append(
+                    f"claimed zone {zone!r} (target={target}) has zero applied rows and no "
+                    "scored proposal rows in the reproduction",
+                )
     return violations
 
 

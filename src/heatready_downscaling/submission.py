@@ -38,6 +38,17 @@ _TOLERANCE_MAXIMA = {
     "proposed_correction_bias_c": 0.05,
     "proposed_correction_margin_pct": 0.01,
     "proposed_vs_best_fit_gap_c": 0.05,
+    # 2026-08-25, the covariate_linear shape: ceilings for score_band's flat
+    # stratum mirrors. Every mirrored metric needs one -- validate_manifest
+    # only enforces a ceiling for metrics listed HERE, so an unlisted metric
+    # silently accepts any tolerance a manifest declares.
+    "proposed_correction_ci95_lo_pct": 0.01,
+    "proposed_correction_ci95_hi_pct": 0.01,
+    "proposed_correction_hot_day_rmse_c": 0.02,
+    "proposed_correction_hot_day_bias_c": 0.05,
+    "proposed_correction_hot_day_margin_pct": 0.01,
+    "proposed_correction_hot_day_ci95_lo_pct": 0.01,
+    "proposed_correction_hot_day_ci95_hi_pct": 0.01,
 }
 
 # The covariate_linear shape (2026-08-25, the third one). Kept as an explicit
@@ -285,6 +296,17 @@ def validate_manifest(manifest: dict) -> None:
             "a Rung A submission (evaluation coverage only) proposes no correction of its own",
         )
     if rung == "B":
+        # Run score_band's own runtime validator here too, so a manifest that
+        # is schema-valid but semantically impossible becomes a readable hard
+        # reject at lint time instead of an uncaught ValueError deep inside
+        # run_submission.py's reproduce() call (code-review finding, PR #27).
+        # JSON Schema cannot express "valid_range has one entry per term",
+        # "valid_range bounds are ordered", or "no covariate appears twice",
+        # so all three passed validation and then crashed the referee.
+        for target_key, by_zone in (candidate or {}).items():
+            for zone_key, entry in (by_zone or {}).items():
+                if all(k in entry for k in _score.PROPOSED_CORRECTION_COVARIATE_LINEAR_KEYS):
+                    _score.validate_covariate_linear_entry(entry, f"{target_key}/{zone_key}")
         # Coverage check (Codex adversarial review finding, PR #24): every
         # (target, zone) this manifest CLAIMS must have its own candidate
         # entry -- not just "candidate is non-empty." Without this, a

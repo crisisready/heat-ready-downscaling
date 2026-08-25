@@ -140,6 +140,44 @@ BIAS_CV_FOLDS = 5  # station-grouped folds for validating the bias correction (s
 BIAS_CV_MIN_STATIONS = 2 * BIAS_CV_FOLDS  # need enough distinct stations for folds to mean anything
 
 
+def _flat_stratum_mirrors(by_stratum: dict | None) -> dict:
+    """Flat, tolerance-checkable mirrors of the per-stratum metrics.
+
+    report.compare_reports iterates FLAT keys in a zone's metric dict and
+    subtracts them, so anything nested is invisible to the independent
+    re-derivation promote_from_public.py performs. Mirroring the gating
+    numbers as scalars is what makes the stratified evidence verifiable
+    rather than merely reported. Every key here has a ceiling in
+    submission._TOLERANCE_MAXIMA -- a metric with no ceiling accepts any
+    tolerance a manifest declares, which would let an incorrect claim pass as
+    reproduced.
+    """
+    out: dict = {
+        "proposed_correction_ci95_lo_pct": None,
+        "proposed_correction_ci95_hi_pct": None,
+        "proposed_correction_hot_day_rmse_c": None,
+        "proposed_correction_hot_day_bias_c": None,
+        "proposed_correction_hot_day_margin_pct": None,
+        "proposed_correction_hot_day_ci95_lo_pct": None,
+        "proposed_correction_hot_day_ci95_hi_pct": None,
+    }
+    if not by_stratum:
+        return out
+    all_ci = (by_stratum.get("all") or {}).get("rmse_improvement_ci95_pct")
+    if all_ci:
+        out["proposed_correction_ci95_lo_pct"] = all_ci[0]
+        out["proposed_correction_ci95_hi_pct"] = all_ci[1]
+    hot = by_stratum.get("hot_day") or {}
+    out["proposed_correction_hot_day_rmse_c"] = hot.get("rmse_c")
+    out["proposed_correction_hot_day_bias_c"] = hot.get("bias_c")
+    out["proposed_correction_hot_day_margin_pct"] = hot.get("rmse_improvement_pct")
+    hot_ci = hot.get("rmse_improvement_ci95_pct")
+    if hot_ci:
+        out["proposed_correction_hot_day_ci95_lo_pct"] = hot_ci[0]
+        out["proposed_correction_hot_day_ci95_hi_pct"] = hot_ci[1]
+    return out
+
+
 def classify_proposed_correction(entry: dict, zone: str | None = None) -> str:
     """Which of the three proposed_correction shapes `entry` is, or raise.
 
@@ -243,7 +281,11 @@ def _covariate_linear_effect(entry: dict, covariates: dict, n: int):
     1,515m, versus the ~20km city cluster the fit came from) showed every
     correction degrade badly outside its fitted range -- so extrapolating a
     slope past that range and calling the result scored would overstate what
-    was measured. Returns (effect, scoreable_mask, n_missing, n_out_of_range).
+    was measured.
+
+    Returns (effect, scoreable_mask, missing_mask, out_of_range_mask) -- masks
+    rather than counts, so the caller can report each stratum's own gap counts
+    instead of the zone-wide ones.
     """
     import numpy as np
 
@@ -269,10 +311,10 @@ def _covariate_linear_effect(entry: dict, covariates: dict, n: int):
         effect = effect + float(term["slope"]) * np.nan_to_num(values, nan=0.0)
 
     scoreable &= ~missing & ~out_of_range
-    return effect, scoreable, int(missing.sum()), int(out_of_range.sum())
+    return effect, scoreable, missing, out_of_range
 
 
-def _bootstrap_reduction_ci(baseline_err, corrected_err, station_ids, *, fold_salt: str):
+def _bootstrap_reduction_ci(baseline_err, corrected_err, station_ids, *, fold_salt: str, stream: str = ""):
     """95% cluster-bootstrap CI on the RMSE reduction (as a fraction), whole
     stations resampled with replacement.
 
@@ -290,7 +332,15 @@ def _bootstrap_reduction_ci(baseline_err, corrected_err, station_ids, *, fold_sa
     # Seeded from fold_salt (the snapshot version) so the interval is
     # reproducible for a given snapshot and cannot be re-rolled by
     # resubmitting -- same reasoning as the station->fold hash.
-    seed = int(hashlib.md5(f"{fold_salt}:bootstrap".encode()).hexdigest()[:8], 16)
+    # `stream` (zone:target:stratum) is mixed in so each reported interval is
+    # drawn from its own station-index sequence. Salted on fold_salt alone,
+    # every interval in a report with the same station count reused the
+    # identical resampling draw, making the all/hot_day intervals for a zone
+    # (and its tmax/tmin intervals) perfectly correlated rather than
+    # independent -- and nothing downstream should be able to mistake them for
+    # independent evidence. Reproducibility is preserved either way, since the
+    # stream label is itself deterministic. (code-review finding, PR #27)
+    seed = int(hashlib.md5(f"{fold_salt}:{stream}:bootstrap".encode()).hexdigest()[:8], 16)
     rng = np.random.default_rng(seed)
     reductions = np.empty(BOOTSTRAP_N)
     n_stations = len(unique)
@@ -692,14 +742,14 @@ def score_band(
 
             n_full = len(baseline_err_full)
             if proposed_correction_kind == "covariate_linear":
-                effect_full, scoreable_full, n_missing, n_out_of_range = (
+                effect_full, scoreable_full, missing_full, out_of_range_full = (
                     _covariate_linear_effect(proposed_entry, cov_full, n_full)
                 )
                 intercept_only_full = np.full(n_full, float(proposed_entry["intercept"]))
             elif proposed_correction_kind == "bias":
                 effect_full = np.full(n_full, float(proposed_entry["bias_correction_c"]))
                 scoreable_full = np.ones(n_full, dtype=bool)
-                n_missing = n_out_of_range = 0
+                missing_full = out_of_range_full = np.zeros(n_full, dtype=bool)
                 intercept_only_full = None
             else:  # affine -- the effect is on delta_c, so it varies per row
                 delta_arr = np.array(b["delta_c"])
@@ -709,11 +759,20 @@ def score_band(
                     - delta_arr
                 )
                 scoreable_full = np.ones(n_full, dtype=bool)
-                n_missing = n_out_of_range = 0
+                missing_full = out_of_range_full = np.zeros(n_full, dtype=bool)
                 intercept_only_full = None
 
             hot_mask_full = np.array(
                 [(t is not None and t >= hot_day_threshold_c) for t in obs_tmax_full],
+            ) if n_full else np.zeros(0, dtype=bool)
+            # Rows where the STRATIFIER itself is missing. station_tmax_c is
+            # nullable, and a tmin claim on rows with no paired tmax
+            # observation would otherwise produce a hot_day block that is
+            # all-None and indistinguishable from "no hot days occurred" --
+            # a real difference, and the hot-day number is the one this whole
+            # shape exists to surface. (code-review finding, PR #27)
+            stratifier_missing_full = np.array(
+                [t is None for t in obs_tmax_full],
             ) if n_full else np.zeros(0, dtype=bool)
 
             proposed_by_stratum = {}
@@ -725,8 +784,15 @@ def score_band(
                 n_scored = int(mask.sum())
                 block: dict = {
                     "n_scored": n_scored,
-                    "n_covariate_missing": n_missing,
-                    "n_covariate_out_of_range": n_out_of_range,
+                    # Scoped to THIS stratum, not to the zone: reporting the
+                    # zone-wide gap count inside the hot_day block would
+                    # overstate how much of the hot-day sample was dropped.
+                    "n_covariate_missing": int((in_stratum & missing_full).sum()),
+                    "n_covariate_out_of_range": int((in_stratum & out_of_range_full).sum()),
+                    # Only meaningful for a stratum that USES the stratifier.
+                    "n_stratifier_missing": (
+                        0 if stratum == "all" else int(stratifier_missing_full.sum())
+                    ),
                     # Which series the correction was ADDED to. Reported
                     # explicitly because a raw_grid correction and a
                     # model_delta correction are scored over different row
@@ -744,7 +810,8 @@ def score_band(
                         "rmse_improvement_vs_basis_pct": None, "beats_grid": None,
                         "beats_grid_with_margin": None,
                         "rmse_improvement_ci95_pct": None, "verdict": None,
-                        "rmse_intercept_only_c": None, "covariate_earns_keep": None,
+                        "rmse_intercept_only_c": None, "rmse_best_constant_c": None,
+                        "covariate_earns_keep": None,
                     })
                     proposed_by_stratum[stratum] = block
                     continue
@@ -774,7 +841,8 @@ def score_band(
                     ((base_rmse - corr_rmse) / base_rmse) if base_rmse > 0 else None
                 )
                 ci = _bootstrap_reduction_ci(
-                    grid_err_stratum, corr_err, stratum_ids_full[mask], fold_salt=fold_salt,
+                    grid_err_stratum, corr_err, stratum_ids_full[mask],
+                    fold_salt=fold_salt, stream=f"{zone}:{target}:{stratum}",
                 )
                 # Does the covariate term actually earn its keep, or would the
                 # intercept alone (i.e. a flat constant, the shape we already
@@ -785,9 +853,26 @@ def score_band(
                 if intercept_only_full is not None:
                     io_err = base_err - intercept_only_full[mask]
                     io_rmse = float(np.sqrt(np.mean(io_err ** 2)))
-                    earns_keep = corr_rmse < io_rmse
+                    # The verdict is against the BEST flat constant on these
+                    # rows (mean(base_err), which is what the mechanical
+                    # bias_correction_c fit would produce), NOT against the
+                    # submitted intercept. The declared intercept comes from a
+                    # JOINT fit with the slope and is not the optimal constant,
+                    # so comparing against it is biased toward keeping the
+                    # covariate: a proposal with a badly-placed intercept and a
+                    # near-zero slope would report earns_keep=True purely
+                    # because its own intercept-only variant is bad. The
+                    # documented question is "would the flat constant we
+                    # already had have done as well", and that constant is the
+                    # best one. (code-review finding, PR #27; this is also the
+                    # comparison PHASE6 actually ran, against the zone mean.)
+                    best_const_rmse = float(
+                        np.sqrt(np.mean((base_err - float(np.mean(base_err))) ** 2)),
+                    )
+                    earns_keep = corr_rmse < best_const_rmse
                 else:
                     io_rmse = None
+                    best_const_rmse = None
                     earns_keep = None
                 block.update({
                     "grid_rmse_c": grid_rmse,
@@ -804,6 +889,7 @@ def score_band(
                     "rmse_improvement_ci95_pct": list(ci) if ci is not None else None,
                     "verdict": _verdict(margin, ci, n_scored),
                     "rmse_intercept_only_c": io_rmse,
+                    "rmse_best_constant_c": best_const_rmse,
                     "covariate_earns_keep": earns_keep,
                 })
                 proposed_by_stratum[stratum] = block
@@ -815,6 +901,21 @@ def score_band(
         _all = (proposed_by_stratum or {}).get("all") or {}
         proposed_correction_rmse_c = _all.get("rmse_c")
         proposed_correction_bias_c = _all.get("bias_c")
+        # How many rows the PROPOSAL was actually scored on. For a
+        # model_delta-basis proposal this equals n_qrf, so nothing changes.
+        # For a raw_grid-basis one it is the count of scoreable rows in the
+        # zone, which is the whole point: n_qrf is 0 in exactly the cells this
+        # shape exists to unlock (BSh lag_fill, Cwa tmin), and every gate
+        # below that keyed off n_qrf would have reported "insufficient data"
+        # forever for a proposal with hundreds of perfectly good grid rows.
+        # Caught by all three round-1 reviewers independently.
+        proposed_correction_n_scored = _all.get("n_scored")
+        # The n that actually governs THIS cell's gating: the proposal's own
+        # sample when there is a proposal, the model-applied count otherwise
+        # (Rung A, unchanged byte-for-byte).
+        gating_n = (
+            proposed_correction_n_scored if proposed_entry is not None else n_qrf
+        ) or 0
         has_both = rmse_qrf is not None and rmse_grid is not None
         beats_grid = (rmse_qrf < rmse_grid) if has_both else None
         margin_pct = ((rmse_grid - rmse_qrf) / rmse_grid) if (has_both and rmse_grid > 0) else None
@@ -826,20 +927,43 @@ def score_band(
             (rmse_grid - rmse_affine_cv) / rmse_grid
             if (rmse_affine_cv is not None and rmse_grid and rmse_grid > 0) else None
         )
+        # Which grid baseline the FLAT fields compare against.
+        #
+        # For bias/affine: rmse_grid_c, the zone-wide value, exactly as before
+        # this change -- these numbers have live consumers and are left
+        # untouched, mismatch and all (see the per-stratum block's own comment).
+        #
+        # For covariate_linear: the "all" stratum's own matched-row
+        # grid_rmse_c. This is not tidiness, it closes a live gaming surface
+        # (code-review finding, PR #27): a covariate_linear proposal can
+        # EXCLUDE rows, via a narrow valid_range or a sparsely-populated
+        # covariate, so its RMSE may cover far fewer rows than rmse_grid_c
+        # does. Comparing a hand-picked 40-row RMSE against a 120-row
+        # rmse_grid_c would let a contributor declare a range covering only
+        # favourable stations and bank a "win" in the monthly cycle. There is
+        # no back-compatibility cost here because this shape is new.
+        if proposed_correction_kind == "covariate_linear":
+            proposed_grid_baseline = _all.get("grid_rmse_c")
+        else:
+            proposed_grid_baseline = rmse_grid
         proposed_correction_beats_grid = (
-            (proposed_correction_rmse_c < rmse_grid)
-            if (proposed_correction_rmse_c is not None and rmse_grid is not None) else None
+            (proposed_correction_rmse_c < proposed_grid_baseline)
+            if (proposed_correction_rmse_c is not None and proposed_grid_baseline is not None)
+            else None
         )
         proposed_correction_margin_pct = (
-            (rmse_grid - proposed_correction_rmse_c) / rmse_grid
-            if (proposed_correction_rmse_c is not None and rmse_grid and rmse_grid > 0) else None
+            (proposed_grid_baseline - proposed_correction_rmse_c) / proposed_grid_baseline
+            if (
+                proposed_correction_rmse_c is not None
+                and proposed_grid_baseline and proposed_grid_baseline > 0
+            ) else None
         )
         # Same MIN_ZONE_N/AUTO_ENABLE_MARGIN bar the mechanically-derived
         # with_margin fields use -- a contributor's declared value gets no
         # easier a bar than the maintainer's own fitted one.
         proposed_correction_beats_grid_with_margin = (
             (proposed_correction_margin_pct >= AUTO_ENABLE_MARGIN)
-            if (proposed_correction_margin_pct is not None and n_qrf >= MIN_ZONE_N) else None
+            if (proposed_correction_margin_pct is not None and gating_n >= MIN_ZONE_N) else None
         )
         # proposed_vs_best_fit_gap_c: how far the DECLARED value is from
         # what this function would have fit itself, evaluated on the
@@ -958,7 +1082,15 @@ def score_band(
                 (margin_pct_affine_cv >= AUTO_ENABLE_MARGIN if margin_pct_affine_cv is not None else None)
                 if n_qrf >= MIN_ZONE_N else None
             ),
-            "gated_insufficient_n": n_qrf < MIN_ZONE_N,
+            # Reflects the n that actually governs this cell (see gating_n
+            # above): identical to n_qrf < MIN_ZONE_N for every Rung A cell
+            # and every model_delta-basis proposal, and correct rather than
+            # permanently-insufficient for a raw_grid-basis one.
+            # score_forward_eval.py reads this to decide
+            # win/loss/insufficient_n, so fixing it here fixes that consumer
+            # too rather than needing a parallel change there.
+            "gated_insufficient_n": gating_n < MIN_ZONE_N,
+            "proposed_correction_n_scored": proposed_correction_n_scored,
             # Rung B (2026-08-25): scoring a contributor-DECLARED, fixed
             # correction, never the mechanically-derived one above -- see
             # this function's own docstring. None (not 0/False) whenever no
@@ -981,6 +1113,17 @@ def score_band(
             # change has to be updated to keep working.
             "proposed_correction_basis": proposed_correction_basis,
             "proposed_correction_by_stratum": proposed_by_stratum,
+            # Flat mirrors of the stratified metrics that actually gate a
+            # decision. These exist because report.compare_reports -- the
+            # function promote_from_public.py re-derives against -- walks FLAT
+            # metric keys inside each zone's dict and does arithmetic on them;
+            # a nested block is unreachable to it. Without these mirrors the
+            # new evidence would be reported but never independently verified,
+            # which is precisely the thing GOVERNANCE.md says never to do.
+            # The "all" stratum's rmse/bias/margin already have flat fields
+            # above, so only its interval is mirrored here; the hot_day
+            # stratum is mirrored in full.
+            **_flat_stratum_mirrors(proposed_by_stratum),
         }
     return result
 

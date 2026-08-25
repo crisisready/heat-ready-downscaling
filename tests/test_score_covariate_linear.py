@@ -215,6 +215,21 @@ def test_hot_day_stratum_scores_a_disjoint_row_set():
     assert strata["hot_day"]["n_scored"] == 60
 
 
+def test_covariate_gap_counts_are_scoped_to_their_own_stratum():
+    """A zone-wide gap count reported inside the hot_day block would overstate
+    how much of the hot-day sample was actually dropped."""
+    cov = [(i % 30) for i in range(120)]
+    # Every missing covariate sits in the MILD half of the sample.
+    for i in range(0, 60, 2):
+        cov[i] = None
+    rows, deltas = _rows(n=120, hot_from=60, cov_values=cov)
+    strata = _score(rows, deltas, _entry())["proposed_correction_by_stratum"]
+
+    assert strata["all"]["n_covariate_missing"] == 30
+    assert strata["hot_day"]["n_covariate_missing"] == 0
+    assert strata["hot_day"]["n_scored"] == 60
+
+
 def test_a_correction_that_only_helps_on_hot_days_reads_that_way():
     """Valencia's actual pattern: the effect concentrates on hot days and is
     diluted by whole-year averaging. A single whole-sample number cannot say
@@ -397,3 +412,215 @@ def test_an_entry_matching_no_shape_is_rejected():
     rows, deltas = _rows()
     with pytest.raises(ValueError, match="matches none"):
         _score(rows, deltas, {"something_else": 1.0})
+
+
+class TestRawGridProposalReachesTheConsumers:
+    """Round-1 review consensus (all three reviewers independently, and the
+    Claude-side finding survived adversarial verification): making score_band
+    able to SCORE a raw_grid proposal is useless if every downstream gate
+    still keys off n_qrf, which is 0 in exactly the cells this shape exists
+    to unlock. These tests pin the end-to-end path, not just the metric."""
+
+    def _scored(self, n=60):
+        rows, deltas = _rows(n=n)
+        return _score(rows, deltas, _entry(), applied_idx=set())
+
+    def test_the_proposals_own_scored_count_is_reported(self):
+        res = self._scored()
+        assert res["n_qrf_applied"] == 0
+        assert res["proposed_correction_n_scored"] == 60
+
+    def test_gated_insufficient_n_follows_the_proposal_not_n_qrf(self):
+        """score_forward_eval.py reads gated_insufficient_n to decide
+        win/loss/insufficient_n. Keyed off n_qrf it would report
+        insufficient_n forever, so the cell could never accumulate the two
+        consecutive wins promotion requires."""
+        res = self._scored()
+        assert res["gated_insufficient_n"] is False
+
+    def test_the_flat_with_margin_field_is_set_not_none(self):
+        """The flat field is what score_forward_eval.py and
+        promote_from_public.py's evidence check actually read."""
+        res = self._scored()
+        assert res["proposed_correction_beats_grid_with_margin"] is True
+
+    def test_a_genuinely_thin_proposal_is_still_gated(self):
+        """The fix must not turn into "never gate a raw_grid proposal"."""
+        res = self._scored(n=score.MIN_ZONE_N - 1)
+        assert res["gated_insufficient_n"] is True
+        assert res["proposed_correction_beats_grid_with_margin"] is None
+
+    def test_rung_a_gating_is_unchanged(self):
+        """No proposal at all: gating still keys off the model-applied count,
+        byte-for-byte as before."""
+        rows, deltas = _rows(n=60)
+        res = score.score_band(
+            _Adapter(deltas, applied_idx=set()), rows, "tmax", fold_salt="v2026.08",
+        )["BSh"]
+        assert res["gated_insufficient_n"] is True
+        assert res["proposed_correction_n_scored"] is None
+
+    def test_model_delta_gating_still_matches_n_qrf(self):
+        rows, deltas = _rows(n=60)
+        res = _score(rows, deltas, _entry(basis="model_delta"), applied_idx=set(range(60)))
+        assert res["proposed_correction_n_scored"] == res["n_qrf_applied"] == 60
+
+    def test_the_claimed_report_validates_with_the_new_kind(self):
+        """report.validate_report is called by scripts/run_submission.py
+        before scoring; an unlisted kind rejected the whole submission."""
+        from heatready_downscaling import report
+
+        res = self._scored()
+        report.validate_report({
+            "report_schema_version": 1,
+            "model_version": "ds-2026.07-rf5",
+            "band_key": "lag_fill",
+            "snapshot_version": "v2026.08",
+            "sample_requested": 60,
+            "rows_sampled": 60,
+            "rows_paired": 60,
+            "fidelity_check": {"n": 0},
+            "by_target": {"tmax": {"BSh": res}},
+        })
+
+    def test_coverage_check_accepts_a_zero_applied_zone_with_a_scored_proposal(self):
+        import sys
+        sys.path.insert(0, "scripts")
+        import run_submission
+
+        res = self._scored()
+        manifest = {"claims": [{"targets": ["tmax"], "zones": ["BSh"]}]}
+        reproduced = {"by_target": {"tmax": {"BSh": res}}}
+        assert run_submission.coverage_violations(manifest, reproduced) == []
+
+    def test_coverage_check_still_rejects_a_zone_with_neither(self):
+        import sys
+        sys.path.insert(0, "scripts")
+        import run_submission
+
+        manifest = {"claims": [{"targets": ["tmax"], "zones": ["BSh"]}]}
+        reproduced = {"by_target": {"tmax": {"BSh": {
+            "n_qrf_applied": 0, "proposed_correction_n_scored": 0,
+        }}}}
+        violations = run_submission.coverage_violations(manifest, reproduced)
+        assert len(violations) == 1
+        assert "zero applied rows and no scored proposal rows" in violations[0]
+
+
+class TestRoundOneReviewFindings:
+    """Regression tests for the round-1 /code-review findings that were not
+    already covered above. Each names the failure it pins."""
+
+    def test_a_narrow_valid_range_cannot_buy_a_win_on_a_hand_picked_subset(self):
+        """The gaming surface: exclude rows via valid_range so only favourable
+        ones score, then compare that small RMSE against the zone-wide
+        rmse_grid_c. The flat fields must use the matched-row baseline."""
+        grid_val, cov_cap = 20.0, 10
+        rows, deltas = [], []
+        for i in range(120):
+            cov = i % 30
+            included = cov < cov_cap
+            # Included rows: the declared linear pattern plus residual noise
+            # the correction cannot remove. Excluded rows: a huge error, which
+            # is what would inflate a zone-wide baseline and flatter the
+            # proposal.
+            raw_err = (0.8 - 0.04 * cov + (1.0 if i % 2 == 0 else -1.0)) if included else 8.0
+            rows.append({
+                "climate_zone": "BSh", "station_id": f"STN{i % 20:03d}",
+                "grid_tmax_c": grid_val, "station_tmax_c": grid_val + raw_err,
+                "coast_dist_km": cov,
+            })
+            deltas.append(0.0)
+        res = _score(rows, deltas, _entry(valid_range=[[0.0, float(cov_cap - 1)]]),
+                     applied_idx=set())
+        block = res["proposed_correction_by_stratum"]["all"]
+
+        assert block["n_covariate_out_of_range"] > 0
+        # The flat margin must be computed against the SAME rows the proposal
+        # was scored on, not against the zone-wide grid error inflated by the
+        # rows the proposal excluded.
+        assert res["proposed_correction_margin_pct"] == pytest.approx(
+            block["rmse_improvement_pct"],
+        )
+        # And the zone-wide comparison really would have been much kinder --
+        # that gap is the gaming surface this closes.
+        zone_wide_margin = (
+            (res["rmse_grid_c"] - res["proposed_correction_rmse_c"]) / res["rmse_grid_c"]
+        )
+        assert zone_wide_margin > res["proposed_correction_margin_pct"] + 0.3
+
+    def test_earns_keep_is_judged_against_the_best_flat_constant(self):
+        """A badly-placed intercept plus a near-zero slope must not report
+        earns_keep just because its own intercept-only variant is bad."""
+        rows, deltas = _rows(n=60, slope=0.0, intercept=0.8)
+        res = _score(rows, deltas, _entry(slope=-0.0001, intercept=-4.0),
+                     applied_idx=set())
+        block = res["proposed_correction_by_stratum"]["all"]
+
+        assert block["rmse_best_constant_c"] is not None
+        assert block["rmse_intercept_only_c"] > block["rmse_best_constant_c"]
+        assert block["covariate_earns_keep"] is False
+
+    def test_missing_stratifier_rows_are_counted(self):
+        """A hot_day block that is all-None because station_tmax_c was null
+        must be distinguishable from one where no hot days occurred."""
+        rows, deltas = _rows(n=60, target="tmin")
+        for r in rows:
+            r["station_tmax_c"] = None
+        strata = _score(rows, deltas, _entry(), target="tmin",
+                        applied_idx=set())["proposed_correction_by_stratum"]
+
+        assert strata["hot_day"]["n_scored"] == 0
+        assert strata["hot_day"]["n_stratifier_missing"] == 60
+        assert strata["all"]["n_scored"] == 60
+
+    def test_bootstrap_intervals_are_not_identical_across_strata(self):
+        """Salted on fold_salt alone, every interval with the same station
+        count reused one resampling draw, so intervals were perfectly
+        correlated rather than independent."""
+        rows, deltas = _rows(n=120, hot_from=0, noise=0.3)
+        # hot_from=0 makes every row hot, so both strata cover the SAME rows
+        # -- identical inputs, and the only thing that can differ is the
+        # resampling stream.
+        strata = _score(rows, deltas, _entry(), applied_idx=set())["proposed_correction_by_stratum"]
+        assert strata["all"]["n_scored"] == strata["hot_day"]["n_scored"] == 120
+        assert (
+            strata["all"]["rmse_improvement_ci95_pct"]
+            != strata["hot_day"]["rmse_improvement_ci95_pct"]
+        )
+
+    def test_semantically_impossible_manifests_are_rejected_at_lint_time(self):
+        """These three are schema-valid -- JSON Schema cannot express them --
+        so without a lint-time check they crashed the referee mid-reproduce
+        instead of producing a contributor-readable hard reject."""
+        from heatready_downscaling import submission
+
+        def manifest(entry):
+            return {
+                "schema_version": 1, "submission_id": "2026-08-002",
+                "author": {"github": "x", "name": "X", "orcid": None, "affiliation": None},
+                "track": "serving-ready", "rung": "B",
+                "snapshot": {"version": "v2026.07", "manifest_sha256": "a" * 64},
+                "claims": [{"model_version": "ds-2026.07-rf5", "band_key": "lag_fill",
+                            "targets": ["tmin"], "zones": ["BSh"]}],
+                "method": {"kind": "parameters", "entrypoint": "scripts/run_submission.py",
+                           "args": [], "package_version": "0.1.0", "code_ref": None,
+                           "extra_covariates": [], "candidate": {"tmin": {"BSh": entry}}},
+                "claimed_report": "claimed_report.json",
+                "tolerance": {"rmse_qrf_c": 0.005},
+                "reproducibility": {"seed": None, "runtime_notes": None},
+            }
+
+        base = {"basis": "raw_grid", "intercept": 0.0,
+                "terms": [{"covariate": "coast_dist_km", "slope": 1.0}]}
+
+        with pytest.raises(ValueError, match="one \\[min, max\\] per term"):
+            submission.validate_manifest(manifest({**base, "valid_range": [[0.0, 1.0], [0.0, 1.0]]}))
+        with pytest.raises(ValueError, match="inverted"):
+            submission.validate_manifest(manifest({**base, "valid_range": [[25.0, 0.0]]}))
+        with pytest.raises(ValueError, match="more than once"):
+            submission.validate_manifest(manifest({
+                "basis": "raw_grid", "intercept": 0.0,
+                "terms": [{"covariate": "coast_dist_km", "slope": 1.0},
+                          {"covariate": "coast_dist_km", "slope": 2.0}],
+            }))
