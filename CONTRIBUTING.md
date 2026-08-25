@@ -234,9 +234,53 @@ method:
 
 New covariates are welcome if they are global (not one-country-specific), reproducibly fetchable
 (a documented, automatable source, not a one-off manual download), and either openly licensed or
-licensable by us for redistribution. CI enforces `extra_covariates[].license` against an allowlist
-of SPDX identifiers plus a `proprietary-licensed` escape hatch that requires a named licensor and
-flags the submission for manual review. Research-track wins are advisory: they do not promote to
+licensable by us for redistribution.
+
+## Declaring data you bring
+
+Anything you use beyond the published snapshot has to be declared, and the declaration is
+checked. Two places to put it:
+
+- `method.extra_covariates[]` for a new model covariate (the research track).
+- `method.data_sources[]` for any other data input: a local model's training data, a sensor
+  feed, a coastline layer.
+
+A `data_sources` entry needs a `name`, a `license`, a `reproducible_fetch` URL, and a
+`redistribution_tier` of `unrestricted`, `attribution-required`, or `no-redistribution`:
+
+```yaml
+method:
+  data_sources:
+    - name: "Natural Earth 1:10m physical coastline"
+      license: "CC0-1.0"
+      redistribution_tier: unrestricted
+      reproducible_fetch: "https://naciscdn.org/naturalearth/10m/physical/ne_10m_coastline.zip"
+      sha256: "bfa04cdbcbef07ef90dfca1dabb48062eca29900a113df0f389303e255484017"
+```
+
+`license` must be an SPDX identifier from the allowlist in
+`heatready_downscaling.licensing.SPDX_ALLOWLIST`, and identifiers are case-sensitive
+(`CC-BY-4.0`, not `cc-by-4.0`). Non-commercial variants are not accepted: HeatReady's own
+`DATA_LICENSE` carries no such restriction, so accepting NC data would make the published
+snapshot's stated terms wrong for part of its own contents.
+
+If your data has a real licence with no SPDX identifier -- common for municipal and
+national-agency agreements -- use `license: proprietary-licensed` and name who granted it in
+`licensor`. That is not a way around the allowlist; it routes the submission to a maintainer
+instead of passing automatically. `no-redistribution` data does the same: a local model may
+legitimately train on data we cannot republish, but somebody has to decide that, so it never
+passes silently.
+
+**Note on this section's history, since it matters for how much you should trust our docs.**
+This paragraph previously said CI enforced an SPDX allowlist and a HEAD check. It did not --
+the check was documented from July and only built on 2026-08-25. Any licence string passed
+until then. Nothing wrong was ingested (no submission had declared a covariate), but the
+control was real only on paper, and we would rather say so than quietly fix it. It is real
+now: enforced in `validate_manifest` itself, so the referee rejects a bad licence, and again
+in the `Data licensing` workflow, which additionally checks that each `reproducible_fetch`
+URL resolves.
+
+Research-track wins are advisory: they do not promote to
 production automatically, but they do feed a ranked roadmap and, with your permission, public
 credit for the finding.
 

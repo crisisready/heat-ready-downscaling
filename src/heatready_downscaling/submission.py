@@ -13,6 +13,7 @@ documentation made enforceable. See PROVENANCE.md.
 """
 
 from heatready_downscaling import score as _score
+from heatready_downscaling import licensing as _licensing
 from heatready_downscaling import snapshot as _snapshot
 
 MANIFEST_SCHEMA_VERSION = 1
@@ -214,14 +215,58 @@ MANIFEST_SCHEMA: dict = {
                             "name": {"type": "string"},
                             "source": {"type": "string"},
                             "url": {"type": "string"},
-                            # SPDX identifier, or the "proprietary-licensed" escape hatch
-                            # (CONTRIBUTING.md's own research-track section) requiring a
-                            # named licensor -- enforced by CI (allowlist + HEAD check),
-                            # not by this schema alone.
+                            # SPDX identifier, or the "proprietary-licensed" escape
+                            # hatch requiring a named licensor. The rules live in
+                            # heatready_downscaling.licensing and are enforced by
+                            # validate_manifest below, plus a reachability check in
+                            # the Data licensing workflow. This comment previously
+                            # claimed CI already enforced it; that was untrue from
+                            # July until 2026-08-25 -- the allowlist did not exist and
+                            # any string passed. Kept as a bare string type here
+                            # because the allowlist is a Python set, not something
+                            # jsonschema should duplicate.
                             "license": {"type": "string"},
                             "global": {"type": "boolean"},
                             "cadence": {"type": "string"},
                             "reproducible_fetch": {"type": "string"},
+                            # Required by licensing.check_license_id when
+                            # license == "proprietary-licensed"; that rule is
+                            # cross-field, so it lives in Python rather than
+                            # here (same convention as the tolerance ceilings).
+                            "licensor": {"type": "string"},
+                        },
+                    },
+                },
+                # Any data input beyond the published snapshot, per the
+                # roadmap's standing data-sourcing policy. Distinct from
+                # extra_covariates, which is specifically the research
+                # track's new-model-covariate path: a local model's training
+                # data, or a contributed sensor source, is a data_source
+                # without being a model covariate.
+                #
+                # Shape-checked here; the licensing RULES (SPDX allowlist,
+                # the named-licensor escape hatch, tier/attribution
+                # consistency) live in heatready_downscaling.licensing and
+                # are enforced by validate_manifest below, so the monthly
+                # re-scoring path that reads merged manifests off disk
+                # without re-running jsonschema is covered too.
+                "data_sources": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["name", "license", "reproducible_fetch", "redistribution_tier"],
+                        "properties": {
+                            "name": {"type": "string", "minLength": 1},
+                            "version": {"type": "string"},
+                            "license": {"type": "string", "minLength": 1},
+                            "license_note": {"type": "string"},
+                            "licensor": {"type": "string"},
+                            "attribution_required": {"type": "boolean"},
+                            "redistribution_tier": {
+                                "enum": list(_licensing.REDISTRIBUTION_TIERS),
+                            },
+                            "reproducible_fetch": {"type": "string", "minLength": 1},
+                            "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
                         },
                     },
                 },
@@ -277,7 +322,11 @@ def validate_manifest(manifest: dict) -> None:
     ceiling (a check jsonschema's own vocabulary can't express per-key
     against a table like _TOLERANCE_MAXIMA), or if `method.candidate`'s
     presence doesn't match `rung` (required for Rung B, disallowed
-    otherwise -- see MANIFEST_SCHEMA's own comment on `candidate`)."""
+    otherwise -- see MANIFEST_SCHEMA's own comment on `candidate`), or
+    licensing.LicensingError if any declared data source or extra covariate
+    fails the SPDX allowlist / named-licensor rules (see
+    heatready_downscaling.licensing, which implements a control CONTRIBUTING.md
+    documented long before anything enforced it)."""
     import jsonschema
 
     jsonschema.validate(manifest, MANIFEST_SCHEMA)
@@ -338,6 +387,16 @@ def validate_manifest(manifest: dict) -> None:
             f"(metric: (claimed, max_allowed)): {too_loose} -- a tolerance this loose would let "
             "an incorrect claim pass as 'reproduced'"
         )
+
+    # Licensing, for every data input beyond the published snapshot. Raises
+    # licensing.LicensingError (a ValueError) on a violation. Called HERE
+    # rather than only from a workflow because CONTRIBUTING.md's promise was
+    # never implemented anywhere, and because score_forward_eval.py's monthly
+    # re-scoring reads merged manifests off disk without re-running
+    # jsonschema -- a rule enforced only at merge time would not hold for the
+    # official cycle. The entries needing human review are returned rather
+    # than raised; run_submission.py surfaces them in the referee comment.
+    _licensing.check_manifest_licensing(manifest)
 
 
 def parse_submission_id(submission_id: str) -> tuple[str, int]:

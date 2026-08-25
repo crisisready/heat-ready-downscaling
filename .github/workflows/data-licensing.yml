@@ -1,0 +1,66 @@
+# Licensing gate for any data a submission brings beyond the published
+# snapshot.
+#
+# Added 2026-08-25 (PR for P2b). CONTRIBUTING.md has told contributors since
+# July that "CI enforces extra_covariates[].license against an allowlist of
+# SPDX identifiers plus a proprietary-licensed escape hatch", and
+# submission.py's schema comment said the same. Neither existed. The rules now
+# live in heatready_downscaling.licensing and are enforced by
+# validate_manifest itself (so the referee rejects a bad license, and so the
+# monthly re-scoring path is covered too); this workflow adds the
+# reachability half and gives the check its own visible status on a
+# submission PR.
+#
+# permissions: contents: read, and a plain `pull_request` trigger rather than
+# `pull_request_target`, matching referee.yml's reasoning: a job that reads
+# contributor-authored input must not hold a writable token or repo secrets.
+name: Data licensing
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - "submissions/**"
+  push:
+    branches: [main]
+    paths:
+      - "submissions/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: data-licensing-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  licensing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: pip install -e '.[snapshot,dev,train]'
+
+      # Exit 1 is a real licensing violation and fails the job. Exit 2 means
+      # every RULE passed but a declared reproducible_fetch URL did not
+      # resolve -- reported, and deliberately NOT a failure: a flaky CDN or a
+      # runner without egress is not the contributor's fault, and rejecting a
+      # correct submission for it would be a false negative on exactly the
+      # kind of good-faith entry this program wants.
+      - name: Check declared data licensing
+        run: |
+          set +e
+          python scripts/check_data_licensing.py
+          status=$?
+          set -e
+          if [ "$status" -eq 2 ]; then
+            echo "::warning::A declared reproducible_fetch URL was unreachable. Rules passed; see the log."
+            exit 0
+          fi
+          exit "$status"

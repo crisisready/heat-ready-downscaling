@@ -464,6 +464,25 @@ def render_comment(
             )
     lines.append("")
 
+    # Data sources or covariates whose licensing needs a human decision --
+    # the "flags the submission for manual review" half of CONTRIBUTING.md's
+    # licensing promise. These are NOT rejections: proprietary-licensed data
+    # with a named licensor, and no-redistribution data a local model may
+    # legitimately train on, are both admissible with a maintainer's call.
+    # They just cannot pass silently.
+    try:
+        from heatready_downscaling import licensing
+        flagged = licensing.check_manifest_licensing(manifest)
+    except Exception:
+        flagged = []
+    if flagged:
+        lines.append(
+            "**Licensing: needs a maintainer decision before promotion.** Not a rejection -- "
+            "these entries are admissible, but not automatically:",
+        )
+        lines.extend(f"- {f}" for f in flagged)
+        lines.append("")
+
     # Surface a covariate that resolved on no row, in the CONTRIBUTOR-VISIBLE
     # comment. score_band reports it in covariates_absent_from_every_row, but
     # provisional.json and the workflow log are not what a contributor reads
