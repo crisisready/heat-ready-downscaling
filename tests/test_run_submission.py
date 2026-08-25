@@ -17,6 +17,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 import run_submission as rs
+from heatready_downscaling import report as report_mod
 
 from heatready_downscaling import snapshot as snap
 
@@ -328,3 +329,45 @@ class TestReproduceIntegration:
         )
         result = rs.reproduce(str(tmp_path), "ds-test", "era5", "v2026.07")
         assert result["fidelity_check"] == {"n": 0}
+
+
+class TestAbsentCovariateReachesTheContributor:
+    """code-review finding, PR #28: score_band reported a covariate that
+    resolved on no row, but render_comment never printed it, so the PR comment
+    a contributor actually reads stayed indistinguishable from an empty cell --
+    the exact silence the flag exists to remove, one layer further out."""
+
+    def _report(self, absent):
+        return {
+            "by_target": {"tmin": {"BSh": {
+                "n_qrf_applied": 0,
+                "rmse_grid_c": 1.5, "rmse_qrf_c": None,
+                "rmse_improvement_pct_debiased_cv": None,
+                "qrf_beats_grid_with_margin": None,
+                "proposed_correction_by_stratum": {
+                    "all": {"covariates_absent_from_every_row": absent},
+                },
+            }}},
+        }
+
+    def _manifest(self):
+        # Reuses this module's own module-level _manifest() fixture rather
+        # than hand-rolling a second one that can drift from render_comment's
+        # real field expectations.
+        return _manifest()
+
+    def test_the_comment_names_the_offending_covariate(self):
+        report = self._report(["lst_warm_season_anomaly_c"])
+        body = rs.render_comment(
+            self._manifest(), [], report_mod.ToleranceResult(True, {}, []), report, [],
+        )
+        assert "resolved on no row" in body
+        assert "lst_warm_season_anomaly_c" in body
+        assert "zone=`BSh`" in body
+
+    def test_a_clean_report_says_nothing_about_covariates(self):
+        report = self._report([])
+        body = rs.render_comment(
+            self._manifest(), [], report_mod.ToleranceResult(True, {}, []), report, [],
+        )
+        assert "resolved on no row" not in body

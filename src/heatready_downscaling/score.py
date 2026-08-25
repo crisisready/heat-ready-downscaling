@@ -115,7 +115,6 @@ MAX_COVARIATE_TERMS = 2
 STATIC_COVARIATE_ALLOWLIST = (
     "elevation_mean_m",
     "elevation_rel_to_gridcell_m",
-    "elevation_m",
     "slope_deg",
     "canopy_height_mean_m",
     "canopy_frac_over_3m",
@@ -123,10 +122,51 @@ STATIC_COVARIATE_ALLOWLIST = (
     "wc_tree_frac",
     "wc_water_frac",
     "ghsl_urban_fraction",
-    "pop_density_per_km2",
     "lst_warm_season_anomaly_c",
     "lat",
 )
+
+# Why each excluded snapshot column is excluded, as data rather than prose, so
+# COVARIATE_EXCLUSIONS and STATIC_COVARIATE_ALLOWLIST can be asserted disjoint
+# in a test. This exists because "is it a snapshot column" -- the check added
+# with this module's schema-tie test -- is necessary but NOT sufficient, and
+# two entries got through it (code-review findings, PR #28): a column can be
+# perfectly real and still be unservable or untrustworthy for this purpose.
+# Adding a covariate to the allowlist now means either it is absent here, or
+# you deleted its entry and said why.
+COVARIATE_EXCLUSIONS = {
+    # --- day-varying: cannot be compiled to one value per polygon ---
+    "grid_tmax_c": "day-varying",
+    "grid_tmin_c": "day-varying",
+    "grid_specific_humidity_kgkg": "day-varying",
+    "nighttime_wind_ms": "day-varying",
+    "date": "day-varying",
+    # --- circular: a linear slope on a compass bearing is not interpretable ---
+    "aspect_deg": "circular (359 and 1 degrees are adjacent physically, maximally distant linearly)",
+    # --- station-scoped, not per-location: a served POLYGON has no station,
+    # so there is no value to compile. elevation_m is station-reported
+    # metadata (snapshot._pa_schema groups it under "station identity / fold
+    # keys", populated from GHCN/ECA&D records and nullable), NOT a DEM
+    # quantity. Fitting a slope on it either cannot be evaluated at serving
+    # time or gets silently evaluated against elevation_mean_m, which is a
+    # different measurement (station-reported point vs DEM cell mean over a
+    # ~1km buffer). elevation_mean_m / elevation_rel_to_gridcell_m are the
+    # DEM-derived per-location forms and ARE allowlisted.
+    "elevation_m": "station-reported metadata, not a per-location DEM quantity",
+    "lon": "station identity/fold key",
+    "region": "station identity/fold key",
+    "station_id": "station identity/fold key",
+    # --- known training/serving mismatch: the promoted correction would not
+    # be the correction that was scored. PROVENANCE.md records this column
+    # differing on all 8 smoke-test stations with no consistent ratio (727 vs
+    # 379, 5139 vs 3183 people/km2) between the snapshot's post-fix LandScan
+    # extraction and the pre-fix values the deployed corpus carries -- this
+    # repo's own issue #1. A slope fitted against snapshot values would be
+    # applied at serving time against values that can differ by ~2x. Same
+    # treatment coast_dist_km gets: admit it once the mismatch is resolved,
+    # not before.
+    "pop_density_per_km2": "documented training/serving mismatch, this repo's issue #1",
+}
 
 # Stratum thresholds are a FIXED enum, never a per-submission choice: a
 # contributor free to pick the cutoff can shop for the one that flatters a

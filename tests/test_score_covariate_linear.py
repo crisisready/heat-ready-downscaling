@@ -731,3 +731,26 @@ def test_a_partially_nan_covariate_is_not_reported_as_absent():
 
     assert block["n_covariate_missing"] == 30
     assert block["covariates_absent_from_every_row"] == []
+
+
+def test_the_allowlist_and_the_exclusions_are_disjoint():
+    """"Is it a snapshot column" is necessary but not sufficient, and two
+    entries got through that check alone (code-review findings, PR #28):
+    elevation_m is station-scoped so a served polygon has no value to
+    compile, and pop_density_per_km2 has a documented training/serving
+    mismatch. COVARIATE_EXCLUSIONS records the reason for each, and this
+    asserts nothing is on both lists -- so re-adding one means deleting its
+    exclusion and saying why."""
+    overlap = set(score.STATIC_COVARIATE_ALLOWLIST) & set(score.COVARIATE_EXCLUSIONS)
+    assert overlap == set(), f"allowlisted despite a recorded exclusion: {sorted(overlap)}"
+
+
+def test_every_exclusion_states_a_reason():
+    for name, reason in score.COVARIATE_EXCLUSIONS.items():
+        assert reason and reason.strip(), f"{name} is excluded with no stated reason"
+
+
+def test_the_specific_columns_the_reviewers_caught_are_excluded():
+    for name in ("elevation_m", "pop_density_per_km2", "aspect_deg"):
+        assert name not in score.STATIC_COVARIATE_ALLOWLIST
+        assert name in score.COVARIATE_EXCLUSIONS

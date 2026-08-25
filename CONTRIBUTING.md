@@ -153,18 +153,19 @@ would have scored better.
 
 **Also open, as of this change**: a correction that varies continuously with a static
 per-location covariate, instead of being one constant for a whole zone. A flat number cannot
-express a correction that gets stronger as you move inland, and there is no zone or subzone
-small enough to fake it. Declare `basis`, an `intercept`, and one covariate term:
+express a correction that gets stronger with elevation, or with how built-up a neighbourhood is,
+and there is no zone or subzone small enough to fake it. Declare `basis`, an `intercept`, and one
+covariate term:
 
 ```yaml
     tmin:
       BSh:
-        basis: raw_grid                # or model_delta -- see below, this choice matters
-        intercept: 0.782
+        basis: raw_grid                  # or model_delta -- see below, this choice matters
+        intercept: 1.20
         terms:
-          - covariate: lst_warm_season_anomaly_c
-            slope: -0.0413
-        valid_range: [[-2.0, 6.0]]     # the covariate range your fit is actually evidence over
+          - covariate: elevation_mean_m
+            slope: -0.0065               # about a dry lapse rate, degrees C per metre
+        valid_range: [[0.0, 900.0]]      # the covariate range your fit is actually evidence over
 ```
 
 Three things to know before you use it:
@@ -176,14 +177,19 @@ Three things to know before you use it:
   one with no measured stations -- then a `model_delta` correction has nothing to attach to and
   will score as "not scored", while a `raw_grid` one is scoreable. Several of the darkest cells
   are exactly like this.
-- **Your covariate must be on the allowlist in `score.STATIC_COVARIATE_ALLOWLIST`**, and every
-  name there is a real column of the published snapshot. Two separate reasons. Day-varying
-  covariates (wind, humidity, the grid value itself) are excluded because a static covariate lets
-  a promotion precompute one value per served polygon, so nothing new has to run inside the
-  serving path. And the allowlist names snapshot *columns*, not the model's internal derived
-  feature names, because that is what the scorer actually reads off each row. Compass bearing
-  (`aspect_deg`) is excluded on a third ground: a straight-line slope on a circular variable is
-  not interpretable.
+- **Your covariate must be on the allowlist in `score.STATIC_COVARIATE_ALLOWLIST`.** Everything
+  else is excluded for a stated reason, and `score.COVARIATE_EXCLUSIONS` gives the reason for
+  each. Four kinds of exclusion, so you can tell in advance whether something you want is
+  admissible: day-varying quantities (wind, humidity, the grid value itself), because a static
+  covariate is what lets a promotion precompute one value per served polygon with nothing new
+  running in the serving path; the model's internal derived feature names, because the scorer
+  reads real snapshot *columns* off each row and a derived name silently matches nothing;
+  station-scoped columns like `elevation_m`, because a served polygon has no station and so has
+  no value to compile (`elevation_mean_m` is the per-location form, and it is allowlisted); and
+  compass bearing `aspect_deg`, because a straight-line slope on a circular variable is not
+  interpretable. One more, `pop_density_per_km2`, is held back for a different reason: it has a
+  known training/serving mismatch (this repo's issue #1), so a slope fitted on snapshot values
+  would be applied against different values in production.
 - **One covariate term, two at the most.** This is a low cap on purpose. Our own two-covariate
   fit for Valencia was measurably *worse* on held-out stations than the one-covariate version --
   three free parameters against eight training stations per fold. The referee also reports what

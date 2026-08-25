@@ -1,0 +1,55 @@
+# Runs the test suite on every push and pull request.
+#
+# Added 2026-08-25 (PR #28). Until this existed, NO workflow in this repo ran
+# pytest at all -- the referee/ledger/forward-eval workflows install the
+# package and run their own scripts, nothing more. That meant every invariant
+# this suite enforces held only for whoever remembered to run pytest locally,
+# which is not an invariant. The immediate motivating case: PR #28 added a
+# test tying score.STATIC_COVARIATE_ALLOWLIST to snapshot._pa_schema()'s real
+# columns, and claimed the two "cannot drift again" -- a claim that was not
+# actually true of anything automated. This workflow is what makes it true.
+#
+# Deliberately NOT triggered by `paths:` -- a change anywhere can break a
+# contract asserted somewhere else, which is the whole reason the
+# allowlist/schema drift went unnoticed in the first place.
+#
+# `permissions: contents: read` and a plain `pull_request` trigger (never
+# `pull_request_target`), matching referee.yml's own reasoning: a job that
+# executes repository code on a PR's content must not hold a writable token
+# or repo secrets.
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # [snapshot] for pyarrow (snapshot.py's partition read/write, which
+      # test_snapshot.py and the allowlist/schema drift test both need) and
+      # [dev] for pytest itself. [train] is deliberately omitted: lightgbm and
+      # pykrige are training-only, and conftest.py already ignores the four
+      # test modules that need the private repo's own environment.
+      - name: Install
+        run: pip install -e '.[snapshot,dev]'
+
+      - name: pytest
+        run: pytest -q
