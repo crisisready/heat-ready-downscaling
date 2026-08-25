@@ -414,15 +414,6 @@ class FrozenPredictionAdapter:
         self.model_version = model_version
         self._predictions = predictions_by_key
 
-    def __len__(self) -> int:
-        """Row count of the frozen predictions partition this adapter was
-        built from -- lets a caller (e.g. replay_downscaling.py's own
-        partition-coverage sanity check) confirm "were there really any
-        frozen predictions at all for this model_version/band" without
-        re-reading the same partition from disk a second time via
-        snapshot.read_predictions_partitions."""
-        return len(self._predictions)
-
     def coverage(self, rows: list[dict]) -> int:
         """How many of `rows` have AT LEAST ONE matching frozen
         prediction (either target) in this adapter's own partition --
