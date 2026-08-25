@@ -109,10 +109,20 @@ MAX_COVARIATE_TERMS = 2
 # interpretable (359 and 1 degrees are physically adjacent but maximally
 # distant linearly). It never belonged on a covariate_LINEAR allowlist.
 #
-# coast_dist_km is absent because it is not a snapshot column yet. It is
-# added here and to the snapshot schema together, so this list never again
-# promises a covariate the data cannot supply.
+# coast_dist_km was absent when this list was first corrected, because it was
+# not a snapshot column yet. It was added here and to snapshot._pa_schema() in
+# the same change (PR #29), which is the rule this list now follows: a
+# covariate is admitted only alongside the column that supplies it, so the
+# allowlist never again promises something the data cannot deliver.
 STATIC_COVARIATE_ALLOWLIST = (
+    # Distance to the nearest OCEAN coastline (Natural Earth 1:10m, public
+    # domain). The covariate Valencia's real validated correction is affine
+    # in. Admitted here and added to snapshot._pa_schema() in the same change,
+    # which is the invariant test_the_allowlist... enforces. See
+    # heatready_downscaling.coastline for what it does not measure -- lakes
+    # are excluded, so this is the wrong covariate for a Great Lakes city and
+    # right for a maritime one.
+    "coast_dist_km",
     "elevation_mean_m",
     "elevation_rel_to_gridcell_m",
     "slope_deg",
@@ -153,7 +163,16 @@ COVARIATE_EXCLUSIONS = {
     # ~1km buffer). elevation_mean_m / elevation_rel_to_gridcell_m are the
     # DEM-derived per-location forms and ARE allowlisted.
     "elevation_m": "station-reported metadata, not a per-location DEM quantity",
-    "lon": "station identity/fold key",
+    # lon is excluded while lat is allowlisted, and the reason is physical
+    # rather than structural (code-review finding, PR #29: the two sit in the
+    # same _pa_schema group and neither participates in fold assignment, which
+    # hashes station_id only, so "identity key" did not actually distinguish
+    # them). Latitude is a real physical covariate -- it orders insolation and
+    # day length monotonically, so a linear term in it means something.
+    # Longitude orders nothing physical: it is a coordinate, periodic at the
+    # antimeridian, and a slope in it would fit whatever east-west accident
+    # the station sample happens to contain.
+    "lon": "a coordinate, not a physical gradient -- periodic, and a slope in it fits sampling accident",
     "region": "station identity/fold key",
     "station_id": "station identity/fold key",
     # --- known training/serving mismatch: the promoted correction would not

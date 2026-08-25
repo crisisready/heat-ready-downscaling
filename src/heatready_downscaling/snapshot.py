@@ -35,14 +35,19 @@ import hashlib
 import json
 import os
 
-SNAPSHOT_SCHEMA_VERSION = 1
+# Bumped to 2 (2026-08-25) for the coast_dist_km column. A consumer reading a
+# v1 snapshot can now tell "this snapshot predates the column" from "this
+# column is genuinely null for this station", which is a real distinction --
+# score_band reports an all-null covariate as a probable NAME error, advice
+# that would be wrong for a pre-v2 snapshot (code-review finding, PR #29).
+SNAPSHOT_SCHEMA_VERSION = 2
 
 _BANDS = ("era5", "lag_fill") + tuple(f"forecast_lead{n}" for n in range(1, 8))
 
 
 def _pa_schema():
-    """Lazy-built pyarrow schema -- matches plan section 6.1's column list
-    exactly. A function, not a module-level constant, so importing this
+    """Lazy-built pyarrow schema -- plan section 6.1's column list, plus
+    coast_dist_km (added 2026-08-25, SNAPSHOT_SCHEMA_VERSION 2). A function, not a module-level constant, so importing this
     module never requires pyarrow unless a caller actually reads/writes a
     partition."""
     import pyarrow as pa
@@ -89,6 +94,15 @@ def _pa_schema():
         ("elevation_mean_m", pa.float64()),
         ("slope_deg", pa.float64()),
         ("aspect_deg", pa.float64()),
+        # 2026-08-25: distance to the nearest OCEAN coastline, from Natural
+        # Earth 1:10m (public domain). Added because Valencia's real validated
+        # correction is affine in this quantity and there was no column for it
+        # to be scored against -- see heatready_downscaling.coastline, whose
+        # own docstring also records what this does NOT measure (lakes, so a
+        # Great Lakes city reads as ~950km inland). Nullable: a snapshot built
+        # before this column existed simply has no value, which score_band
+        # fails closed on and reports by name rather than treating as zero.
+        ("coast_dist_km", pa.float64()),
         # covariate provenance
         ("pop_density_source", pa.string()),  # "landscan_global"
         ("pop_density_buffer_deg", pa.float64()),  # 0.01

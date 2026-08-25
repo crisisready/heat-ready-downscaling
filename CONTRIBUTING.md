@@ -153,19 +153,24 @@ would have scored better.
 
 **Also open, as of this change**: a correction that varies continuously with a static
 per-location covariate, instead of being one constant for a whole zone. A flat number cannot
-express a correction that gets stronger with elevation, or with how built-up a neighbourhood is,
-and there is no zone or subzone small enough to fake it. Declare `basis`, an `intercept`, and one
+express a correction that gets stronger as you move inland from the coast, and there is no zone or
+subzone small enough to fake it.
+
+One caveat on `coast_dist_km` specifically, because it will bite somebody: it measures distance to
+the nearest **ocean** coastline and does not know about lakes. Chicago, sitting on Lake Michigan,
+measures about 950 km. That is the right number for the sea and the wrong number for the water
+Chicago actually responds to, so this is not the covariate to reach for on a large-lake city. Declare `basis`, an `intercept`, and one
 covariate term:
 
 ```yaml
     tmin:
       BSh:
         basis: raw_grid                  # or model_delta -- see below, this choice matters
-        intercept: 1.20
+        intercept: 0.782
         terms:
-          - covariate: elevation_mean_m
-            slope: -0.0065               # about a dry lapse rate, degrees C per metre
-        valid_range: [[0.0, 900.0]]      # the covariate range your fit is actually evidence over
+          - covariate: coast_dist_km
+            slope: -0.0413               # degrees C per km inland
+        valid_range: [[0.0, 25.0]]       # the covariate range your fit is actually evidence over
 ```
 
 Three things to know before you use it:

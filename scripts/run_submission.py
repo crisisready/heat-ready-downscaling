@@ -423,6 +423,22 @@ def render_comment(
     if tolerance_result.violations:
         lines.append("**Tolerance violations:**")
         for v in tolerance_result.violations:
+            # A violation can legitimately carry non-numeric claimed/reproduced
+            # values and abs_diff=None: report.compare_reports reports a
+            # non-scalar metric as a violation rather than crashing, and the
+            # manifest's `tolerance` block accepts arbitrary keys, so a
+            # contributor can name a nested metric like
+            # proposed_correction_by_stratum. Formatting those with :.5f raised
+            # TypeError and crashed the referee instead of posting a rejection
+            # comment, on fully contributor-controlled input (code-review
+            # finding, PR #29).
+            if v.get("abs_diff") is None or not isinstance(v.get("claimed"), (int, float)):
+                lines.append(
+                    f"- target=`{v['target']}` zone=`{v['zone']}` metric=`{v['metric']}`: "
+                    f"{v.get('reason') or 'could not be compared against a numeric tolerance'} "
+                    f"(claimed={v['claimed']!r}, reproduced={v['reproduced']!r})"
+                )
+                continue
             lines.append(
                 f"- target=`{v['target']}` zone=`{v['zone']}` metric=`{v['metric']}`: "
                 f"claimed={v['claimed']:.5f} reproduced={v['reproduced']:.5f} "

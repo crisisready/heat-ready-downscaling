@@ -12,6 +12,8 @@ import os
 import sys
 from datetime import date
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 import build_band_paired_snapshot as bps
@@ -150,3 +152,83 @@ class TestFetchBandConfig:
     def test_forecast_leads_all_pin_gfs_seamless(self):
         for n in range(1, 8):
             assert bps._FETCH_BAND_CONFIG[f"forecast_lead{n}"]["base_model"] == "gfs_seamless"
+
+
+class TestCoastDistIsActuallyWritten:
+    """code-review finding, PR #29 (high): coast_dist_km was added to
+    snapshot._pa_schema() and to STATIC_COVARIATE_ALLOWLIST while NOTHING
+    computed or wrote it -- coastline.py had zero callers and it is not a
+    _PASSTHROUGH_COLUMNS entry (it is derived from lat/lon, not copied from
+    ghcn_training). Every snapshot built after that change would have had the
+    column null on every row, so a contributor following CONTRIBUTING.md's own
+    worked example would have been told their covariate name was wrong."""
+
+    def _fake_index(self, monkeypatch, distances):
+        from heatready_downscaling import coastline
+
+        class _Idx:
+            n_vertices = 3
+            def distance_km(self, lats, lons):
+                import numpy as np
+                return np.array(distances, dtype=float)
+
+        monkeypatch.setattr(coastline, "fetch_coastline_vertices", lambda p=None: [[0.0, 0.0]])
+        monkeypatch.setattr(coastline, "CoastlineIndex", lambda v: _Idx())
+
+    def test_it_lands_on_stations_and_on_every_band_row(self, monkeypatch):
+        import build_band_paired_snapshot as b
+
+        self._fake_index(monkeypatch, [4.1, 305.0])
+        stations = [
+            {"station_id": "A", "lat": 39.47, "lon": -0.38},
+            {"station_id": "B", "lat": 40.42, "lon": -3.70},
+        ]
+        band_rows = {
+            "era5": [{"station_id": "A"}, {"station_id": "B"}],
+            "lag_fill": [{"station_id": "A"}],
+        }
+        resolved = b.stamp_coast_dist_km(stations, band_rows)
+
+        assert resolved == 2
+        assert stations[0]["coast_dist_km"] == pytest.approx(4.1)
+        assert stations[1]["coast_dist_km"] == pytest.approx(305.0)
+        assert band_rows["era5"][0]["coast_dist_km"] == pytest.approx(4.1)
+        assert band_rows["era5"][1]["coast_dist_km"] == pytest.approx(305.0)
+        assert band_rows["lag_fill"][0]["coast_dist_km"] == pytest.approx(4.1)
+
+    def test_a_nan_distance_becomes_none_not_nan(self, monkeypatch):
+        import build_band_paired_snapshot as b
+
+        self._fake_index(monkeypatch, [float("nan")])
+        stations = [{"station_id": "A", "lat": None, "lon": None}]
+        band_rows = {"era5": [{"station_id": "A"}]}
+        resolved = b.stamp_coast_dist_km(stations, band_rows)
+
+        assert resolved == 0
+        assert stations[0]["coast_dist_km"] is None
+        assert band_rows["era5"][0]["coast_dist_km"] is None
+
+    def test_an_unobtainable_coastline_fails_the_build_by_default(self, monkeypatch):
+        """Silently emitting nulls here reproduces the exact bug this test
+        exists for, so the default must be a hard failure."""
+        import build_band_paired_snapshot as b
+        from heatready_downscaling import coastline
+
+        def _boom(path=None):
+            raise RuntimeError("no network")
+
+        monkeypatch.setattr(coastline, "fetch_coastline_vertices", _boom)
+        with pytest.raises(RuntimeError, match="no network"):
+            b.stamp_coast_dist_km([{"station_id": "A", "lat": 0.0, "lon": 0.0}], {})
+
+    def test_the_offline_opt_out_is_explicit_and_leaves_nothing_stamped(self, monkeypatch):
+        import build_band_paired_snapshot as b
+        from heatready_downscaling import coastline
+
+        def _boom(path=None):
+            raise RuntimeError("no network")
+
+        monkeypatch.setattr(coastline, "fetch_coastline_vertices", _boom)
+        stations = [{"station_id": "A", "lat": 0.0, "lon": 0.0}]
+        assert b.stamp_coast_dist_km(stations, {}, required=False) == 0
+        assert "coast_dist_km" not in stations[0]
