@@ -301,6 +301,29 @@ class TestFrozenPredictionAdapter:
         assert preds[0]["applied"] is True
         assert preds[0]["delta_c"] == pytest.approx(1.5)
 
+    def test_coverage_counts_rows_with_a_matching_key(self):
+        """2026-08-25: lets a caller (replay_downscaling.py's own
+        partition-coverage sanity check) confirm a specific batch of rows
+        actually has matching frozen predictions, not just that the
+        partition is non-empty in general."""
+        adapter = contract.FrozenPredictionAdapter(
+            "ds-test", {("A", "2023-07-01", "tmax"): {}, ("B", "2023-07-01", "tmin"): {}},
+        )
+        rows = [
+            {"station_id": "A", "date": date(2023, 7, 1)},   # matches (tmax)
+            {"station_id": "B", "date": date(2023, 7, 1)},   # matches (tmin)
+            {"station_id": "C", "date": date(2023, 7, 1)},   # no match at all
+        ]
+        assert adapter.coverage(rows) == 2
+
+    def test_coverage_zero_for_empty_predictions(self):
+        adapter = contract.FrozenPredictionAdapter("ds-test", {})
+        assert adapter.coverage([{"station_id": "A", "date": date(2023, 7, 1)}]) == 0
+
+    def test_coverage_zero_for_empty_rows(self):
+        adapter = contract.FrozenPredictionAdapter("ds-test", {("A", "2023-07-01", "tmax"): {}})
+        assert adapter.coverage([]) == 0
+
 
 class TestConfidenceClass:
     def test_none_ci95_is_low(self):
