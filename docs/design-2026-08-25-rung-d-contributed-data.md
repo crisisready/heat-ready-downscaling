@@ -27,7 +27,8 @@ What the program actually needs from "reproducible" is three distinct things, wh
 happens to deliver together:
 
 - **(a) Independent re-derivation** — the maintainer, not the claimant, recomputes the number.
-  `promote_from_public.py` already does this and does not care where the data came from.
+  The private serving repository's `scripts/promote_from_public.py` (`crisisready/heat-risk-data-api`)
+  already does this and does not care where the data came from.
 - **(b) Third-party falsifiability** — someone unaffiliated can check the claim.
 - **(c) Identification** — what exactly was used is pinned precisely enough that a dispute is
   resolvable.
@@ -78,10 +79,17 @@ the record's value comes from the categories staying distinct.
 
 ## What a Rung D submission is
 
-A **data-source dossier**, not a model and not a parameter. The acceptance checklist is
-`REPRODUCE_FOR_A_NEW_CITY.md`'s §0, promoted from a research habit to a submission
-requirement — and it is worth promoting precisely because it has already earned its keep:
-it is what rejected Chicago and NYC after each looked fine on paper.
+A **data-source dossier**, not a model and not a parameter. The acceptance checklist below is §0 of
+`research/seoul-local-sensor-validation/REPRODUCE_FOR_A_NEW_CITY.md` in the private
+`crisisready/heat-risk-data-api` repo, promoted from a research habit to a submission
+requirement — and worth promoting precisely because it has already earned its keep: it is what
+rejected Chicago and NYC after each looked fine on paper.
+
+**It has to be restated in this public repository to be binding.** A requirement a contributor
+cannot read is not a requirement, and citing a private-repo filename as the acceptance criteria
+for a public submission type would be the same documented-but-unreachable-control problem the
+licensing gate (#31) was written to correct. The seven items are therefore reproduced in full
+here, and implementation should move them into `CONTRIBUTING.md` rather than linking out.
 
 1. **Live-endpoint proof.** Hit the actual data endpoint, not the dataset's landing page.
 2. **Sensor count for the variable you actually need.** Chicago advertised 286 sensors; 7
@@ -108,7 +116,8 @@ it is what rejected Chicago and NYC after each looked fine on paper.
 - Per-sensor-day completeness against the **measured** cadence, not a guessed one.
 - Any cross-check field the feed offers (S-DoT's black-globe vs ambient caught 20 badly sited
   sensors).
-- **Join-key normalisation against the boundary polygons.**
+- **Join-key normalisation against the boundary polygons**, which is what the 101-vs-319 dong
+  mismatch above turned on.
 
 The argument for a shared harness rather than "run your own QC and report it" is not
 convenience, it is a real incident. The S-DoT QC script itself got the cadence wrong on its
@@ -116,8 +125,11 @@ first pass — it read the CSV's time-then-sensor row order as one sensor at 10-
 intervals — and produced a headline **"0 of 60,919 sensor-days usable"**. That is a false
 *rejection* of a data source that turned out to be excellent. A contributor running bespoke QC
 would have reported it and walked away, and we would have believed them. The same thread's
-whitespace-sensitive dong join separately understated Seoul's real coverage by about 3×
-(101 dong instead of 315).
+whitespace-sensitive dong join separately matched only **101 of 406** dong where **319 of 406**
+should have matched, understating coverage by about 3×. (Not to be confused with the post-QC
+figure of 315 of 423 dong having usable ground truth, which is a different measurement — an
+earlier draft of this document conflated the two, which is exactly the kind of number a
+normative design record should not get wrong.)
 
 Both errors were in the direction of wrongly *discarding* good data, which is the failure mode
 a contributor has no incentive to catch and every incentive to accept. We run the harness; the
@@ -162,12 +174,17 @@ it moves the estimate.
 
 **Our own record already contains the sharpest version of this problem, and it is not about
 consumer data at all.** Valencia's correction was fitted on 9 tight-cluster stations. Widening
-to 31 real, high-quality regional stations made every candidate correction *worse* — whole-year
-tmin reduction fell from 19.4% to 3.5–4.2%, and the bootstrap CI stopped excluding zero for
-both targets. More good data, correctly measured, degraded the result, because it diluted a
-local signal with a different microclimate. A city contributing 5,000 consumer sensors against
-9 reference stations is that dilution by three orders of magnitude, before any siting bias is
-considered.
+to 31 real, high-quality regional stations destroyed the validated result: whole-year tmin
+reduction fell from **19.4% to 3.5–4.2%** across every candidate correction, and the wide set's
+bootstrap CI stopped excluding zero for both targets (tmax [−4.2%, 24.9%], tmin [−5.0%, 10.0%]).
+
+Stated precisely, because the precise version is the useful one: tmax's *point estimate* held up
+under widening (around 10–12.5% against the tight cluster's 11.8%) — what collapsed was tmin,
+which was the statistically validated result, and coast-distance stopped being the best
+covariate at all once mountain stations entered. So the lesson is not "more data always hurts".
+It is that pooling data from different microclimates destroyed the one finding that had cleared
+its evidence bar. A city contributing 5,000 consumer sensors against 9 reference stations is
+that same dilution three orders of magnitude larger, before any siting bias is considered.
 
 So five conditions, each traceable to something already measured rather than to caution:
 
