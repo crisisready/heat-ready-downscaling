@@ -447,6 +447,30 @@ def render_comment(
                 f"{_fmt(m['rmse_improvement_pct_debiased_cv'])} | {m['qrf_beats_grid_with_margin']} |"
             )
     lines.append("")
+
+    # Surface a covariate that resolved on no row, in the CONTRIBUTOR-VISIBLE
+    # comment. score_band reports it in covariates_absent_from_every_row, but
+    # provisional.json and the workflow log are not what a contributor reads
+    # (code-review finding, PR #28): without this, a mistyped covariate still
+    # produced a comment indistinguishable from an empty cell, which is the
+    # exact silence that whole flag exists to remove.
+    absent: list[str] = []
+    for target, by_zone in reproduced_report["by_target"].items():
+        for zone, m in sorted(by_zone.items()):
+            for name in (m.get("proposed_correction_by_stratum") or {}).get("all", {}).get(
+                "covariates_absent_from_every_row",
+            ) or []:
+                absent.append(f"target=`{target}` zone=`{zone}` covariate=`{name}`")
+    if absent:
+        lines.append(
+            "**Covariate(s) that resolved on no row.** This is almost always a name error, not "
+            "sparse data. Check the name against the published snapshot's own columns "
+            "(`heatready_downscaling.score.STATIC_COVARIATE_ALLOWLIST` lists every covariate a "
+            "correction may use). The correction was NOT scored for these cells:",
+        )
+        lines.extend(f"- {a}" for a in absent)
+        lines.append("")
+
     lines.append(_DISCLAIMER)
     return "\n".join(lines)
 

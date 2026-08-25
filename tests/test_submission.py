@@ -279,7 +279,7 @@ class TestCovariateLinearCandidateSchema:
         submission.validate_manifest(self._manifest_cl({
             "basis": "raw_grid",
             "intercept": 0.782,
-            "terms": [{"covariate": "coast_dist_km", "slope": -0.0413}],
+            "terms": [{"covariate": "lst_warm_season_anomaly_c", "slope": -0.0413}],
             "valid_range": [[0.0, 25.0]],
         }))
 
@@ -311,7 +311,7 @@ class TestCovariateLinearCandidateSchema:
             submission.validate_manifest(self._manifest_cl({
                 "basis": "raw_grid", "intercept": 0.0,
                 "terms": [
-                    {"covariate": "coast_dist_km", "slope": 1.0},
+                    {"covariate": "lst_warm_season_anomaly_c", "slope": 1.0},
                     {"covariate": "elevation_mean_m", "slope": 1.0},
                     {"covariate": "slope_deg", "slope": 1.0},
                 ],
@@ -321,14 +321,14 @@ class TestCovariateLinearCandidateSchema:
         with pytest.raises(Exception):
             submission.validate_manifest(self._manifest_cl({
                 "basis": "raw_grid_but_different", "intercept": 0.0,
-                "terms": [{"covariate": "coast_dist_km", "slope": 1.0}],
+                "terms": [{"covariate": "lst_warm_season_anomaly_c", "slope": 1.0}],
             }))
 
     def test_off_enum_hot_day_threshold_is_rejected(self):
         with pytest.raises(Exception):
             submission.validate_manifest(self._manifest_cl({
                 "basis": "raw_grid", "intercept": 0.0,
-                "terms": [{"covariate": "coast_dist_km", "slope": 1.0}],
+                "terms": [{"covariate": "lst_warm_season_anomaly_c", "slope": 1.0}],
                 "hot_day_threshold_c": 28.5,
             }))
 
@@ -339,7 +339,7 @@ class TestCovariateLinearCandidateSchema:
         with pytest.raises(Exception):
             submission.validate_manifest(self._manifest_cl({
                 "basis": "raw_grid", "intercept": 0.0,
-                "terms": [{"covariate": "coast_dist_km", "slope": 1.0}],
+                "terms": [{"covariate": "lst_warm_season_anomaly_c", "slope": 1.0}],
                 "bias_correction_c": 0.5,
             }))
 
@@ -347,7 +347,7 @@ class TestCovariateLinearCandidateSchema:
         with pytest.raises(Exception):
             submission.validate_manifest(self._manifest_cl({
                 "basis": "raw_grid", "intercept": 0.0,
-                "terms": [{"covariate": "coast_dist_km", "slope": 1.0}],
+                "terms": [{"covariate": "lst_warm_season_anomaly_c", "slope": 1.0}],
                 "typo_field": 1,
             }))
 

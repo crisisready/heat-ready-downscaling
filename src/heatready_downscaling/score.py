@@ -33,9 +33,12 @@ original code):
 """
 
 import hashlib
+import logging
 import math
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 # The two shapes a Rung B proposed_correction zone entry may take -- exactly
 # one, never both. Public (code-review finding, PR #24: this shape was
@@ -72,38 +75,98 @@ PROPOSED_CORRECTION_BASES = ("raw_grid", "model_delta")
 # generality.
 MAX_COVARIATE_TERMS = 2
 
-# Which covariates a covariate_linear correction may name. Closed allowlist,
-# not an open field, for one specific reason: a promotion compiles this
-# correction into one precomputed value per served polygon, which is only
-# possible if the covariate is STATIC per location. A day-varying covariate
-# would force covariate evaluation into the serving path at inference time --
-# a serving-code change rather than a published-artifact change, and a new
-# runtime dependency in the one place this system is most conservative about.
+# Which covariates a covariate_linear correction may name. Two independent
+# constraints, both load-bearing.
 #
-# Every name below is either already static in features.FEATURE_ORDER, or
-# (coast_dist_km) a static per-location quantity the snapshot's covariate
-# partition supplies. Deliberately EXCLUDED, though present in
-# FEATURE_ORDER: grid_daily_value_c, grid_diurnal_range_c,
-# grid_specific_humidity_kgkg, nighttime_wind_ms, doy_sin/doy_cos -- all
-# day-varying. Adding a name here is a reviewed decision about the serving
-# contract, not a convenience.
+# STATIC per location: a promotion compiles this correction into one
+# precomputed value per served polygon, which is only possible if the
+# covariate does not vary by day. A day-varying covariate would force
+# covariate evaluation into the serving path at inference time -- a
+# serving-code change rather than a published-artifact change, and a new
+# runtime dependency in the one place this system is most conservative about.
+# Deliberately excluded on these grounds, though the model uses them:
+# grid_daily_value_c, grid_diurnal_range_c, grid_specific_humidity_kgkg,
+# nighttime_wind_ms, doy_sin/doy_cos.
+#
+# A REAL SNAPSHOT COLUMN: every name here must be a column in
+# snapshot._pa_schema(), because score_band reads the covariate off the paired
+# row and that schema is the authority on what a row's keys are.
+# tests/test_score_covariate_linear.py asserts this exactly, so the two cannot
+# drift.
+#
+# That second constraint exists because the first version of this list (PR
+# #27) was built from features.FEATURE_ORDER -- the MODEL's derived feature
+# names -- and four entries named keys no row has: aspect_sin, aspect_cos,
+# log1p_pop_density, latitude. The snapshot's columns are aspect_deg,
+# pop_density_per_km2 and lat. A contributor naming one of the four got every
+# row silently excluded via the fail-closed missing-covariate path and a
+# "not scored" result with no error, indistinguishable from an empty cell.
+# The derived forms are the model's business; the raw columns are this
+# allowlist's.
+#
+# aspect is dropped entirely rather than remapped to aspect_deg: it is a
+# compass bearing, and a LINEAR slope on a circular variable is not
+# interpretable (359 and 1 degrees are physically adjacent but maximally
+# distant linearly). It never belonged on a covariate_LINEAR allowlist.
+#
+# coast_dist_km is absent because it is not a snapshot column yet. It is
+# added here and to the snapshot schema together, so this list never again
+# promises a covariate the data cannot supply.
 STATIC_COVARIATE_ALLOWLIST = (
-    "coast_dist_km",
     "elevation_mean_m",
     "elevation_rel_to_gridcell_m",
     "slope_deg",
-    "aspect_sin",
-    "aspect_cos",
     "canopy_height_mean_m",
     "canopy_frac_over_3m",
     "wc_built_frac",
     "wc_tree_frac",
     "wc_water_frac",
     "ghsl_urban_fraction",
-    "log1p_pop_density",
     "lst_warm_season_anomaly_c",
-    "latitude",
+    "lat",
 )
+
+# Why each excluded snapshot column is excluded, as data rather than prose, so
+# COVARIATE_EXCLUSIONS and STATIC_COVARIATE_ALLOWLIST can be asserted disjoint
+# in a test. This exists because "is it a snapshot column" -- the check added
+# with this module's schema-tie test -- is necessary but NOT sufficient, and
+# two entries got through it (code-review findings, PR #28): a column can be
+# perfectly real and still be unservable or untrustworthy for this purpose.
+# Adding a covariate to the allowlist now means either it is absent here, or
+# you deleted its entry and said why.
+COVARIATE_EXCLUSIONS = {
+    # --- day-varying: cannot be compiled to one value per polygon ---
+    "grid_tmax_c": "day-varying",
+    "grid_tmin_c": "day-varying",
+    "grid_specific_humidity_kgkg": "day-varying",
+    "nighttime_wind_ms": "day-varying",
+    "date": "day-varying",
+    # --- circular: a linear slope on a compass bearing is not interpretable ---
+    "aspect_deg": "circular (359 and 1 degrees are adjacent physically, maximally distant linearly)",
+    # --- station-scoped, not per-location: a served POLYGON has no station,
+    # so there is no value to compile. elevation_m is station-reported
+    # metadata (snapshot._pa_schema groups it under "station identity / fold
+    # keys", populated from GHCN/ECA&D records and nullable), NOT a DEM
+    # quantity. Fitting a slope on it either cannot be evaluated at serving
+    # time or gets silently evaluated against elevation_mean_m, which is a
+    # different measurement (station-reported point vs DEM cell mean over a
+    # ~1km buffer). elevation_mean_m / elevation_rel_to_gridcell_m are the
+    # DEM-derived per-location forms and ARE allowlisted.
+    "elevation_m": "station-reported metadata, not a per-location DEM quantity",
+    "lon": "station identity/fold key",
+    "region": "station identity/fold key",
+    "station_id": "station identity/fold key",
+    # --- known training/serving mismatch: the promoted correction would not
+    # be the correction that was scored. PROVENANCE.md records this column
+    # differing on all 8 smoke-test stations with no consistent ratio (727 vs
+    # 379, 5139 vs 3183 people/km2) between the snapshot's post-fix LandScan
+    # extraction and the pre-fix values the deployed corpus carries -- this
+    # repo's own issue #1. A slope fitted against snapshot values would be
+    # applied at serving time against values that can differ by ~2x. Same
+    # treatment coast_dist_km gets: admit it once the mismatch is resolved,
+    # not before.
+    "pop_density_per_km2": "documented training/serving mismatch, this repo's issue #1",
+}
 
 # Stratum thresholds are a FIXED enum, never a per-submission choice: a
 # contributor free to pick the cutoff can shop for the one that flatters a
@@ -283,35 +346,58 @@ def _covariate_linear_effect(entry: dict, covariates: dict, n: int):
     slope past that range and calling the result scored would overstate what
     was measured.
 
-    Returns (effect, scoreable_mask, missing_mask, out_of_range_mask) -- masks
-    rather than counts, so the caller can report each stratum's own gap counts
-    instead of the zone-wide ones.
+    Returns (effect, scoreable_mask, missing_mask, out_of_range_mask,
+    absent_covariates) -- masks rather than counts, so the caller can report
+    each stratum's own gap counts instead of the zone-wide ones, plus the
+    names of any covariate that resolved on no row at all.
     """
     import numpy as np
 
     effect = np.full(n, float(entry["intercept"]))
     scoreable = np.ones(n, dtype=bool)
+    absent_covariates: list[str] = []
     missing = np.zeros(n, dtype=bool)
     out_of_range = np.zeros(n, dtype=bool)
     valid_range = entry.get("valid_range") or [None] * len(entry["terms"])
 
     for term, bounds in zip(entry["terms"], valid_range):
         raw = covariates.get(term["covariate"])
+        # One path for every way a covariate can fail to resolve. An earlier
+        # version special-cased `None` values and missed two neighbours of the
+        # same bug (both code-review findings, PR #28): all() is vacuously True
+        # on an empty list, so an empty scoring subset was misreported as a
+        # name error; and a column of genuine float NaN never hit the
+        # `v is None` check at all, so it excluded every row while leaving the
+        # diagnostic empty -- the exact silence this flag exists to remove.
+        # Deriving `term_missing` once, then asking whether it covers
+        # everything, makes all three cases fall out of the same expression
+        # instead of needing a special case each.
         if raw is None:
-            # The covariate is not present on ANY row -- every row is missing
-            # it. Distinguished from a per-row gap only in the error message a
-            # caller would see; the scoring outcome is identically fail-closed.
-            missing[:] = True
-            continue
-        values = np.array([np.nan if v is None else float(v) for v in raw])
-        missing |= np.isnan(values)
-        if bounds is not None:
-            lo, hi = bounds
-            out_of_range |= (~np.isnan(values)) & ((values < lo) | (values > hi))
-        effect = effect + float(term["slope"]) * np.nan_to_num(values, nan=0.0)
+            values = None
+            term_missing = np.ones(n, dtype=bool)
+        else:
+            values = np.array([np.nan if v is None else float(v) for v in raw], dtype=float)
+            term_missing = np.isnan(values)
+
+        # `n > 0` matters: with no rows at all there is nothing to diagnose,
+        # and claiming a name error would be a confidently wrong signal.
+        if n > 0 and term_missing.all():
+            logger.warning(
+                "covariate %r resolved on 0 of %d rows -- check the name against "
+                "snapshot._pa_schema()'s columns; the correction will not be scored",
+                term["covariate"], n,
+            )
+            absent_covariates.append(term["covariate"])
+
+        missing |= term_missing
+        if values is not None:
+            if bounds is not None:
+                lo, hi = bounds
+                out_of_range |= (~term_missing) & ((values < lo) | (values > hi))
+            effect = effect + float(term["slope"]) * np.nan_to_num(values, nan=0.0)
 
     scoreable &= ~missing & ~out_of_range
-    return effect, scoreable, missing, out_of_range
+    return effect, scoreable, missing, out_of_range, absent_covariates
 
 
 def _bootstrap_reduction_ci(baseline_err, corrected_err, station_ids, *, fold_salt: str, stream: str = ""):
@@ -742,15 +828,17 @@ def score_band(
 
             n_full = len(baseline_err_full)
             if proposed_correction_kind == "covariate_linear":
-                effect_full, scoreable_full, missing_full, out_of_range_full = (
-                    _covariate_linear_effect(proposed_entry, cov_full, n_full)
-                )
+                (
+                    effect_full, scoreable_full, missing_full, out_of_range_full,
+                    absent_covariates,
+                ) = _covariate_linear_effect(proposed_entry, cov_full, n_full)
                 intercept_only_full = np.full(n_full, float(proposed_entry["intercept"]))
             elif proposed_correction_kind == "bias":
                 effect_full = np.full(n_full, float(proposed_entry["bias_correction_c"]))
                 scoreable_full = np.ones(n_full, dtype=bool)
                 missing_full = out_of_range_full = np.zeros(n_full, dtype=bool)
                 intercept_only_full = None
+                absent_covariates = []
             else:  # affine -- the effect is on delta_c, so it varies per row
                 delta_arr = np.array(b["delta_c"])
                 effect_full = (
@@ -761,6 +849,7 @@ def score_band(
                 scoreable_full = np.ones(n_full, dtype=bool)
                 missing_full = out_of_range_full = np.zeros(n_full, dtype=bool)
                 intercept_only_full = None
+                absent_covariates = []
 
             hot_mask_full = np.array(
                 [(t is not None and t >= hot_day_threshold_c) for t in obs_tmax_full],
@@ -793,6 +882,10 @@ def score_band(
                     "n_stratifier_missing": (
                         0 if stratum == "all" else int(stratifier_missing_full.sum())
                     ),
+                    # Non-empty means a named covariate resolved on no row at
+                    # all -- almost certainly a name error, and the one signal
+                    # that separates "wrong covariate name" from "empty cell".
+                    "covariates_absent_from_every_row": list(absent_covariates),
                     # Which series the correction was ADDED to. Reported
                     # explicitly because a raw_grid correction and a
                     # model_delta correction are scored over different row
