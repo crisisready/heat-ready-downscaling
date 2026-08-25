@@ -151,6 +151,13 @@ two.)
 
 ## Both open decisions, as decided by Nishant (2026-08-25)
 
+**Reaffirmed under the corrected facts**, after round-1 review reversed this document's
+sequencing conclusion. Both calls stand, and the reversal strengthens rather than weakens the
+first: with Seoul landing in a labelled tier rather than sailing through as `unrestricted`, the
+labelled-tier path stops being an edge case for awkward municipal partners and becomes the
+ordinary route that the flagship city itself takes. The label has to be good because the best
+dossier we have will carry one.
+
 **1. `no-redistribution` data is admissible on the public leaderboard, with the visible label.**
 My recommendation, adopted.
 
@@ -241,18 +248,42 @@ fabrication is recorded here because it appeared in more than one place.
 The earlier draft concluded that S-DoT was `unrestricted`-tier, so "Seoul does not need the hard
 case" and "the tiers can land in order."
 
-**Both are wrong.** No record in either repository states S-DoT's licence, so the claim rested on
-nothing. And under #31's own rules it almost certainly cannot be `unrestricted`:
-`SPDX_ATTRIBUTION_REQUIRED` covers every allowlisted licence except `CC0-1.0` and `PDDL-1.0`, and
-`data.seoul.go.kr` is KOGL-family — attribution-carrying, and not on `SPDX_ALLOWLIST` at all.
-Seoul therefore lands in `attribution-required`, or in the needs-review path.
+**Both are wrong**, and the correction has to be made carefully, because the failure here was
+asserting a licence position with nothing behind it — replacing it with a differently-unsupported
+one would repeat the error in the opposite direction.
+
+### S-DoT's licensing position, separated by what is actually known
+
+**Established.** Nothing in either repository records S-DoT's licence. Not the QC findings, not
+the comparative analysis, not the corpus builder, not the reproduce-for-a-new-city recipe. The
+research thread used the data without ever pinning its terms, which is unremarkable for research
+and disqualifying for admission.
+
+**Established.** Under #31's rules, `unrestricted` is a narrow tier:
+`SPDX_ATTRIBUTION_REQUIRED` covers every allowlisted licence except `CC0-1.0` and `PDDL-1.0`, so
+declaring `unrestricted` for anything attribution-bearing is a hard rejection, not a judgement
+call.
+
+**Inference, and labelled as one.** Datasets published through `data.seoul.go.kr` are typically
+issued under the Korea Open Government Licence, whose common Type 1 is attribution-required. KOGL
+has no SPDX identifier, so it is not on `SPDX_ALLOWLIST` and cannot auto-pass regardless of type.
+That points at `attribution-required`, or at the `proprietary-licensed` needs-review path with
+KOGL named as the licensor. **This is a portal-level expectation, not a verified fact about the
+S-DoT dataset specifically, and no admission decision may rest on it.**
+
+**Therefore a prerequisite, not an assumption.** Establishing S-DoT's actual licence and type is
+step one of the dependency order below — a real task with a real possible outcome that the
+expectation above is wrong. What is safe to say now is only the negative: **`unrestricted` is not
+available**, so Seoul's dossier goes through a labelled tier whichever of the remaining paths it
+takes.
 
 `attribution-required` is the tier this document says cannot ship until something generates the
 snapshot's attribution notices from the field, since #31 validates `redistribution_tier` and
 `attribution_required` but nothing reads them. **So the first dossier is blocked on exactly the
 work the earlier draft deferred**, and the real dependency order is:
 
-1. Establish S-DoT's actual licence. Nothing in either repo records it.
+1. Establish S-DoT's actual licence and type from the source, not from portal convention.
+   Nothing in either repo records it, and the KOGL expectation above is an inference.
 2. Build the attribution-notice mechanism that consumes `redistribution_tier`.
 3. Build a re-derivation path for data outside the snapshot layout (the `promote_from_public.py`
    gap above).
