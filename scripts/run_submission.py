@@ -166,6 +166,14 @@ def cross_check(manifest: dict, claimed_report: dict, submission_dir: str, pr_au
             f"rung 'B' requires method.kind == 'parameters', got {manifest['method']['kind']!r}"
         )
 
+    # 2026-08-25: submission.MANIFEST_SCHEMA now also enforces maxItems: 1
+    # on claims (Codex adversarial review finding, PR #24 round 2) -- in
+    # the real pipeline, load_submission's own validate_manifest call
+    # already rejects a multi-claim manifest before cross_check ever runs,
+    # making this check unreachable there. Kept here anyway: cross_check
+    # is called directly (bypassing schema validation) by its own test
+    # suite, and this is still the more specific, contributor-readable
+    # message if that ever changes.
     if len(manifest["claims"]) != 1:
         violations.append(
             f"exactly one claims[] entry is supported in v1, found {len(manifest['claims'])} -- "

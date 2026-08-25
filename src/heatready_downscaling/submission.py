@@ -95,7 +95,21 @@ MANIFEST_SCHEMA: dict = {
             },
         },
         "claims": {
-            "type": "array", "minItems": 1,
+            # maxItems: 1 (Codex adversarial review finding, PR #24 round 2):
+            # "exactly one claims[] entry per submission" was already a
+            # stated v1 restriction (run_submission.py's own module
+            # docstring), but was previously enforced only by
+            # run_submission.py's cross_check, a SEPARATE runtime check --
+            # not by this schema. That meant validate_manifest (and
+            # anything built on it, like this schema's own rung-B coverage
+            # check just below, and score_forward_eval.py's
+            # load_active_candidates) could see a multi-claim manifest as
+            # "structurally valid" while only ever reading claims[0] --
+            # a second claim's cells would silently never be coverage-
+            # checked or scored. Making it a schema-level invariant means
+            # every caller of validate_manifest gets the same guarantee,
+            # not just the one script that happened to add its own check.
+            "type": "array", "minItems": 1, "maxItems": 1,
             "items": {
                 "type": "object",
                 "required": ["model_version", "band_key", "targets", "zones"],

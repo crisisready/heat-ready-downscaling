@@ -64,6 +64,18 @@ class TestValidateManifest:
         with pytest.raises(Exception):
             submission.validate_manifest(_manifest(claims=[]))
 
+    def test_multiple_claims_raises(self):
+        """Codex adversarial review finding, PR #24 round 2: "exactly one
+        claims[] entry" was previously enforced only by run_submission.py's
+        own cross_check, a separate runtime check -- not by this schema.
+        maxItems: 1 now makes it a schema-level invariant every
+        validate_manifest caller can rely on (including the rung-B
+        coverage check just below, which only ever reads claims[0])."""
+        m = _manifest()
+        m["claims"] = m["claims"] * 2
+        with pytest.raises(Exception):
+            submission.validate_manifest(m)
+
     def test_track_must_be_serving_ready_or_research(self):
         with pytest.raises(Exception):
             submission.validate_manifest(_manifest(track="not-a-track"))
