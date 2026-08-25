@@ -1,0 +1,105 @@
+registry_schema_version: 1
+model_id: "local/seoul-sdot-v1"
+version: "1.0.0"
+title: "Seoul local downscaling model (S-DoT)"
+description: >-
+  A separately-trained local model for Seoul, validated against the S-DoT municipal sensor
+  network on held-out neighbourhoods. The strongest local result in the record, and the entry
+  most useful for showing what this schema has to carry: its holdout is spatial rather than
+  station-salted, its ground truth is not in any published snapshot, and it cannot be promoted
+  as it stands.
+
+  THREE BLOCKERS, recorded here so the entry is not mistaken for a promotion candidate.
+  (1) It was trained against Open-Meteo archive grid values while production serves CDS-native
+  ERA5-Land; the two differ by +1.54C mean / 1.34C std on the same dong-dates. Nishant's
+  decision is to retrain against production's own base. (2) Its ground truth is contributed
+  sensor data, so it depends on Rung D existing -- nothing today can independently re-derive
+  this entry, and the program's own "a submission's own reported numbers are never trusted"
+  rule cannot be honoured for it until that changes. (3) Rung C is not open, and the decision
+  that would open it (retrain from a declared recipe, never execute contributed code) is
+  written down but not implemented.
+authors:
+  - name: "Nishant Kishore"
+    github: "nish-kishore"
+    affiliation: "CrisisReady"
+lineage:
+  derived_from: "global/ds-2026.07-rf5"
+  note: >-
+    Trained independently rather than fine-tuned; recorded as derived_from because it is the
+    model it was measured against and expected to replace for this city.
+method:
+  kind: "local-retrain"
+  compile_to: "artifact_route"
+  summary: >-
+    A model artifact loaded per-project inside the existing daily-update batch step, behind a
+    routing table and a hard feature-contract check. No band on its claims: it is not a
+    per-band correction, it produces rows across whatever bands the daily update covers.
+  data_sources:
+    - name: "Seoul S-DoT urban sensor network (S-DoT_NATURE weekly archive)"
+      license: "proprietary-licensed"
+      licensor: "Seoul Metropolitan Government (data.seoul.go.kr)"
+      redistribution_tier: "no-redistribution"
+      reproducible_fetch: "https://data.seoul.go.kr/"
+      attribution_required: true
+      license_note: >-
+        DELIBERATELY CONSERVATIVE AND EXPLICITLY UNVERIFIED. Nothing in either repository
+        records S-DoT's actual licence. data.seoul.go.kr datasets are typically issued under
+        the Korea Open Government Licence, which has no SPDX identifier -- but that is a
+        portal-level expectation, not a verified fact about this dataset, and no admission
+        decision may rest on it. Declared through the proprietary-licensed route with the
+        licensor named so the claim is attributable and always reaches a human. Establishing
+        the real licence and type is a prerequisite, not a formality: if it turns out to be
+        CC0-1.0 or PDDL-1.0 this entry can use unrestricted and needs no labelled tier at all.
+        See docs/design-2026-08-25-rung-d-contributed-data.md.
+# Deliberately absent. The trained artifact's real feature order and checksum are not
+# recorded anywhere in either repository, and an entry at status 'registered' does not need
+# them -- writing a placeholder hash to satisfy a check would be fabricated data that looks
+# like evidence. Both bind before this entry can move to 'validated'.
+claims:
+  - target: "tmax"
+    zone: "Cwa"
+    band: null
+    geography: "Seoul, 63 held-out dong"
+    evidence:
+      metric: "rmse_c"
+      value: 1.14
+      ci95: null
+      n_stations: null
+      n_clusters: 63
+      stratum: "all"
+      holdout_design: "spatial_holdout"
+      provenance: "maintainer_attested"
+      report: null
+      report_sha256: null
+      notes: >-
+        Against the same 63 held-out dong: raw ERA5 3.57C, existing global model 1.95C, this
+        1.14C. Bias +0.17C against the global model's -1.18C. 2026-06-01 to 2026-08-09, bounded
+        by S-DoT's own archive publish lag. No CI was computed in the source analysis.
+  - target: "tmin"
+    zone: "Cwa"
+    band: null
+    geography: "Seoul, 63 held-out dong"
+    evidence:
+      metric: "rmse_c"
+      value: 1.13
+      ci95: null
+      n_stations: null
+      n_clusters: 63
+      stratum: "all"
+      holdout_design: "spatial_holdout"
+      provenance: "maintainer_attested"
+      report: null
+      report_sha256: null
+      notes: >-
+        Raw ERA5 3.27C, existing global model 3.32C, this 1.13C. The global model is WORSE than
+        raw grid here, consistent with Cwa's tmin correction failing its own CV gate in
+        production -- so this cell is where the local model matters most. Coverage bound stated
+        rather than implied: 315 of 423 dong have S-DoT ground truth, and the remaining ~25%
+        have no validation from this entry at all.
+status_history:
+  - status: "registered"
+    at: "2026-08-25"
+    by: "nish-kishore"
+    note: >-
+      Retroactive registration, roadmap Phase 1. Research validation only -- no gate published,
+      no artifact promoted, no production write. See the three blockers in the description.

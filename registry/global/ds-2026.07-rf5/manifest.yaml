@@ -1,0 +1,54 @@
+registry_schema_version: 1
+model_id: "global/ds-2026.07-rf5"
+version: "1.0.0"
+title: "HeatReady global downscaling model (QRF)"
+description: >-
+  The one global QRF correction model. Predicts a per-polygon-day delta on top of a coarse
+  grid value, separately for tmax and tmin, from the 21 covariates in
+  heatready_downscaling.features.FEATURE_ORDER.
+
+  SCOPE OF THIS ENTRY, stated plainly: it registers ONE cell, not the 342-cell matrix. The
+  full matrix lives in the model's own metadata.json in a private bucket, and inventing
+  numbers here from memory of it would be worse than registering less. The cell below is the
+  one whose evidence exists IN THIS REPOSITORY as a merged, independently-refereed report.
+  Populating the rest is a real follow-up that requires reading that metadata, and it should
+  be done by a tool that reads it rather than by hand.
+authors:
+  - name: "Nishant Kishore"
+    github: "nish-kishore"
+    affiliation: "CrisisReady"
+method:
+  kind: "qrf-global"
+  compile_to: "zone_params"
+  summary: >-
+    Serves through the existing per-band gate machinery: bias_correction / delta_scale keyed
+    by (target, zone), with the model's own leave-region-out CV gate deciding where it may
+    apply at all.
+  data_sources: []
+claims:
+  - target: "tmin"
+    zone: "BWk"
+    band: "lag_fill"
+    geography: null
+    evidence:
+      metric: "rmse_improvement_pct"
+      value: 0.23426136257939917
+      ci95: null
+      n_stations: 2
+      n_clusters: null
+      stratum: "all"
+      holdout_design: "station_salted_fold"
+      provenance: "publicly_reproducible"
+      report: "submissions/2026-07/001-nish-kishore-lagfill-bwk-tmin/claimed_report.json"
+      report_sha256: "025a9428cd800e4a50f7101155f86ebf5146b3e4b741364f38b24c0e0d845c5c"
+      notes: >-
+        rmse_grid_c 2.5931 -> rmse_qrf_c 1.9856 over 726 paired rows; qrf_beats_grid_with_margin
+        true. From submission 2026-07-001, the first through the public referee. Only 2 distinct
+        stations, so it cleared via the documented raw-margin-plus-bounded-bias fallback rather
+        than the debiased station-CV -- recorded because it is a weaker route than the headline
+        gate and the entry should not imply otherwise.
+status_history:
+  - status: "registered"
+    at: "2026-08-25"
+    by: "nish-kishore"
+    note: "Retroactive registration, roadmap Phase 1. Serving in production since 2026-07."

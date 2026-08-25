@@ -1,0 +1,52 @@
+# Validates the model registry, and enforces that status_history is only ever
+# appended to.
+#
+# The append-only half is the reason this is a workflow rather than a unit
+# test: a status line records a transition that actually happened, so editing
+# or deleting one rewrites history instead of correcting it, and detecting
+# that needs the base ref. Same property and same check shape as
+# ledger/*.jsonl (see check-ledger-append.yml).
+#
+# Not paths-filtered on registry/** alone: registry.py, licensing.py and the
+# submission reports entries cite as evidence can all invalidate a manifest
+# without registry/ changing. The same reasoning as the Tests workflow -- a
+# change anywhere can break a contract asserted elsewhere.
+name: Registry
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: registry-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  registry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: pip install pyyaml jsonschema
+
+      - name: Validate registry and check status_history is append-only
+        run: |
+          base="${{ github.event.pull_request.base.sha }}"
+          if [ -n "$base" ] && git cat-file -e "$base" 2>/dev/null; then
+            python scripts/check_registry.py --base-ref "$base"
+          else
+            python scripts/check_registry.py
+          fi
