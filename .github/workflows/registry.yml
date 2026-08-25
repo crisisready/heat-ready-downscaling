@@ -50,6 +50,7 @@ jobs:
         run: |
           base="${{ github.event.pull_request.base.sha }}"
           if [ -z "$base" ]; then base="${{ github.event.before }}"; fi
+          set +e
           if [ -n "$base" ] && [ "$base" != "0000000000000000000000000000000000000000" ] \
              && git cat-file -e "$base" 2>/dev/null; then
             python scripts/check_registry.py --base-ref "$base"
@@ -57,3 +58,13 @@ jobs:
             echo "::warning::No usable base ref for this event; running validation only. The append-only check did NOT run."
             python scripts/check_registry.py
           fi
+          status=$?
+          set -e
+          # Exit 3 is "valid, but a data source needs a maintainer licensing
+          # decision" -- admissible, never automatic, and it has to be VISIBLE
+          # on the PR page rather than buried in a green check's log.
+          if [ "$status" -eq 3 ]; then
+            echo "::warning::A registry entry's data source needs a maintainer licensing decision. Admissible, but not automatic -- see the log."
+            exit 0
+          fi
+          exit "$status"

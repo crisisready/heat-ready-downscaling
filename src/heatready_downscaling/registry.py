@@ -161,9 +161,15 @@ def _cell_schema() -> dict:
 
 
 def manifest_schema() -> dict:
-    """JSON Schema for a registry manifest. A function rather than a module
-    constant so `heatready_downscaling.licensing`'s vocabularies are read at
-    call time and cannot drift from a copy frozen at import."""
+    """JSON Schema for a registry manifest.
+
+    A function rather than a module constant so licensing's vocabularies are
+    read at call time and cannot drift from a copy frozen at import. That
+    claim was false when first written -- the import was unused and
+    `redistribution_tier` was typed as a bare array (code-review finding, PR
+    #33) -- so the vocabulary is now actually read below, which is what makes
+    the shape worth having.
+    """
     from heatready_downscaling import licensing
 
     return {
@@ -223,7 +229,17 @@ def manifest_schema() -> dict:
                     # inventing a second provenance vocabulary -- and so a
                     # registry entry's data sources are held to exactly the
                     # rules a submission's are.
-                    "data_sources": {"type": "array"},
+                    "data_sources": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "redistribution_tier": {
+                                    "enum": list(licensing.REDISTRIBUTION_TIERS),
+                                },
+                            },
+                        },
+                    },
                 },
             },
             # Required for compile_to == artifact_route, checked in
@@ -354,8 +370,15 @@ def validate_manifest(
     # at `registered` is a record of something that exists; the artifact
     # requirements bind at `validated` and beyond, where the entry starts
     # asserting it could be loaded.
+    # ("validated", "serving") rather than != "registered" (code-review
+    # finding, PR #33). `retired` is not "beyond validated": an entry that
+    # never had a recorded artifact still has to be retirable, and the
+    # != form meant retiring Seoul would require writing exactly the
+    # placeholder feature name and hash that scaling this to status was added
+    # to prevent. Requirements bind where the entry ASSERTS it could be
+    # loaded, and a retired entry asserts the opposite.
     status = current_status(manifest)
-    if manifest["method"]["compile_to"] == "artifact_route" and status != "registered":
+    if manifest["method"]["compile_to"] == "artifact_route" and status in ("validated", "serving"):
         if not manifest.get("feature_contract"):
             raise RegistryError(
                 f"{manifest['model_id']}: compile_to 'artifact_route' at status {status!r} "
@@ -496,11 +519,13 @@ def _check_evidence_files(manifest: dict, repo_root: str) -> None:
         if not os.path.exists(path):
             raise RegistryError(
                 f"{manifest['model_id']}: claim {claim['target']}/{claim['zone']}/"
-                f"{claim['band']} cites evidence at {rel!r}, which does not exist",
+                f"{claim.get('band')} cites evidence at {rel!r}, which does not exist",
             )
-        recorded = evidence.get("report_sha256")
-        if not recorded:
-            continue
+        # report_sha256 is guaranteed present by the guard above; read it
+        # directly rather than re-testing, which used to leave a `continue`
+        # that read as "an unchecksummed report is tolerated" -- the opposite
+        # of the rule three lines earlier (code-review finding, PR #33).
+        recorded = evidence["report_sha256"]
         with open(path, "rb") as fh:
             actual = hashlib.sha256(fh.read()).hexdigest()
         if actual != recorded:
@@ -522,11 +547,37 @@ def load_manifest(model_dir: str, *, repo_root: str | None = None) -> dict:
     return manifest
 
 
-def iter_registry(registry_dir: str = "registry"):
-    """Every entry under `registry/`, as (model_dir, manifest), validated."""
+def find_manifests(registry_dir: str = "registry") -> tuple[list[str], list[str]]:
+    """(well_placed, misplaced) manifest paths under `registry_dir`.
+
+    Entries live at exactly `registry/<namespace>/<name>/manifest.yaml`.
+    Anything else is returned as MISPLACED rather than skipped, because
+    skipping is how a manifest at the wrong depth sat unvalidated in the tree
+    while CI printed "all clear" (code-review finding, PR #33). A file the
+    checker cannot see is worse than one it rejects.
+    """
     import glob
     import os
 
-    for path in sorted(glob.glob(os.path.join(registry_dir, "*", "*", "manifest.yaml"))):
+    two_level = set(glob.glob(os.path.join(registry_dir, "*", "*", "manifest.yaml")))
+    everything = set(glob.glob(os.path.join(registry_dir, "**", "manifest.yaml"), recursive=True))
+    return sorted(two_level), sorted(everything - two_level)
+
+
+def iter_registry(registry_dir: str = "registry"):
+    """Every entry under `registry/`, as (model_dir, manifest), validated.
+
+    Raises if any manifest sits at the wrong depth -- see find_manifests."""
+    import os
+
+    well_placed, misplaced = find_manifests(registry_dir)
+    if misplaced:
+        raise RegistryError(
+            f"manifest(s) at the wrong depth: {misplaced}. Entries live at "
+            "registry/<namespace>/<name>/manifest.yaml, and a file the checker cannot see is "
+            "worse than one it rejects",
+        )
+    repo_root = os.path.dirname(os.path.abspath(registry_dir))
+    for path in well_placed:
         model_dir = os.path.dirname(path)
-        yield model_dir, load_manifest(model_dir, repo_root=os.path.dirname(os.path.abspath(registry_dir)))
+        yield model_dir, load_manifest(model_dir, repo_root=repo_root)

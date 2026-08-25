@@ -15,6 +15,19 @@ it; that is the same property ledger/*.jsonl has and the same shape of check
 trail would only be as good as `git log`, which is precisely what having the
 history inside the file is meant to avoid.
 
+Exit codes:
+    0  all clear
+    1  a real problem (invalid entry, rewritten history, deleted entry,
+       misplaced manifest)
+    3  everything valid, but an entry's data source needs a maintainer
+       licensing decision
+
+Code 3 mirrors check_data_licensing.py deliberately (code-review finding, PR
+#33): the same condition on a submission produces exit 3 plus a warning
+annotation there, and printing it to stdout inside a green check here would
+have meant nobody sees it on a PR page -- which is the "always reaches a
+human" property being log-only rather than real.
+
 Usage (see .github/workflows/registry.yml):
     python scripts/check_registry.py --base-ref origin/main
     python scripts/check_registry.py            # validation only, no git needed
@@ -47,7 +60,7 @@ def git_registry_manifests(ref: str, registry_dir: str) -> list[str]:
     if result.returncode != 0:
         return []
     return [
-        line for line in result.stdout.splitlines()
+        os.path.normpath(line) for line in result.stdout.splitlines()
         if line.endswith("/manifest.yaml")
     ]
 
@@ -99,8 +112,23 @@ def main() -> int:
     flagged: list[str] = []
     entries = 0
     head_paths = set()
-    for path in sorted(glob.glob(os.path.join(args.registry_dir, "*", "*", "manifest.yaml"))):
-        head_paths.add(path)
+
+    # A manifest at the wrong depth is an ERROR, not something to skip past
+    # (code-review finding, PR #33) -- skipping is how one could sit
+    # unvalidated in the tree while this printed "all clear".
+    well_placed, misplaced = registry.find_manifests(args.registry_dir)
+    for bad in misplaced:
+        problems.append(
+            f"{bad}: manifest at the wrong depth. Entries live at "
+            "registry/<namespace>/<name>/manifest.yaml",
+        )
+
+    for path in well_placed:
+        # Normalized to repo-root-relative before comparing (code-review
+        # finding, PR #33): git ls-tree always returns repo-relative paths,
+        # while this glob carries --registry-dir verbatim, so `--registry-dir
+        # ./registry` reported EVERY existing entry as deleted.
+        head_paths.add(os.path.normpath(path))
         model_dir = os.path.dirname(path)
         entries += 1
         try:
@@ -124,7 +152,7 @@ def main() -> int:
 
     if args.base_ref:
         for base_path in git_registry_manifests(args.base_ref, args.registry_dir):
-            if base_path not in head_paths:
+            if os.path.normpath(base_path) not in head_paths:
                 problems.append(
                     f"{base_path}: registry entry was DELETED. An entry's status_history is "
                     "its audit trail, and deleting the file deletes the trail -- append a "
@@ -141,6 +169,8 @@ def main() -> int:
         for item in problems:
             print(f"  - {item}")
         return 1
+    if flagged:
+        return 3
     print("all clear")
     return 0
 

@@ -4,10 +4,18 @@ Several of these pin rules that were DISCOVERED by doing the three retroactive
 registrations rather than reasoned in advance -- which is what the roadmap says
 that exercise is for, and it earned its keep three times."""
 
+import os
+
 import pytest
 import yaml
 
 from heatready_downscaling import registry
+
+# Derived from __file__, not the cwd (code-review finding, PR #33): invoked
+# from tests/ these previously failed with "got 0 entries" rather than a real
+# failure, which is a test that lies about why it broke.
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+REGISTRY_DIR = os.path.join(REPO_ROOT, "registry")
 
 
 def _manifest(**over):
@@ -171,7 +179,7 @@ class TestTheRealEntries:
         finding, PR #33). Pinning the count would have made adding a fourth
         registry entry fail CI, i.e. a test that blocks the feature it tests
         from being used."""
-        entries = list(registry.iter_registry("registry"))
+        entries = list(registry.iter_registry(REGISTRY_DIR))
         ids = {m["model_id"] for _d, m in entries}
         assert {
             "global/ds-2026.07-rf5", "local/valencia-coast-v1", "local/seoul-sdot-v1",
@@ -183,7 +191,7 @@ class TestTheRealEntries:
         claimed_report.json, and the sha256 is checked against the real file --
         so this test fails if either drifts."""
         _dir, m = next(
-            (d, x) for d, x in registry.iter_registry("registry")
+            (d, x) for d, x in registry.iter_registry(REGISTRY_DIR)
             if x["model_id"] == "global/ds-2026.07-rf5"
         )
         claim = m["claims"][0]
@@ -194,12 +202,12 @@ class TestTheRealEntries:
         """None of the three has cleared anything: no gate published, no
         artifact promoted, no production write. The registry must not imply
         otherwise."""
-        for _dir, m in registry.iter_registry("registry"):
+        for _dir, m in registry.iter_registry(REGISTRY_DIR):
             assert registry.current_status(m) == "registered", m["model_id"]
 
     def test_seoul_records_a_spatial_holdout_not_a_salted_fold(self):
         _dir, m = next(
-            (d, x) for d, x in registry.iter_registry("registry")
+            (d, x) for d, x in registry.iter_registry(REGISTRY_DIR)
             if x["model_id"] == "local/seoul-sdot-v1"
         )
         for claim in m["claims"]:
@@ -214,9 +222,8 @@ class TestAppendOnlyStatusHistory:
     history instead of correcting it."""
 
     def _cr(self):
-        import os
         import sys
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+        sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
         import check_registry
         return check_registry
 
@@ -245,16 +252,16 @@ class TestAppendOnlyStatusHistory:
 
 
 def test_the_registry_check_script_passes_on_the_real_registry():
-    import os
     import subprocess
     import sys
 
-    root = os.path.join(os.path.dirname(__file__), "..")
     result = subprocess.run(
-        [sys.executable, os.path.join(root, "scripts", "check_registry.py")],
-        capture_output=True, text=True, cwd=root,
+        [sys.executable, os.path.join(REPO_ROOT, "scripts", "check_registry.py")],
+        capture_output=True, text=True, cwd=REPO_ROOT,
     )
-    assert result.returncode == 0, result.stdout + result.stderr
+    # 3 == "valid, but a source needs a maintainer licensing decision", which
+    # is the real registry's current state because of Seoul's S-DoT source.
+    assert result.returncode in (0, 3), result.stdout + result.stderr
     assert "checked" in result.stdout and "registry entr" in result.stdout
 
 
@@ -334,7 +341,7 @@ class TestRoundOneReviewFindings:
 
     def test_the_real_seoul_entry_is_flagged_for_licensing_review(self):
         _dir, m = next(
-            (d, x) for d, x in registry.iter_registry("registry")
+            (d, x) for d, x in registry.iter_registry(REGISTRY_DIR)
             if x["model_id"] == "local/seoul-sdot-v1"
         )
         assert registry.needs_licensing_review(m), "S-DoT must not pass silently"
@@ -345,9 +352,87 @@ def test_deleting_an_entry_is_reported_rather_than_silently_accepted():
     manifest and its whole status_history goes with it, unchecked. The
     append-only property has to be about the SET of entries, not just each
     surviving file."""
-    import os
     import sys
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
     import check_registry
 
     assert hasattr(check_registry, "git_registry_manifests")
+
+
+class TestRoundTwoReviewFindings:
+    """Regressions for the second round on PR #33. Three of these are cases
+    where a fix from round 1 broke something else, which is the pattern this
+    PR's own review history keeps surfacing."""
+
+    def test_an_artifact_route_entry_can_be_retired_without_fabricating_artifacts(self):
+        """`status != 'registered'` treated `retired` as beyond-validated, so
+        the only way to retire Seoul was to write exactly the placeholder
+        feature name and hash that scaling to status was added to prevent."""
+        m = _manifest()
+        m["method"]["compile_to"] = "artifact_route"
+        m["claims"][0]["band"] = None
+        m["status_history"].append({"status": "retired", "at": "2026-09-01"})
+        registry.validate_manifest(m)
+
+    def test_a_missing_evidence_file_reports_the_file_not_a_keyerror(self, tmp_path):
+        """The error STRING still did claim['band'] after _check_claims was
+        fixed to use .get -- so a claim omitting band raised KeyError and CI
+        reported that instead of the real missing-evidence problem."""
+        m = _manifest()
+        m["method"]["compile_to"] = "artifact_route"
+        del m["claims"][0]["band"]
+        m["claims"][0]["evidence"]["report"] = "nope.json"
+        m["claims"][0]["evidence"]["report_sha256"] = "a" * 64
+        with pytest.raises(registry.RegistryError, match="does not exist"):
+            registry.validate_manifest(m, repo_root=str(tmp_path))
+
+    def test_a_manifest_at_the_wrong_depth_is_an_error_not_a_skip(self, tmp_path):
+        """Globbing exactly two levels meant a manifest at the wrong depth sat
+        unvalidated while the checker printed 'all clear'. A file the checker
+        cannot see is worse than one it rejects."""
+        reg = tmp_path / "registry"
+        (reg / "local" / "ok").mkdir(parents=True)
+        (reg / "local" / "ok" / "manifest.yaml").write_text(yaml.safe_dump(_manifest()))
+        (reg / "stray").mkdir()
+        (reg / "stray" / "manifest.yaml").write_text("{}")
+
+        well_placed, misplaced = registry.find_manifests(str(reg))
+        assert len(well_placed) == 1
+        assert len(misplaced) == 1 and "stray" in misplaced[0]
+        with pytest.raises(registry.RegistryError, match="wrong depth"):
+            list(registry.iter_registry(str(reg)))
+
+    def test_the_deletion_check_normalises_paths_on_both_sides(self):
+        """git ls-tree returns repo-relative paths while the glob carried
+        --registry-dir verbatim, so `--registry-dir ./registry` reported every
+        existing entry as DELETED."""
+        cr = TestAppendOnlyStatusHistory()._cr()
+        assert cr.git_registry_manifests("HEAD", "./registry") == cr.git_registry_manifests(
+            "HEAD", "registry",
+        )
+
+    def test_the_schema_actually_reads_the_licensing_vocabulary(self):
+        """The docstring justified the function-vs-constant shape by claiming
+        licensing's vocabularies are read at call time. The import was unused
+        and the claim was false."""
+        from heatready_downscaling import licensing
+
+        schema = registry.manifest_schema()
+        tiers = (
+            schema["properties"]["method"]["properties"]["data_sources"]
+            ["items"]["properties"]["redistribution_tier"]["enum"]
+        )
+        assert tiers == list(licensing.REDISTRIBUTION_TIERS)
+
+    def test_a_flagged_licensing_source_exits_three_not_zero(self):
+        """Printing it inside a green check means nobody sees it on a PR page,
+        which is the 'always reaches a human' property being log-only."""
+        import subprocess
+        import sys
+
+        result = subprocess.run(
+            [sys.executable, os.path.join(REPO_ROOT, "scripts", "check_registry.py")],
+            capture_output=True, text=True, cwd=REPO_ROOT,
+        )
+        assert result.returncode == 3, result.stdout
+        assert "NEEDS A MAINTAINER LICENSING DECISION" in result.stdout
