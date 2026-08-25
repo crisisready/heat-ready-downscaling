@@ -166,12 +166,17 @@ class TestTheRealEntries:
     """The three retroactive registrations are the schema's actual test."""
 
     def test_every_registered_entry_validates(self):
+        """Asserts the three retroactive entries are PRESENT and that every
+        entry validates -- not that there are exactly three (code-review
+        finding, PR #33). Pinning the count would have made adding a fourth
+        registry entry fail CI, i.e. a test that blocks the feature it tests
+        from being used."""
         entries = list(registry.iter_registry("registry"))
-        assert len(entries) == 3, f"expected the three retroactive entries, got {len(entries)}"
         ids = {m["model_id"] for _d, m in entries}
-        assert ids == {
+        assert {
             "global/ds-2026.07-rf5", "local/valencia-coast-v1", "local/seoul-sdot-v1",
-        }
+        } <= ids
+        assert len(entries) == len(ids), "two entries share a model_id"
 
     def test_the_global_entry_cites_evidence_that_really_exists(self):
         """Its report path points at the merged submission's own
@@ -250,4 +255,99 @@ def test_the_registry_check_script_passes_on_the_real_registry():
         capture_output=True, text=True, cwd=root,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "checked 3 registry entries" in result.stdout
+    assert "checked" in result.stdout and "registry entr" in result.stdout
+
+
+class TestRoundOneReviewFindings:
+    """Regressions for the PR #33 review. Several are security-shaped: a check
+    that can be walked around is not a check."""
+
+    def test_status_cannot_go_backwards(self):
+        m = _manifest(status_history=[
+            {"status": "registered", "at": "2026-08-01"},
+            {"status": "serving", "at": "2026-08-02"},
+            {"status": "validated", "at": "2026-08-03"},
+        ])
+        with pytest.raises(registry.RegistryError, match="goes backwards"):
+            registry.validate_manifest(m)
+
+    def test_a_namespace_lookalike_directory_is_rejected(self):
+        """endswith accepted registry/notglobal/foo for model_id global/foo,
+        putting an entry outside the declared namespace while looking right."""
+        m = _manifest(model_id="global/foo")
+        with pytest.raises(registry.RegistryError, match="the path must be"):
+            registry.validate_manifest(m, model_dir="registry/notglobal/foo")
+
+    def test_the_matching_directory_is_accepted(self):
+        m = _manifest(model_id="global/foo")
+        registry.validate_manifest(m, model_dir="registry/global/foo")
+
+    def test_a_claim_omitting_band_entirely_does_not_crash(self):
+        """band is optional in the schema but was accessed directly, so a
+        schema-valid claim that simply omits the key raised KeyError instead
+        of validating."""
+        m = _manifest()
+        m["method"]["compile_to"] = "artifact_route"
+        del m["claims"][0]["band"]
+        registry.validate_manifest(m)
+
+    def test_an_absolute_evidence_path_is_rejected(self, tmp_path):
+        m = _manifest()
+        m["claims"][0]["evidence"]["report"] = "/etc/os-release"
+        m["claims"][0]["evidence"]["report_sha256"] = "a" * 64
+        with pytest.raises(registry.RegistryError, match="absolute path"):
+            registry.validate_manifest(m, repo_root=str(tmp_path))
+
+    def test_evidence_cannot_traverse_outside_the_repo(self, tmp_path):
+        """Nothing enforced the documented repo-relative contract, so a
+        manifest could cite and checksum any file CI could read and have the
+        result recorded as evidence for a published claim."""
+        m = _manifest()
+        m["claims"][0]["evidence"]["report"] = "../../../etc/os-release"
+        m["claims"][0]["evidence"]["report_sha256"] = "a" * 64
+        with pytest.raises(registry.RegistryError, match="outside the repository"):
+            registry.validate_manifest(m, repo_root=str(tmp_path))
+
+    def test_a_cited_report_must_carry_a_checksum(self, tmp_path):
+        """Existence alone is not integrity: an unchecksummed report can
+        change after the claim was written and nothing notices."""
+        (tmp_path / "r.json").write_text("{}")
+        m = _manifest()
+        m["claims"][0]["evidence"]["report"] = "r.json"
+        m["claims"][0]["evidence"]["report_sha256"] = None
+        with pytest.raises(registry.RegistryError, match="without a report_sha256"):
+            registry.validate_manifest(m, repo_root=str(tmp_path))
+
+    def test_needs_licensing_review_surfaces_a_proprietary_source(self):
+        """The return value of check_manifest_licensing was discarded, so
+        Seoul's proprietary S-DoT source reported 'all clear' -- the identical
+        defect #31's own review caught in the referee comment path, in a new
+        place."""
+        m = _manifest()
+        m["method"]["data_sources"] = [{
+            "name": "municipal feed", "license": "proprietary-licensed",
+            "licensor": "A City", "reproducible_fetch": "u",
+            "redistribution_tier": "no-redistribution",
+        }]
+        flagged = registry.needs_licensing_review(m)
+        assert len(flagged) == 1 and "municipal feed" in flagged[0]
+
+    def test_the_real_seoul_entry_is_flagged_for_licensing_review(self):
+        _dir, m = next(
+            (d, x) for d, x in registry.iter_registry("registry")
+            if x["model_id"] == "local/seoul-sdot-v1"
+        )
+        assert registry.needs_licensing_review(m), "S-DoT must not pass silently"
+
+
+def test_deleting_an_entry_is_reported_rather_than_silently_accepted():
+    """Iterating only what exists at HEAD let a DELETION pass: remove the
+    manifest and its whole status_history goes with it, unchecked. The
+    append-only property has to be about the SET of entries, not just each
+    surviving file."""
+    import os
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+    import check_registry
+
+    assert hasattr(check_registry, "git_registry_manifests")

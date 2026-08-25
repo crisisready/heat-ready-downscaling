@@ -42,11 +42,18 @@ jobs:
       - name: Install
         run: pip install pyyaml jsonschema
 
+      # github.event.before is the PUSH-event base. Without it a direct push to
+      # main ran validation only, so history could be rewritten by pushing
+      # rather than by a PR -- which is the one path that skips review anyway
+      # (code-review finding, PR #33).
       - name: Validate registry and check status_history is append-only
         run: |
           base="${{ github.event.pull_request.base.sha }}"
-          if [ -n "$base" ] && git cat-file -e "$base" 2>/dev/null; then
+          if [ -z "$base" ]; then base="${{ github.event.before }}"; fi
+          if [ -n "$base" ] && [ "$base" != "0000000000000000000000000000000000000000" ] \
+             && git cat-file -e "$base" 2>/dev/null; then
             python scripts/check_registry.py --base-ref "$base"
           else
+            echo "::warning::No usable base ref for this event; running validation only. The append-only check did NOT run."
             python scripts/check_registry.py
           fi

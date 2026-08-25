@@ -33,6 +33,25 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from heatready_downscaling import registry  # noqa: E402
 
 
+def git_registry_manifests(ref: str, registry_dir: str) -> list[str]:
+    """Registry manifest paths that existed at `ref`.
+
+    Needed because iterating only what exists at HEAD lets a DELETION pass:
+    remove the manifest and its whole status_history goes with it, unchecked
+    (code-review finding, PR #33). The append-only property has to be about
+    the set of entries, not just each surviving file."""
+    result = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", ref, "--", registry_dir],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return []
+    return [
+        line for line in result.stdout.splitlines()
+        if line.endswith("/manifest.yaml")
+    ]
+
+
 def git_show(ref: str, path: str) -> str | None:
     """Content of `path` at `ref`, or None when it did not exist there -- a
     brand-new entry has no prior history to violate."""
@@ -77,8 +96,11 @@ def main() -> int:
     args = parser.parse_args()
 
     problems: list[str] = []
+    flagged: list[str] = []
     entries = 0
+    head_paths = set()
     for path in sorted(glob.glob(os.path.join(args.registry_dir, "*", "*", "manifest.yaml"))):
+        head_paths.add(path)
         model_dir = os.path.dirname(path)
         entries += 1
         try:
@@ -87,6 +109,12 @@ def main() -> int:
             problems.append(f"{path}: {type(exc).__name__}: {exc}")
             continue
 
+        # Sources needing a maintainer licensing decision. Not errors --
+        # proprietary-licensed and no-redistribution data are admissible --
+        # but they must never pass silently, which is precisely what
+        # discarding them did (code-review finding, PR #33).
+        flagged += registry.needs_licensing_review(manifest)
+
         if args.base_ref:
             base_text = git_show(args.base_ref, path)
             if base_text is None:
@@ -94,7 +122,20 @@ def main() -> int:
             with open(path) as fh:
                 problems += status_history_violations(base_text, fh.read(), manifest["model_id"])
 
+    if args.base_ref:
+        for base_path in git_registry_manifests(args.base_ref, args.registry_dir):
+            if base_path not in head_paths:
+                problems.append(
+                    f"{base_path}: registry entry was DELETED. An entry's status_history is "
+                    "its audit trail, and deleting the file deletes the trail -- append a "
+                    "'retired' status line instead",
+                )
+
     print(f"checked {entries} registry entr{'ies' if entries != 1 else 'y'}")
+    if flagged:
+        print("\nNEEDS A MAINTAINER LICENSING DECISION (admissible, never automatic):")
+        for item in flagged:
+            print(f"  - {item}")
     if problems:
         print("\nPROBLEMS:")
         for item in problems:

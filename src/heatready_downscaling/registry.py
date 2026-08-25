@@ -45,6 +45,13 @@ MODEL_ID_PATTERN = r"^(global|local)/[a-z0-9][a-z0-9._-]{2,63}$"
 # moves forward through these, and `retired` is reachable from any of them.
 STATUSES = ("registered", "validated", "serving", "retired")
 
+# How far along each status is. An entry moves FORWARD through these; a history
+# recording registered -> serving -> validated would move the current status
+# backwards, which is not a transition that can happen (code-review finding,
+# PR #33). `retired` is reachable from anywhere and is terminal, so it is
+# handled separately rather than given a rank.
+_STATUS_RANK = {"registered": 0, "validated": 1, "serving": 2}
+
 # How an entry turns into something the serving side applies. The vocabulary
 # of METHODS is deliberately open (a manifest's method.kind is free text --
 # the record already holds bias constants, zone affines, covariate-linear
@@ -266,6 +273,22 @@ class RegistryError(ValueError):
     """A registry rule a manifest fails."""
 
 
+def needs_licensing_review(manifest: dict) -> list[str]:
+    """Data sources in this entry that need a maintainer licensing decision.
+
+    Separate from validate_manifest because they are not errors -- a
+    proprietary-licensed or no-redistribution source is admissible, it just
+    cannot be admitted automatically. Returned so a caller can print them;
+    discarding this was how Seoul's proprietary S-DoT source reported "all
+    clear" (code-review finding, PR #33)."""
+    from heatready_downscaling import licensing
+
+    _violations, flagged = licensing.audit_manifest_licensing(
+        {"method": manifest.get("method") or {}},
+    )
+    return [f"{manifest['model_id']}: {f}" for f in flagged]
+
+
 def current_status(manifest: dict) -> str:
     """The entry's status now: the last line of its append-only history."""
     return manifest["status_history"][-1]["status"]
@@ -294,8 +317,14 @@ def validate_manifest(
     if model_dir is not None:
         import os
 
-        expected = manifest["model_id"].replace("/", os.sep)
-        if not os.path.normpath(model_dir).endswith(expected):
+        # Compared as PATH COMPONENTS, not by endswith (code-review finding,
+        # PR #33): endswith accepted registry/notglobal/foo for model_id
+        # global/foo, which puts an entry outside the declared namespace while
+        # looking correct. The namespace prefix is what the serving-side menu
+        # keys "always listed" off, so confusing it is not cosmetic.
+        parts = os.path.normpath(model_dir).split(os.sep)
+        expected = manifest["model_id"].split("/")
+        if parts[-len(expected):] != expected:
             raise RegistryError(
                 f"manifest declares model_id {manifest['model_id']!r} but lives at "
                 f"{model_dir!r} -- the path must be registry/<model_id>/",
@@ -304,6 +333,13 @@ def validate_manifest(
     # Licensing, through the gate that already exists rather than a second
     # copy of the rules (#31). A registry entry declaring a data source is
     # held to exactly what a submission declaring one is held to.
+    # The RETURN VALUE matters (code-review finding, PR #33): entries needing
+    # a maintainer decision -- proprietary-licensed, no-redistribution -- come
+    # back from this call rather than raising, and discarding it made them
+    # pass silently. That is the identical defect #31's own review caught in
+    # the referee comment path, reintroduced here in a new place: Seoul's
+    # proprietary S-DoT source reported "all clear". Surfaced now via
+    # needs_licensing_review(), which the CI check prints.
     licensing.check_manifest_licensing({"method": manifest.get("method") or {}})
 
     # An artifact-routed entry must pin its feature order and name a real
@@ -389,6 +425,19 @@ def _check_status_history(manifest: dict) -> None:
                 f"{manifest['model_id']}: status_history repeats {statuses[i]!r} at index {i} "
                 "-- a status line records a TRANSITION, so a repeat says nothing",
             )
+    # Forward-only. registered -> serving -> validated would move the current
+    # status backwards, which is not a transition that happened.
+    for i in range(1, len(statuses)):
+        prev, now = statuses[i - 1], statuses[i]
+        if now == "retired" or prev == "retired":
+            continue
+        if _STATUS_RANK[now] < _STATUS_RANK[prev]:
+            raise RegistryError(
+                f"{manifest['model_id']}: status_history goes backwards at index {i} "
+                f"({prev!r} -> {now!r}). An entry that regressed should record that as a new "
+                "forward transition or be retired, not rewind",
+            )
+
     if "retired" in statuses[:-1]:
         raise RegistryError(
             f"{manifest['model_id']}: 'retired' appears before the end of status_history -- "
@@ -400,7 +449,7 @@ def _check_claims(manifest: dict) -> None:
     """No duplicate cells, and provenance consistent with the entry's data."""
     seen: set[tuple] = set()
     for claim in manifest["claims"]:
-        key = (claim["target"], claim["zone"], claim["band"], claim.get("geography"))
+        key = (claim["target"], claim["zone"], claim.get("band"), claim.get("geography"))
         if key in seen:
             raise RegistryError(
                 f"{manifest['model_id']}: duplicate claim for {key} -- two evidence blocks for "
@@ -414,12 +463,36 @@ def _check_evidence_files(manifest: dict, repo_root: str) -> None:
     import hashlib
     import os
 
+    root = os.path.realpath(repo_root)
     for claim in manifest["claims"]:
         evidence = claim["evidence"]
         rel = evidence.get("report")
         if not rel:
             continue
-        path = os.path.join(repo_root, rel)
+        # Contained inside the repo (code-review finding, PR #33). The
+        # documented contract is repo-relative, but nothing enforced it, so a
+        # manifest could cite and checksum /etc/os-release -- or anything else
+        # readable by CI -- and have the result recorded as evidence for a
+        # published claim.
+        if os.path.isabs(rel):
+            raise RegistryError(
+                f"{manifest['model_id']}: evidence report {rel!r} is an absolute path; "
+                "evidence must be repo-relative",
+            )
+        path = os.path.realpath(os.path.join(root, rel))
+        if not (path == root or path.startswith(root + os.sep)):
+            raise RegistryError(
+                f"{manifest['model_id']}: evidence report {rel!r} resolves outside the "
+                "repository -- evidence must be repo-relative",
+            )
+        if not evidence.get("report_sha256"):
+            # Existence alone is not evidence integrity: a cited file with no
+            # recorded checksum can change afterwards and nothing notices,
+            # which defeats the guarantee the field exists for.
+            raise RegistryError(
+                f"{manifest['model_id']}: evidence cites {rel!r} without a report_sha256 -- "
+                "an unchecksummed report can change after the claim was written",
+            )
         if not os.path.exists(path):
             raise RegistryError(
                 f"{manifest['model_id']}: claim {claim['target']}/{claim['zone']}/"
