@@ -104,11 +104,16 @@ def main() -> None:
     parser.add_argument("--cache-root", default=".cache/snapshots")
     args = parser.parse_args()
 
-    manifest, claimed_report_data = rs.load_submission(args.submission_dir)
+    manifest, claimed_report_data, licensing_rejects = rs.load_submission(args.submission_dir)
 
     # Re-derive fresh, authoritative status -- never trust whatever
     # referee.yml's PR-time run produced (see this module's own docstring).
-    hard_rejects = rs.cross_check(manifest, claimed_report_data, args.submission_dir, args.pr_author)
+    # licensing_rejects is folded in the same way run_submission.main does: a
+    # licence violation reaching merge time is a hard reject here too, and this
+    # runs on the merge commit, so it is the last chance to catch one that
+    # slipped past the PR check.
+    hard_rejects = list(licensing_rejects)
+    hard_rejects += rs.cross_check(manifest, claimed_report_data, args.submission_dir, args.pr_author)
     if hard_rejects:
         raise SystemExit(
             f"submission {manifest['submission_id']!r} failed cross_check at merge time "
