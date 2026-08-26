@@ -168,17 +168,23 @@ def cross_check(manifest: dict, claimed_report: dict, submission_dir: str, pr_au
                 f"manifest author.github {github!r} doesn't match the PR's actual author {pr_author!r}"
             )
 
-    # Rung C (new model code) stays closed by design -- GOVERNANCE.md's own
-    # unresolved-security-question gate (how untrusted model code would
-    # execute safely), not a scoring limitation this referee can lift on
-    # its own. Rung B (published parameters) opened 2026-08-25:
+    # Rung C (new model code) stays closed by design. As of 2026-08-26 the
+    # security question is no longer the blocker: GOVERNANCE.md's published
+    # decision is that contributor code never executes at any rung -- a Rung C
+    # submission is a recipe plus data, and we retrain from it ourselves. What
+    # is still missing is that retraining harness, which is not something this
+    # referee can substitute for. Keep this message pointed at the real blocker;
+    # a contributor reading a stale reason goes and solves the wrong problem.
+    # Rung B (published parameters) opened 2026-08-25:
     # score.score_band's proposed_correction extension can now score a
     # CONTRIBUTOR-declared bias_correction_c/scale+offset value -- see
     # docs/plan-2026-08-25-crowdsourced-model-improvement-p0.md.
     if manifest["rung"] == "C":
         violations.append(
-            "rung 'C' (new model code) is not yet open -- see GOVERNANCE.md's unresolved "
-            "security question about executing untrusted model code"
+            "rung 'C' (new model code) is not yet open -- GOVERNANCE.md's Rung C "
+            "conditions table lists the remaining gap: a harness that retrains from a "
+            "declared recipe. Contributor code is never executed, so there is nothing "
+            "to submit until that exists"
         )
     elif manifest["rung"] == "B" and manifest["method"]["kind"] != "parameters":
         violations.append(

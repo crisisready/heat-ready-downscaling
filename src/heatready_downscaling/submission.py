@@ -153,8 +153,9 @@ MANIFEST_SCHEMA: dict = {
         "track": {"enum": ["serving-ready", "research"]},
         # Rung C listed for forward-compatibility with the schema shape --
         # not yet open; scripts/run_submission.py rejects it explicitly
-        # rather than relying on this schema alone (see this repo's own
-        # GOVERNANCE.md "Rung C (new model code): not yet open").
+        # rather than relying on this schema alone, and carries the current
+        # reason (see GOVERNANCE.md's Rung C conditions table -- the open
+        # item is the recipe-retrain harness, not the security question).
         "rung": {"enum": ["A", "B", "C"]},
         "snapshot": {
             "type": "object",
