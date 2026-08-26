@@ -32,15 +32,33 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from heatready_downscaling import registry  # noqa: E402
 
 
+def _escape_cell(text: str) -> str:
+    """Escape/strip characters that would otherwise break a Markdown table
+    row -- `metric` and `geography` are free-form strings in the registry
+    schema (registry.py's _cell_schema), not enums, so a literal `|` or
+    embedded newline is legal manifest content and must not be allowed to
+    misalign or split the table row."""
+    return text.replace("|", "\\|").replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+
+
 def _fmt_evidence(evidence: dict) -> str:
-    """One-line evidence summary: `metric value [ci_lo, ci_hi] (n=N)` --
-    whatever subset of ci95/n_stations is actually present, since either can
-    be null (registry.py's own schema: a null CI or station count is itself
-    informative, not a gap to paper over)."""
-    parts = [f"{evidence['metric']}={evidence['value']:.4g}"]
+    """One-line evidence summary: `metric=value, CI95=[..], provenance, holdout,
+    n=N` -- whatever subset of the optional fields is actually present, since
+    a null CI/station count is itself informative (registry.py's own schema
+    comment), not a gap to paper over.
+
+    provenance and holdout_design are included deliberately, not just metric
+    and value: registry.py's EVIDENCE_PROVENANCE comment says the whole point
+    of that field is so a reader can tell "anyone can check this" from "we
+    checked this" WITHOUT opening the manifest -- exactly this page's job. A
+    page that dropped it would render Seoul's maintainer_attested claim
+    identically to the global model's publicly_reproducible one."""
+    parts = [f"{_escape_cell(evidence['metric'])}={evidence['value']:.4g}"]
     ci = evidence.get("ci95")
     if ci is not None:
         parts.append(f"CI95=[{ci[0]:.4g}, {ci[1]:.4g}]")
+    parts.append(f"provenance={evidence['provenance']}")
+    parts.append(f"holdout={evidence['holdout_design']}")
     n_stations = evidence.get("n_stations")
     if n_stations is not None:
         parts.append(f"n_stations={n_stations}")
@@ -51,11 +69,11 @@ def _fmt_evidence(evidence: dict) -> str:
 
 
 def _fmt_cell(claim: dict) -> str:
-    band = claim.get("band") or "(none)"
+    band = _escape_cell(claim.get("band") or "(none)")
     geography = claim.get("geography")
     cell = f"{claim['target']}/{claim['zone']}/{band}"
     if geography:
-        cell += f" ({geography})"
+        cell += f" ({_escape_cell(geography)})"
     return cell
 
 
@@ -82,7 +100,11 @@ def render_markdown(entries: list[tuple[str, dict]]) -> str:
         return "\n".join(lines)
 
     for model_dir, manifest in sorted(entries, key=lambda e: e[1]["model_id"]):
-        manifest_path = os.path.join(model_dir, "manifest.yaml")
+        # normpath so the rendered path reads the same regardless of how
+        # --registry-dir was spelled (`registry` vs `./registry`) -- otherwise
+        # re-running with a differently-spelled but equivalent path would
+        # report a spurious staleness diff against the committed page.
+        manifest_path = os.path.normpath(os.path.join(model_dir, "manifest.yaml"))
         method = manifest["method"]
         status = registry.current_status(manifest)
 

@@ -12,6 +12,15 @@ import render_models_page as rmp
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
+def _evidence(**over):
+    base = {
+        "metric": "rmse_c", "value": 1.0, "ci95": None, "n_stations": None, "n_clusters": None,
+        "holdout_design": "station_salted_fold", "provenance": "publicly_reproducible",
+    }
+    base.update(over)
+    return base
+
+
 def _manifest(**over):
     base = {
         "registry_schema_version": 1,
@@ -41,12 +50,24 @@ class TestFmtEvidence:
         assert "rmse_reduction_pct=0.19" in rmp._fmt_evidence(_manifest()["claims"][0]["evidence"])
 
     def test_omits_null_ci95(self):
-        evidence = {"metric": "rmse_c", "value": 1.0, "ci95": None, "n_stations": None, "n_clusters": None}
-        assert "CI95" not in rmp._fmt_evidence(evidence)
+        assert "CI95" not in rmp._fmt_evidence(_evidence())
 
     def test_includes_ci95_when_present(self):
         evidence = _manifest()["claims"][0]["evidence"]
         assert "CI95=[0.1, 0.25]" in rmp._fmt_evidence(evidence)
+
+    def test_pipe_in_metric_is_escaped(self):
+        assert "a\\|b" in rmp._fmt_evidence(_evidence(metric="a|b"))
+
+    def test_includes_provenance_and_holdout_design(self):
+        """The whole point of these two fields (registry.py's
+        EVIDENCE_PROVENANCE/HOLDOUT_DESIGNS comments) is letting a reader
+        tell "anyone can check this" from "we checked this" without opening
+        the manifest -- exactly what this public page is for."""
+        evidence = _evidence(provenance="maintainer_attested", holdout_design="spatial_holdout")
+        rendered = rmp._fmt_evidence(evidence)
+        assert "provenance=maintainer_attested" in rendered
+        assert "holdout=spatial_holdout" in rendered
 
 
 class TestFmtCell:
@@ -58,6 +79,30 @@ class TestFmtCell:
         claim["band"] = None
         claim["geography"] = None
         assert rmp._fmt_cell(claim) == "tmin/BSh/(none)"
+
+    def test_pipe_in_geography_is_escaped(self):
+        """geography is a free-form string in the registry schema -- a
+        literal `|` must not misalign the rendered Markdown table."""
+        claim = _manifest()["claims"][0]
+        claim["geography"] = "Testville | Somewhere"
+        assert "\\|" in rmp._fmt_cell(claim)
+        assert " | " not in rmp._fmt_cell(claim).replace("\\|", "")
+
+
+class TestEscapeCell:
+    def test_escapes_pipe(self):
+        assert rmp._escape_cell("a|b") == "a\\|b"
+
+    def test_leaves_plain_text_unchanged(self):
+        assert rmp._escape_cell("Valencia city cluster") == "Valencia city cluster"
+
+    def test_strips_embedded_newlines(self):
+        """geography/metric have no character restriction in the registry
+        schema (registry.py's _cell_schema has no pattern/length cap) -- an
+        embedded newline would split a Markdown table row just like an
+        unescaped `|` would."""
+        assert "\n" not in rmp._escape_cell("Seoul,\nSouth Korea")
+        assert "\r" not in rmp._escape_cell("a\r\nb")
 
 
 class TestRenderMarkdown:
@@ -78,6 +123,11 @@ class TestRenderMarkdown:
         manifest = _manifest(lineage={"derived_from": "global/base-model", "supersedes": None, "note": None})
         md = rmp.render_markdown([("registry/local/test-entry", manifest)])
         assert "global/base-model" in md
+
+    def test_manifest_path_is_normalized_regardless_of_dir_spelling(self):
+        md = rmp.render_markdown([("./registry/local/test-entry", _manifest())])
+        assert "registry/local/test-entry/manifest.yaml" in md
+        assert "./registry" not in md
 
     def test_entries_sorted_by_model_id(self):
         manifests = [

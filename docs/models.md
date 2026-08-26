@@ -15,7 +15,7 @@ Every evidence number below is read directly from the cited manifest's own `clai
 
 | Cell (target/zone/band) | Evidence |
 |---|---|
-| tmin/BWk/lag_fill | rmse_improvement_pct=0.2343, n_stations=2 |
+| tmin/BWk/lag_fill | rmse_improvement_pct=0.2343, provenance=publicly_reproducible, holdout=station_salted_fold, n_stations=2 |
 
 ## `local/seoul-sdot-v1`
 
@@ -29,8 +29,8 @@ Every evidence number below is read directly from the cited manifest's own `clai
 
 | Cell (target/zone/band) | Evidence |
 |---|---|
-| tmax/Cwa/(none) (Seoul, 63 held-out dong) | rmse_c=1.14, n_clusters=63 |
-| tmin/Cwa/(none) (Seoul, 63 held-out dong) | rmse_c=1.13, n_clusters=63 |
+| tmax/Cwa/(none) (Seoul, 63 held-out dong) | rmse_c=1.14, provenance=maintainer_attested, holdout=spatial_holdout, n_clusters=63 |
+| tmin/Cwa/(none) (Seoul, 63 held-out dong) | rmse_c=1.13, provenance=maintainer_attested, holdout=spatial_holdout, n_clusters=63 |
 
 ## `local/valencia-coast-v1`
 
@@ -43,5 +43,5 @@ Every evidence number below is read directly from the cited manifest's own `clai
 
 | Cell (target/zone/band) | Evidence |
 |---|---|
-| tmin/BSh/lag_fill (Valencia city cluster (9 ECA&D stations)) | rmse_reduction_pct_hot_day=0.31, CI95=[0.204, 0.392], n_stations=9, n_clusters=9 |
-| tmax/BSh/lag_fill (Valencia city cluster (9 ECA&D stations)) | rmse_reduction_pct=0.118, CI95=[-0.118, 0.294], n_stations=9, n_clusters=9 |
+| tmin/BSh/lag_fill (Valencia city cluster (9 ECA&D stations)) | rmse_reduction_pct_hot_day=0.31, CI95=[0.204, 0.392], provenance=publicly_reproducible, holdout=station_salted_fold, n_stations=9, n_clusters=9 |
+| tmax/BSh/lag_fill (Valencia city cluster (9 ECA&D stations)) | rmse_reduction_pct=0.118, CI95=[-0.118, 0.294], provenance=publicly_reproducible, holdout=station_salted_fold, n_stations=9, n_clusters=9 |
