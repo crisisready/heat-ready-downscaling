@@ -68,3 +68,14 @@ jobs:
             exit 0
           fi
           exit "$status"
+
+      # docs/models.md is DERIVED from registry/ (scripts/render_models_page.py,
+      # same convention as docs/leaderboard.md) -- never hand-edited. A PR that
+      # changes a manifest but not the rendered page would otherwise ship a
+      # public page silently out of sync with the registry it claims to
+      # reflect. Regenerate and fail on any diff, same shape as the manifest
+      # validation above (only runs once the registry itself is known-valid).
+      - name: Check docs/models.md is up to date with the registry
+        run: |
+          python scripts/render_models_page.py --registry-dir registry --docs-dir docs
+          git diff --exit-code -- docs/models.md
