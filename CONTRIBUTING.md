@@ -123,12 +123,24 @@ claim expecting it to be scoreable; it isn't a recognized `band_key` yet.
 
 ## What "Rung A" actually asks of you
 
-Rung A is evaluation coverage: rerun the existing, unmodified validator
-(`validate_lagfill_downscaling.py` or `validate_forecast_downscaling.py`) against a dark (target,
-zone, band) cell, using the snapshot to fetch the ground truth and base values our infrastructure
-would otherwise need a paid Open-Meteo key to fetch live. If the cell passes the same gate the
-model's already-live cells passed, you've earned credit for lighting it. No new code, no new
-parameters, just running the existing bar against data nobody had gotten to yet.
+Rung A is evaluation coverage: reproduce the existing, unmodified scoring bar
+(`heatready_downscaling.score.score_band`, applying the shipped model via
+`contract.FrozenPredictionAdapter`) against a dark (target, zone, band) cell, using the public
+snapshot to fetch the ground truth and base values our infrastructure would otherwise need a paid
+Open-Meteo key to fetch live -- exactly what the referee itself runs (`run_submission.py`'s
+`reproduce()`), and exactly what `examples/rung_a_evaluate_dark_cell.py` does end to end: see
+`examples/README.md` for a worked, CI-executed run against a real dark cell.
+
+**Correction (2026-08-26):** this section previously named
+`validate_lagfill_downscaling.py`/`validate_forecast_downscaling.py` as what to rerun. Neither is
+snapshot-runnable -- both need private-repo modules and live Aurora/Open-Meteo access (see their
+own docstrings) -- and `method.entrypoint` naming one is provenance metadata only, never executed
+by the referee (see "Submission format" above). If you have access to run them from the private
+repo's own bastion, that route still exists; from this public repo alone, `score_band` +
+`FrozenPredictionAdapter` against the snapshot -- the example script above -- is the actual path.
+If the cell passes the same gate the model's already-live cells passed, you've earned credit for
+lighting it. No new code, no new parameters, just running the existing bar against data nobody had
+gotten to yet.
 
 Not every dark cell clears the bar just because you rerun the validator against it. The first real
 submission through this pipeline (`2026-07-001`, `lag_fill`/`BWk`/`tmin`) targeted the `lag_fill`
@@ -150,6 +162,13 @@ value, not a freshly re-derived one). This is deliberately a smaller bar than Ru
 mechanical fit: the referee never trusts your claimed numbers, but it also never fits a value for
 you -- station-grouped CV validates whether YOUR number generalizes, not whether some other number
 would have scored better.
+
+**Fitting the value is on you; the referee only scores it.** `score.score_band`'s
+`covariate_linear` path (used below) independently evaluates and CIs an *already-declared*
+intercept/slope -- it does not fit one from data. `examples/rung_b_l1_covariate_linear_fit.py` is a
+complete worked example of both halves against a real snapshot: a small OLS fit on a named station
+subset, then the same `score_band` reproduction the referee runs, producing a real
+`claimed_report.json`. See `examples/README.md`.
 
 **Also open, as of this change**: a correction that varies continuously with a static
 per-location covariate, instead of being one constant for a whole zone. A flat number cannot
