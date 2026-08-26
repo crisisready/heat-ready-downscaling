@@ -249,6 +249,34 @@ method:
       Cfb: {scale: 0.92, offset: 0.1}
 ```
 
+## Rung C, when it opens — what to prepare
+
+**Rung C is not open.** `GOVERNANCE.md` records the decision that governs it and exactly which
+opening condition is still missing. This section exists so that if you are working toward a
+locally-trained model, you build the right thing rather than discovering the rules afterwards.
+
+**Your code will never run on our infrastructure.** A Rung C submission is a *recipe plus data*:
+the training procedure described well enough that our own pipeline can reproduce it, and the
+inputs declared through the same `data_sources` block the licensing gate already checks. We
+retrain from that recipe and promote what we built. This is not a sandbox we have not got round
+to building — it is the decision, and it is what keeps the pickle-deserialisation surface out of
+the programme entirely.
+
+The practical consequence, worth knowing before you invest months: **if your procedure cannot be
+described well enough for us to reproduce it, it cannot be submitted, however good your model
+is.** A model artifact alone is not a Rung C submission.
+
+Two things you can do now that will not be wasted:
+
+- **Register what you have.** `registry/` takes an entry for a model that is not promoted and not
+  serving — `local/seoul-sdot-v1` is exactly that, a real local model recorded with its evidence,
+  its holdout design, and its blockers stated in the open. An entry at status `registered` is a
+  record of something that exists, and needs no artifact checksum.
+- **Hold your evidence to the bar that already exists.** A genuine held-out validation, a
+  cluster-bootstrap interval that excludes zero, and an honestly stated coverage bound are what
+  the scoring vocabulary already reports for Rung B, and they are what a Rung C claim will be
+  read against.
+
 ## Research track
 
 New covariates are welcome if they are global (not one-country-specific), reproducibly fetchable
