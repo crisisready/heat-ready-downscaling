@@ -102,3 +102,19 @@ class TestSplitFitAndHoldoutStations:
     def test_raises_with_zero_stations(self):
         with pytest.raises(SystemExit, match="only 0 usable station"):
             rb.split_fit_and_holdout_stations([], n_fit=2)
+
+    def test_raises_on_zero_n_fit(self):
+        """n_fit=0 would otherwise pass the station-count check and leave
+        fit_covariate_linear with zero fit rows, crashing with a raw numpy
+        error instead of a readable message (round-2 review finding)."""
+        rows = [_row(f"s{i}", 0.1, 21.0, 20.0) for i in range(5)]
+        with pytest.raises(SystemExit, match="at least 1"):
+            rb.split_fit_and_holdout_stations(rows, n_fit=0)
+
+    def test_raises_on_negative_n_fit(self):
+        """A negative n_fit slices from the end (stations[n_fit:]), silently
+        producing fewer holdout stations than the 2-station minimum this
+        function otherwise enforces (round-2 review finding)."""
+        rows = [_row(f"s{i}", 0.1, 21.0, 20.0) for i in range(10)]
+        with pytest.raises(SystemExit, match="at least 1"):
+            rb.split_fit_and_holdout_stations(rows, n_fit=-1)

@@ -128,6 +128,10 @@ def split_fit_and_holdout_stations(rows: list[dict], n_fit: int) -> tuple[set, s
     station_id) so re-running this script reproduces the identical split,
     not a random one that would make the CI-executed result nondeterministic
     across runs."""
+    if n_fit < 1:
+        raise SystemExit(
+            f"--n-fit-stations must be at least 1 to have anything to fit, got {n_fit}",
+        )
     stations = sorted({r["station_id"] for r in rows})
     if len(stations) < n_fit + 2:
         raise SystemExit(
