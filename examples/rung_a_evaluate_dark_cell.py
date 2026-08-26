@@ -63,9 +63,10 @@ def main() -> None:
     parser.add_argument("--cache-root", default=".cache/snapshots")
     parser.add_argument("--out", default="examples/output/rung_a_claimed_report.json")
     parser.add_argument(
-        "--require-beats-grid", action="store_true", default=True,
+        "--require-beats-grid", action=argparse.BooleanOptionalAction, default=True,
         help="fail (exit 1) if the named cell does not beat the grid baseline -- keeps this "
-        "example honest about what it claims when run in CI (default: on)",
+        "example honest about what it claims when run in CI. Pass --no-require-beats-grid to "
+        "just look at the numbers for a zone you're exploring (default: on)",
     )
     args = parser.parse_args()
 
@@ -89,7 +90,9 @@ def main() -> None:
     print(f"  n_grid / n_qrf_applied   = {zone_result['n_grid']} / {zone_result['n_qrf_applied']}")
     print(f"  qrf_beats_grid_with_margin = {zone_result['qrf_beats_grid_with_margin']}")
 
-    os.makedirs(os.path.dirname(args.out), exist_ok=True)
+    out_dir = os.path.dirname(args.out)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
     with open(args.out, "w") as f:
         json.dump(reproduced, f, indent=2, default=str)
     print(f"\nWrote {args.out} -- this IS a real claimed_report.json (see CONTRIBUTING.md's "
@@ -99,8 +102,8 @@ def main() -> None:
         raise SystemExit(
             f"{args.target}/{args.zone} no longer beats the grid baseline with margin as of "
             f"snapshot {args.snapshot_version} -- this example's claim is stale and needs a new "
-            "cell (pass --target/--zone to explore, or update DEFAULT_TARGET/DEFAULT_ZONE once "
-            "you've found a new one)",
+            "cell (pass --target/--zone to explore, --no-require-beats-grid to just see the "
+            "numbers, or update DEFAULT_TARGET/DEFAULT_ZONE once you've found a new one)",
         )
 
 
