@@ -110,3 +110,88 @@ class TestCompareReports:
     def test_max_abs_deviation_reported_even_when_passing(self):
         result = report.compare_reports(self._report(1.5), self._report(1.503), {"rmse_qrf_c": 0.01})
         assert result.max_abs_deviation["rmse_qrf_c"] == pytest.approx(0.003, abs=1e-9)
+
+
+class TestBooleanMetricsCompare:
+    """Regression, PR #34. The non-scalar guard added in #31 excluded bool to
+    catch nested blocks, but bool is a subclass of int and compares perfectly
+    well -- so identical booleans became a hard violation. Any manifest naming
+    a boolean metric in its tolerance block (qrf_beats_grid,
+    gated_insufficient_n, proposed_correction_beats_grid_with_margin -- none
+    ceiling-restricted, all legal keys) was rejected even when it reproduced
+    exactly."""
+
+    def _report(self, value):
+        return {"by_target": {"tmax": {"Cfb": {"qrf_beats_grid": value}}}}
+
+    def test_identical_booleans_reproduce(self):
+        from heatready_downscaling import report
+
+        r = self._report(True)
+        assert report.compare_reports(r, r, {"qrf_beats_grid": 0.001}).passed
+
+    def test_mismatched_booleans_are_still_a_violation(self):
+        from heatready_downscaling import report
+
+        result = report.compare_reports(
+            self._report(True), self._report(False), {"qrf_beats_grid": 0.001},
+        )
+        assert not result.passed
+        assert len(result.violations) == 1
+
+    def test_a_nested_block_is_still_reported_as_non_scalar(self):
+        """The case the guard was actually for."""
+        from heatready_downscaling import report
+
+        r = {"by_target": {"tmax": {"Cfb": {"blk": {"all": {}}}}}}
+        result = report.compare_reports(r, r, {"blk": 0.01})
+        assert not result.passed
+        assert "not a scalar" in (result.violations[0].get("reason") or "")
+
+
+class TestBooleanTolerancesCannotBypassTheReferee:
+    """PR #34 round 1, HIGH. Two wrongs in a row: #31 excluded bool and made
+    identical booleans a false REJECTION; the first version of #34's fix put
+    them on the numeric path and opened a false ACCEPTANCE. abs(True - False)
+    is 1, no boolean key has a _TOLERANCE_MAXIMA ceiling, and validate_manifest
+    accepts any positive number for an unlisted key -- so a manifest could
+    declare tolerance {qrf_beats_grid: 1.5} and have a claimed True
+    'reproduce' against an independently derived False."""
+
+    def _r(self, value):
+        return {"by_target": {"tmax": {"Cfb": {"qrf_beats_grid": value}}}}
+
+    def test_a_large_tolerance_cannot_make_true_reproduce_as_false(self):
+        from heatready_downscaling import report
+
+        result = report.compare_reports(self._r(True), self._r(False), {"qrf_beats_grid": 1.5})
+        assert not result.passed, "a tolerance must never launder a boolean mismatch"
+        assert "must match exactly" in (result.violations[0].get("reason") or "")
+
+    @pytest.mark.parametrize("tol", [0.001, 1.0, 1.5, 999.0])
+    def test_no_tolerance_at_all_launders_a_mismatch(self, tol):
+        from heatready_downscaling import report
+
+        assert not report.compare_reports(self._r(True), self._r(False), {"qrf_beats_grid": tol}).passed
+
+    @pytest.mark.parametrize("value", [True, False])
+    def test_identical_booleans_still_reproduce(self, value):
+        from heatready_downscaling import report
+
+        assert report.compare_reports(self._r(value), self._r(value), {"qrf_beats_grid": 0.001}).passed
+
+
+def test_a_flipped_boolean_records_a_real_deviation_not_zero():
+    """PR #34 round 2: the mismatch branch left abs_diff None and
+    max_abs_deviation at 0.0, so a flipped boolean claim was written into the
+    APPEND-ONLY ledger and the referee comment as a 0.0 deviation -- a
+    permanent audit record saying a claim that inverted reproduced exactly.
+    The base commit recorded 1.0; the bypass fix regressed it."""
+    from heatready_downscaling import report
+
+    t = {"by_target": {"tmax": {"Cfb": {"qrf_beats_grid": True}}}}
+    f = {"by_target": {"tmax": {"Cfb": {"qrf_beats_grid": False}}}}
+    result = report.compare_reports(t, f, {"qrf_beats_grid": 0.001})
+    assert not result.passed
+    assert result.violations[0]["abs_diff"] == 1.0
+    assert result.max_abs_deviation["qrf_beats_grid"] == 1.0

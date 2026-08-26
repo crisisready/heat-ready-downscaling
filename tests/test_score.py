@@ -247,6 +247,15 @@ class TestScoreBandProposedCorrection:
         Declaring bias_correction_c=0.5 should nearly zero out the
         residual and match bias_qrf almost exactly."""
         rows, adapter = _bias_test_rows_and_adapter(bias_c=0.5)
+        # Real station ids, because as of PR #34 winning a cycle requires a
+        # bootstrap interval that excludes zero, and the interval comes from
+        # resampling whole STATIONS. This fixture's rows carry no station_id,
+        # so they collapse to one pseudo-station and produce no interval --
+        # which is now correctly not a win. Stamping ids here keeps this test
+        # about what it was always about (an accurate declared bias beating
+        # the grid); the no-station case is pinned separately below.
+        for i, r in enumerate(rows):
+            r["station_id"] = f"STN{i % 12:03d}"
         result = score.score_band(
             adapter, rows, "tmax", fold_salt="v-test",
             proposed_correction={"Cfa": {"bias_correction_c": 0.5}},
@@ -258,6 +267,25 @@ class TestScoreBandProposedCorrection:
         assert m["proposed_correction_beats_grid"] is True
         assert m["proposed_correction_beats_grid_with_margin"] is True
         assert m["proposed_vs_best_fit_gap_c"] == pytest.approx(0.0, abs=0.002)
+
+    def test_a_zone_with_no_distinct_stations_cannot_win_even_when_accurate(self):
+        """The other half of the same rule (PR #34), and the reason the test
+        above needed station ids: an interval built by resampling whole
+        stations cannot exist for a zone with one, so it cannot exclude zero,
+        so the proposal cannot bank a monthly win however accurate its point
+        estimate is. This applies to every Rung B shape, not only the
+        covariate-linear one CONTRIBUTING.md's promise was written under."""
+        rows, adapter = _bias_test_rows_and_adapter(bias_c=0.5)
+        result = score.score_band(
+            adapter, rows, "tmax", fold_salt="v-test",
+            proposed_correction={"Cfa": {"bias_correction_c": 0.5}},
+        )
+        m = result["Cfa"]
+        assert m["proposed_correction_beats_grid"] is True, "the point estimate is still good"
+        assert m["proposed_correction_by_stratum"]["all"]["rmse_improvement_ci95_pct"] is None
+        # None means UNMEASURABLE. False would mean measured and not good
+        # enough, which is a different -- and here, wrong -- answer.
+        assert m["proposed_correction_beats_grid_with_margin"] is None
 
     def test_wildly_wrong_declared_bias_fails_to_beat_grid(self):
         """Overcorrecting by 10C on top of the real ~0.5C bias should end

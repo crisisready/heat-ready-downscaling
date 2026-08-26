@@ -90,7 +90,7 @@ provisional score as a PR comment.
 
 **Provisional scores are for ranking and feedback only. They are never a gate decision.** The
 provisional check is a zone-stratified 15% station holdout, computed in minutes so you get fast
-feedback. `_MIN_ZONE_N` (minimum stations per zone) and `_BIAS_CV_MIN_STATIONS` (minimum distinct
+feedback. `_MIN_ZONE_N` (minimum paired ROWS per zone -- not stations; see the two-distinct-stations note in the Rung B section, which is a separate and stricter bar) and `_BIAS_CV_MIN_STATIONS` (minimum distinct
 stations for the bias cross-validation) will not be met on a 15% slice for thin zones. A thin zone
 can show a promising provisional number that the real, official, monthly forward-eval check will
 not confirm. This is expected, not a bug in the provisional check.
@@ -208,6 +208,25 @@ actually matters, and an effect concentrated there gets washed out by whole-year
 `pass`, `candidate`, or `fail`. `candidate` means the improvement is real but the interval still
 includes zero -- usually a sign you need more stations, not that the finding is wrong. A `pass`
 requires the interval to exclude zero, which is a stricter bar than the point estimate alone.
+
+**That interval requirement is what the monthly cycle actually enforces, for every Rung B
+shape** -- not just this one. A proposal whose interval includes zero does not win a cycle, so it
+cannot accumulate the two consecutive wins promotion needs. Two practical consequences worth
+knowing before you submit:
+
+- **You need at least two distinct stations among the rows your correction actually applies
+  to** -- not merely in the zone. The interval comes from resampling whole stations, and it is
+  computed over the scored rows only, so a narrow `valid_range` or a sparsely populated covariate
+  can leave you with a dozen stations in the zone and one among your scored rows. One station
+  produces no interval, and no interval cannot exclude zero. Row count is not a substitute:
+  forty station-days from a single station still gives you nothing to resample. A cell in that
+  position is reported as `insufficient_n`, not as a loss -- "we cannot measure this" and "this
+  is not good enough" are different answers.
+- **This was not always true.** Until 2026-08-26 the gate was the point estimate alone, while
+  this paragraph already promised the interval bar. The documented bar was stricter than the
+  enforced one. It is now the same bar, and this note stays because a contributor calibrating how
+  much to trust our stated gates deserves to know which ones have been fixed rather than always
+  been true.
 
 **Not yet open**: the blend-kernel `(L_km, R_km, tau)` triple for the distance-weighted
 nearby-station residual blend (`validate_station_blend.py`'s own scoring path needs a parallel

@@ -228,8 +228,65 @@ def compare_reports(claimed: dict, reproduced: dict, tolerance: dict[str, float]
                 # violation rather than a crash: a non-numeric metric can
                 # never be shown to reproduce within a numeric tolerance, and
                 # silently skipping it would let it pass unchecked.
-                if not isinstance(claimed_val, (int, float)) or isinstance(claimed_val, bool) \
-                        or not isinstance(reproduced_val, (int, float)) or isinstance(reproduced_val, bool):
+                # Booleans compare by EQUALITY, never by tolerance.
+                #
+                # Two wrongs in a row here, worth recording. #31 excluded bool
+                # from the numeric path to catch nested blocks, which made
+                # identical booleans a hard violation -- a false rejection.
+                # The first version of THIS fix put them back on the numeric
+                # path, which opened a false ACCEPTANCE: abs(True - False) is
+                # 1, no boolean key has a _TOLERANCE_MAXIMA ceiling, and
+                # validate_manifest accepts any positive number for an
+                # unlisted key -- so `tolerance: {qrf_beats_grid: 1.5}` made a
+                # claimed True "reproduce" against an independently derived
+                # False, and run_submission reported status: pass. Verified
+                # live before this rewrite. A referee bypass is strictly worse
+                # than the rejection it replaced.
+                #
+                # The comment I wrote then cited "none of which are
+                # ceiling-restricted" as evidence those keys were safe. That
+                # is exactly what made them exploitable; I had the fact
+                # backwards.
+                #
+                # A tolerance on a boolean is meaningless anyway: it either
+                # reproduces or it does not.
+                if isinstance(claimed_val, bool) or isinstance(reproduced_val, bool):
+                    if claimed_val is reproduced_val:
+                        max_abs_deviation[metric] = max(max_abs_deviation[metric], 0.0)
+                        continue
+                    # The deviation is REAL and must be recorded (code-review
+                    # finding, PR #34 round 2). Leaving abs_diff None and
+                    # max_abs_deviation at 0.0 meant a flipped boolean claim
+                    # was written into the APPEND-ONLY ledger and the referee
+                    # comment as a 0.0 deviation -- a permanent audit record
+                    # saying the claim reproduced exactly, for a claim that
+                    # inverted. The base commit recorded 1.0; this regressed
+                    # it while fixing the bypass above.
+                    abs_diff = abs(float(claimed_val) - float(reproduced_val))
+                    max_abs_deviation[metric] = max(max_abs_deviation[metric], abs_diff)
+                    violations.append({
+                        "target": target, "zone": zone, "metric": metric,
+                        "claimed": claimed_val, "reproduced": reproduced_val,
+                        "abs_diff": abs_diff, "allowed": allowed,
+                        "reason": "boolean metrics must match exactly -- a tolerance cannot "
+                                  "make a claimed True reproduce against a derived False",
+                    })
+                    continue
+                # Non-scalars (regression context, PR #34).
+                # Excluding them to catch non-scalars was too broad: bool is a
+                # subclass of int and compares perfectly well, so
+                # abs(True - True) == 0 passed before that guard and became a
+                # hard violation after it. Verified: compare_reports(r, r,
+                # {"qrf_beats_grid": 0.001}) returned passed=False on
+                # byte-identical inputs, so any manifest naming a boolean
+                # metric in its tolerance block -- qrf_beats_grid,
+                # gated_insufficient_n, proposed_correction_beats_grid_with_margin,
+                # none of which are ceiling-restricted and all of which are
+                # legal keys -- was rejected even when it reproduced exactly.
+                # A mismatched pair still fails: abs(True - False) == 1
+                # exceeds any sane tolerance, which is the correct verdict.
+                if not isinstance(claimed_val, (int, float)) \
+                        or not isinstance(reproduced_val, (int, float)):
                     violations.append({
                         "target": target, "zone": zone, "metric": metric,
                         "claimed": claimed_val, "reproduced": reproduced_val,

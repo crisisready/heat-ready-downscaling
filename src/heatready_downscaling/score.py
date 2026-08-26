@@ -956,6 +956,7 @@ def score_band(
                     grid_err_stratum, corr_err, stratum_ids_full[mask],
                     fold_salt=fold_salt, stream=f"{zone}:{target}:{stratum}",
                 )
+                _stratum_verdict = _verdict(margin, ci, n_scored)
                 # Does the covariate term actually earn its keep, or would the
                 # intercept alone (i.e. a flat constant, the shape we already
                 # had) have done as well? This is exactly the comparison
@@ -968,16 +969,33 @@ def score_band(
                     # The verdict is against the BEST flat constant on these
                     # rows (mean(base_err), which is what the mechanical
                     # bias_correction_c fit would produce), NOT against the
-                    # submitted intercept. The declared intercept comes from a
-                    # JOINT fit with the slope and is not the optimal constant,
-                    # so comparing against it is biased toward keeping the
-                    # covariate: a proposal with a badly-placed intercept and a
-                    # near-zero slope would report earns_keep=True purely
-                    # because its own intercept-only variant is bad. The
-                    # documented question is "would the flat constant we
-                    # already had have done as well", and that constant is the
-                    # best one. (code-review finding, PR #27; this is also the
-                    # comparison PHASE6 actually ran, against the zone mean.)
+                    # submitted intercept.
+                    #
+                    # THE ASYMMETRY IS REAL AND DELIBERATE, stated rather than
+                    # papered over (code-review finding, PR #34). That constant
+                    # is fitted IN-SAMPLE on the very rows being scored, while
+                    # the proposal's intercept and slope are fixed and were fit
+                    # elsewhere -- so on forward-eval rows the comparator is an
+                    # oracle the contributor could not have declared, and
+                    # earns_keep is biased toward False. The previous version
+                    # compared against the submitted intercept and was biased
+                    # the opposite way, because a badly-placed intercept made
+                    # any slope look good. Neither is neutral. This direction is
+                    # the safe one for a field whose job is deciding whether
+                    # added complexity is justified, and it reproduces the
+                    # comparison PHASE6 actually ran by hand (coast-distance
+                    # against the zone-mean constant, which it lost on tmax and
+                    # won on tmin). rmse_intercept_only_c is reported alongside
+                    # so a reader can see both sides rather than one verdict.
+                    #
+                    # Why not the submitted intercept (the original comparator,
+                    # PR #27): it comes from a JOINT fit with the slope and is
+                    # not the optimal constant, so a proposal with a
+                    # badly-placed intercept and a near-zero slope reported
+                    # earns_keep=True purely because its own intercept-only
+                    # variant was bad. The documented question is "would the
+                    # flat constant we already had have done as well", and that
+                    # constant is the best one.
                     best_const_rmse = float(
                         np.sqrt(np.mean((base_err - float(np.mean(base_err))) ** 2)),
                     )
@@ -994,12 +1012,17 @@ def score_band(
                     "rmse_improvement_pct": margin,
                     "rmse_improvement_vs_basis_pct": margin_vs_basis,
                     "beats_grid": corr_rmse < grid_rmse,
+                    # DERIVED from the verdict, not a second encoding of it
+                    # (code-review finding, PR #34 round 2). Restating
+                    # _verdict's pass condition inline was byte-for-byte the
+                    # same predicate computed twice from the same three
+                    # variables, five lines apart -- exactly the drift risk the
+                    # comment I wrote here was warning about.
                     "beats_grid_with_margin": (
-                        (margin >= AUTO_ENABLE_MARGIN)
-                        if (margin is not None and n_scored >= MIN_ZONE_N) else None
+                        None if _stratum_verdict is None else _stratum_verdict == "pass"
                     ),
                     "rmse_improvement_ci95_pct": list(ci) if ci is not None else None,
-                    "verdict": _verdict(margin, ci, n_scored),
+                    "verdict": _stratum_verdict,
                     "rmse_intercept_only_c": io_rmse,
                     "rmse_best_constant_c": best_const_rmse,
                     "covariate_earns_keep": earns_keep,
@@ -1073,10 +1096,62 @@ def score_band(
         # Same MIN_ZONE_N/AUTO_ENABLE_MARGIN bar the mechanically-derived
         # with_margin fields use -- a contributor's declared value gets no
         # easier a bar than the maintainer's own fitted one.
-        proposed_correction_beats_grid_with_margin = (
-            (proposed_correction_margin_pct >= AUTO_ENABLE_MARGIN)
-            if (proposed_correction_margin_pct is not None and gating_n >= MIN_ZONE_N) else None
-        )
+        # THE INTERVAL IS PART OF THE BAR, not decoration.
+        #
+        # This field is the only thing score_forward_eval.score_cell consults
+        # to decide win/loss, and therefore the only thing feeding the
+        # two-consecutive-wins promotion rule. Until now it was the point
+        # estimate alone, while CONTRIBUTING.md told contributors "a pass
+        # requires the interval to exclude zero, which is a stricter bar than
+        # the point estimate alone". The documented bar was stricter than the
+        # enforced one, so a proposal whose CI straddles zero -- exactly
+        # Valencia's whole-year tmax case, the one this vocabulary was built
+        # to be able to express as a `candidate` rather than a pass -- could
+        # bank monthly wins toward production promotion. A control that is
+        # documented and not implemented is the defect class this repo has
+        # now produced three times; this is the fourth, in the promotion path.
+        #
+        # Requiring the interval also closes a second hole, without a second
+        # rule: MIN_ZONE_N counts paired SAMPLES, while
+        # _bootstrap_reduction_ci needs at least two distinct STATIONS. A
+        # raw_grid proposal in a one-station zone with 40 station-days used to
+        # clear gating_n >= MIN_ZONE_N and could win, while its interval was
+        # None for want of a second station -- and that is the expected shape
+        # of exactly the submissions raw_grid was added to unlock, not an edge
+        # case. A None interval cannot exclude zero, so it now cannot pass.
+        # Three states, not two (code-review finding, PR #34 round 2): None
+        # means UNMEASURABLE, False means measured and not good enough. The
+        # first version returned False when the interval was uncomputable,
+        # while its sibling gated_insufficient_n said True -- so one published
+        # cycle line carried both "cannot measure" and "not good enough" at
+        # once, reintroducing the exact conflation this change exists to
+        # remove.
+        # Three states, and the ORDER of these branches carries the meaning
+        # (code-review finding, PR #34 round 2, refined after a test caught the
+        # first version being too coarse). None means UNMEASURABLE; False means
+        # measured and not good enough.
+        #
+        # A proposal whose point estimate is NEGATIVE is demonstrably worse than
+        # the grid, and no interval is needed to say so -- returning None there
+        # would let an obviously bad proposal sit as insufficient_n forever
+        # instead of being recorded as the loss it is. Only a proposal that
+        # looks like an improvement but has no interval is genuinely
+        # unmeasurable. This mirrors _verdict, which returns "fail" for
+        # margin <= 0 regardless of the interval.
+        _all_ci = _all.get("rmse_improvement_ci95_pct")
+        _measurable = True
+        if proposed_correction_margin_pct is None or gating_n < MIN_ZONE_N:
+            proposed_correction_beats_grid_with_margin = None
+            _measurable = False
+        elif proposed_correction_margin_pct <= 0:
+            proposed_correction_beats_grid_with_margin = False
+        elif _all_ci is None:
+            proposed_correction_beats_grid_with_margin = None
+            _measurable = False
+        else:
+            proposed_correction_beats_grid_with_margin = (
+                proposed_correction_margin_pct >= AUTO_ENABLE_MARGIN and _all_ci[0] > 0
+            )
         # proposed_vs_best_fit_gap_c: how far the DECLARED value is from
         # what this function would have fit itself, evaluated on the
         # EFFECT (over the zone's own observed delta_c range), not raw
@@ -1201,7 +1276,23 @@ def score_band(
             # score_forward_eval.py reads this to decide
             # win/loss/insufficient_n, so fixing it here fixes that consumer
             # too rather than needing a parallel change there.
-            "gated_insufficient_n": gating_n < MIN_ZONE_N,
+            # Also True when a PROPOSAL has enough rows but no computable
+            # interval (code-review finding, PR #34). Without this, a
+            # one-station zone -- 40 station-days, one station, no bootstrap --
+            # cleared the row-count bar, then score_forward_eval took the
+            # win/loss branch and recorded "loss" every cycle forever, with the
+            # ledger attributing the failure to proposal QUALITY rather than to
+            # zone geometry, and the contributor seeing a good provisional
+            # score and an unexplained perpetual loss. "We cannot measure this"
+            # and "this is not good enough" are different answers and the
+            # record should not confuse them.
+            # For a proposal this tracks _measurable above, so a
+            # demonstrably-worse proposal is recorded as a LOSS (measurable)
+            # rather than as insufficient_n -- only "looks like an improvement,
+            # cannot tell if it is real" is unmeasurable.
+            "gated_insufficient_n": (
+                (not _measurable) if proposed_entry is not None else gating_n < MIN_ZONE_N
+            ),
             "proposed_correction_n_scored": proposed_correction_n_scored,
             # Rung B (2026-08-25): scoring a contributor-DECLARED, fixed
             # correction, never the mechanically-derived one above -- see
