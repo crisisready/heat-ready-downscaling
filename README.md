@@ -60,7 +60,8 @@ Two properties make this cheap rather than risky:
 |---|---|---|
 | **A** | Evaluation coverage: run the validator on a dark cell using the published snapshot | open, scoreable by the automated referee today |
 | **B** | Published parameters: a `bias_correction`/`delta_scale` value | open as of 2026-08-25 for the bias/affine shape (see `CONTRIBUTING.md`); the blend-kernel `L_km`/`R_km`/`tau` triple is not yet wired |
-| **C** | New model code | deferred; see `docs/rung-c.md` (not yet published) |
+| **C** | New model code | not open; see `GOVERNANCE.md`'s Rung C section for the decision and the one remaining opening condition |
+| **D** | Contributed data (a local sensor source) | designed, not built; see `docs/design-2026-08-25-rung-d-contributed-data.md` |
 
 **v1 executes only this repository's own code.** A submission declares what to run (an entrypoint
 and args against the published snapshot). The referee runs `heatready_downscaling` at a pinned
