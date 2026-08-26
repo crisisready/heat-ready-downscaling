@@ -23,3 +23,9 @@ model.joblib
 
 # OS
 .DS_Store
+
+# Downloaded snapshot cache and generated example output (both derived, both
+# large -- see examples/README.md and scripts/run_submission.py's own
+# download_snapshot cache_root convention)
+.cache/
+examples/output/

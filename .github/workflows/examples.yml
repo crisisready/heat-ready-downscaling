@@ -1,0 +1,58 @@
+# Runs the worked contributor examples (examples/README.md) on every push and
+# PR -- roadmap Phase 2's own acceptance bar for this deliverable: "a
+# cold-context agent (or colleague) executes each example end-to-end from the
+# docs alone, without help; every example runs in CI." Without this workflow
+# that claim is unverified prose; with it, a future snapshot release that
+# breaks either example's named claim (see each script's own
+# --require-beats-grid/--require-pass) turns this red instead of the docs
+# quietly going stale.
+#
+# Zero AWS credentials, same posture as referee.yml/score-forward-eval.yml:
+# both examples only ever touch the public snapshot GitHub Release asset.
+#
+# Not paths-filtered -- a change to score.py, contract.py, or run_submission.py
+# can break either example without examples/ itself changing, same reasoning
+# as the Tests workflow.
+name: Examples
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: examples-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  examples:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: pip install -e '.[snapshot]'
+
+      # Keyed on the pinned SNAPSHOT_VERSION both scripts declare, not on
+      # manifest content (there's no submission manifest here) -- same asset
+      # every run until a script is deliberately repointed at a new release.
+      - name: Cache downloaded snapshot
+        uses: actions/cache@v4
+        with:
+          path: .cache/snapshots
+          key: examples-snapshot-v2026.07
+
+      - name: Run Rung A worked example
+        run: python examples/rung_a_evaluate_dark_cell.py
+
+      - name: Run Rung B/L1 worked example
+        run: python examples/rung_b_l1_covariate_linear_fit.py
