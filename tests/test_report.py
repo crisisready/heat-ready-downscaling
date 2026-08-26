@@ -110,3 +110,40 @@ class TestCompareReports:
     def test_max_abs_deviation_reported_even_when_passing(self):
         result = report.compare_reports(self._report(1.5), self._report(1.503), {"rmse_qrf_c": 0.01})
         assert result.max_abs_deviation["rmse_qrf_c"] == pytest.approx(0.003, abs=1e-9)
+
+
+class TestBooleanMetricsCompare:
+    """Regression, PR #34. The non-scalar guard added in #31 excluded bool to
+    catch nested blocks, but bool is a subclass of int and compares perfectly
+    well -- so identical booleans became a hard violation. Any manifest naming
+    a boolean metric in its tolerance block (qrf_beats_grid,
+    gated_insufficient_n, proposed_correction_beats_grid_with_margin -- none
+    ceiling-restricted, all legal keys) was rejected even when it reproduced
+    exactly."""
+
+    def _report(self, value):
+        return {"by_target": {"tmax": {"Cfb": {"qrf_beats_grid": value}}}}
+
+    def test_identical_booleans_reproduce(self):
+        from heatready_downscaling import report
+
+        r = self._report(True)
+        assert report.compare_reports(r, r, {"qrf_beats_grid": 0.001}).passed
+
+    def test_mismatched_booleans_are_still_a_violation(self):
+        from heatready_downscaling import report
+
+        result = report.compare_reports(
+            self._report(True), self._report(False), {"qrf_beats_grid": 0.001},
+        )
+        assert not result.passed
+        assert len(result.violations) == 1
+
+    def test_a_nested_block_is_still_reported_as_non_scalar(self):
+        """The case the guard was actually for."""
+        from heatready_downscaling import report
+
+        r = {"by_target": {"tmax": {"Cfb": {"blk": {"all": {}}}}}}
+        result = report.compare_reports(r, r, {"blk": 0.01})
+        assert not result.passed
+        assert "not a scalar" in (result.violations[0].get("reason") or "")

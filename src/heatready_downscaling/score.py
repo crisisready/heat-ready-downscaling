@@ -968,7 +968,24 @@ def score_band(
                     # The verdict is against the BEST flat constant on these
                     # rows (mean(base_err), which is what the mechanical
                     # bias_correction_c fit would produce), NOT against the
-                    # submitted intercept. The declared intercept comes from a
+                    # submitted intercept.
+                    #
+                    # THE ASYMMETRY IS REAL AND DELIBERATE, stated rather than
+                    # papered over (code-review finding, PR #34). That constant
+                    # is fitted IN-SAMPLE on the very rows being scored, while
+                    # the proposal's intercept and slope are fixed and were fit
+                    # elsewhere -- so on forward-eval rows the comparator is an
+                    # oracle the contributor could not have declared, and
+                    # earns_keep is biased toward False. The previous version
+                    # compared against the submitted intercept and was biased
+                    # the opposite way, because a badly-placed intercept made
+                    # any slope look good. Neither is neutral. This direction is
+                    # the safe one for a field whose job is deciding whether
+                    # added complexity is justified, and it reproduces the
+                    # comparison PHASE6 actually ran by hand (coast-distance
+                    # against the zone-mean constant, which it lost on tmax and
+                    # won on tmin). rmse_intercept_only_c is reported alongside
+                    # so a reader can see both sides rather than one verdict. The declared intercept comes from a
                     # JOINT fit with the slope and is not the optimal constant,
                     # so comparing against it is biased toward keeping the
                     # covariate: a proposal with a badly-placed intercept and a
@@ -1073,8 +1090,33 @@ def score_band(
         # Same MIN_ZONE_N/AUTO_ENABLE_MARGIN bar the mechanically-derived
         # with_margin fields use -- a contributor's declared value gets no
         # easier a bar than the maintainer's own fitted one.
+        # THE INTERVAL IS PART OF THE BAR, not decoration.
+        #
+        # This field is the only thing score_forward_eval.score_cell consults
+        # to decide win/loss, and therefore the only thing feeding the
+        # two-consecutive-wins promotion rule. Until now it was the point
+        # estimate alone, while CONTRIBUTING.md told contributors "a pass
+        # requires the interval to exclude zero, which is a stricter bar than
+        # the point estimate alone". The documented bar was stricter than the
+        # enforced one, so a proposal whose CI straddles zero -- exactly
+        # Valencia's whole-year tmax case, the one this vocabulary was built
+        # to be able to express as a `candidate` rather than a pass -- could
+        # bank monthly wins toward production promotion. A control that is
+        # documented and not implemented is the defect class this repo has
+        # now produced three times; this is the fourth, in the promotion path.
+        #
+        # Requiring the interval also closes a second hole, without a second
+        # rule: MIN_ZONE_N counts paired SAMPLES, while
+        # _bootstrap_reduction_ci needs at least two distinct STATIONS. A
+        # raw_grid proposal in a one-station zone with 40 station-days used to
+        # clear gating_n >= MIN_ZONE_N and could win, while its interval was
+        # None for want of a second station -- and that is the expected shape
+        # of exactly the submissions raw_grid was added to unlock, not an edge
+        # case. A None interval cannot exclude zero, so it now cannot pass.
+        _all_ci = _all.get("rmse_improvement_ci95_pct")
         proposed_correction_beats_grid_with_margin = (
-            (proposed_correction_margin_pct >= AUTO_ENABLE_MARGIN)
+            (proposed_correction_margin_pct >= AUTO_ENABLE_MARGIN
+             and _all_ci is not None and _all_ci[0] > 0)
             if (proposed_correction_margin_pct is not None and gating_n >= MIN_ZONE_N) else None
         )
         # proposed_vs_best_fit_gap_c: how far the DECLARED value is from

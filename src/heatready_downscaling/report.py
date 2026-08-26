@@ -228,8 +228,21 @@ def compare_reports(claimed: dict, reproduced: dict, tolerance: dict[str, float]
                 # violation rather than a crash: a non-numeric metric can
                 # never be shown to reproduce within a numeric tolerance, and
                 # silently skipping it would let it pass unchecked.
-                if not isinstance(claimed_val, (int, float)) or isinstance(claimed_val, bool) \
-                        or not isinstance(reproduced_val, (int, float)) or isinstance(reproduced_val, bool):
+                # Booleans stay on the NUMERIC path (regression fix, PR #34).
+                # Excluding them to catch non-scalars was too broad: bool is a
+                # subclass of int and compares perfectly well, so
+                # abs(True - True) == 0 passed before that guard and became a
+                # hard violation after it. Verified: compare_reports(r, r,
+                # {"qrf_beats_grid": 0.001}) returned passed=False on
+                # byte-identical inputs, so any manifest naming a boolean
+                # metric in its tolerance block -- qrf_beats_grid,
+                # gated_insufficient_n, proposed_correction_beats_grid_with_margin,
+                # none of which are ceiling-restricted and all of which are
+                # legal keys -- was rejected even when it reproduced exactly.
+                # A mismatched pair still fails: abs(True - False) == 1
+                # exceeds any sane tolerance, which is the correct verdict.
+                if not isinstance(claimed_val, (int, float)) \
+                        or not isinstance(reproduced_val, (int, float)):
                     violations.append({
                         "target": target, "zone": zone, "metric": metric,
                         "claimed": claimed_val, "reproduced": reproduced_val,

@@ -810,3 +810,73 @@ def test_the_tests_workflow_installs_every_declared_extra():
         "Every extra must be installed in CI, or some of the suite silently does not run "
         "there -- which is how 11 tests failed on main."
     )
+
+
+class TestTheIntervalActuallyGates:
+    """The bar CONTRIBUTING.md promised and nothing enforced until 2026-08-26.
+
+    proposed_correction_beats_grid_with_margin is the ONLY field
+    score_forward_eval.score_cell consults for win/loss, so it is the only
+    thing feeding the two-consecutive-wins promotion rule. Until this landed
+    it was the point estimate alone, and a proposal whose CI straddled zero --
+    exactly Valencia's whole-year tmax case -- could bank wins toward
+    production."""
+
+    def test_a_candidate_whose_interval_spans_zero_does_not_win(self):
+        grid_val = 20.0
+        rows, deltas = [], []
+        # One station of ten carries the mirror-image error, so resampling
+        # whole stations swings the reduction across zero while the point
+        # estimate stays positive.
+        for i in range(60):
+            cov = i % 30
+            sid = i % 10
+            raw_err = (0.8 - 0.04 * cov) if sid != 0 else -(0.8 - 0.04 * cov)
+            rows.append({
+                "climate_zone": "BSh", "station_id": f"STN{sid:03d}",
+                "grid_tmax_c": grid_val, "station_tmax_c": grid_val + raw_err,
+                "lst_warm_season_anomaly_c": cov,
+            })
+            deltas.append(0.0)
+        res = _score(rows, deltas, _entry(), applied_idx=set())
+        block = res["proposed_correction_by_stratum"]["all"]
+
+        assert block["verdict"] == "candidate"
+        assert block["rmse_improvement_ci95_pct"][0] <= 0
+        assert res["proposed_correction_beats_grid_with_margin"] is False, (
+            "a candidate must not bank a monthly win -- this field is what "
+            "score_forward_eval uses to decide win/loss"
+        )
+
+    def test_a_pass_still_wins(self):
+        rows, deltas = _rows(n=60)
+        res = _score(rows, deltas, _entry(), applied_idx=set())
+        assert res["proposed_correction_by_stratum"]["all"]["verdict"] == "pass"
+        assert res["proposed_correction_beats_grid_with_margin"] is True
+
+    def test_a_single_station_zone_cannot_win_however_many_rows_it_has(self):
+        """MIN_ZONE_N counts paired SAMPLES while the bootstrap needs two
+        distinct STATIONS, so a one-station zone used to clear gating with no
+        interval at all -- and that is the expected shape of exactly the
+        submissions raw_grid was added to unlock, not an edge case."""
+        rows, deltas = _rows(n=60)
+        for r in rows:
+            r["station_id"] = "ONLY-ONE"
+        res = _score(rows, deltas, _entry(), applied_idx=set())
+        block = res["proposed_correction_by_stratum"]["all"]
+
+        assert block["n_scored"] >= score.MIN_ZONE_N, "sanity: it clears the row-count bar"
+        assert block["rmse_improvement_ci95_pct"] is None, "one station gives no interval"
+        assert res["proposed_correction_beats_grid_with_margin"] is False
+
+    def test_the_flat_gate_and_the_stratum_verdict_agree(self):
+        """Two sources of truth disagreeing is what produced this bug."""
+        for n, applied in ((60, set()), (60, set(range(60)))):
+            rows, deltas = _rows(n=n)
+            res = _score(rows, deltas, _entry(), applied_idx=applied)
+            verdict = res["proposed_correction_by_stratum"]["all"]["verdict"]
+            flat = res["proposed_correction_beats_grid_with_margin"]
+            if verdict == "pass":
+                assert flat is True
+            elif verdict in ("candidate", "fail"):
+                assert flat is not True
