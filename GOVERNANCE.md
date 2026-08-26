@@ -37,7 +37,9 @@ Real, tested, and live:
 - The licensing gate (`heatready_downscaling.licensing`, `scripts/check_data_licensing.py`, the
   `Data licensing` workflow) — the control this section's principle exists because of.
 - The model registry (`heatready_downscaling.registry`, `registry/`, the `Registry` workflow),
-  with three retroactively registered entries.
+  with three retroactively registered entries, rendered publicly at
+  [`docs/models.md`](docs/models.md) (`scripts/render_models_page.py`, CI-checked for staleness
+  against `registry/` the same workflow).
 
 Designed and merged as a design, NOT implemented:
 
