@@ -116,6 +116,37 @@ this in the PR description so nobody assumes it's an oversight):
   and Phase 4 (Rung D implementation, which has the PII/geolocation conflict above still unresolved
   and needs a maintainer decision before it can be scoped into an executable slice).
 
+## Correction (2026-08-26, gu-dev_crowdsourcing-slice-exec, caught by `review.py`'s codex adapter on PR #36)
+
+Three operational claims above turned out not to hold once checked against the actual scripts.
+Left in place above rather than rewritten, since this doc records what was approved and reasoned
+at handover time — corrected here instead:
+
+- **The Rung A example cannot point at `validate_lagfill_downscaling.py` or
+  `validate_forecast_downscaling.py`.** Both scripts' own docstrings say so directly: neither
+  accepts a snapshot argument, both stamp `ghcn_training-live`, and both are explicitly "NOT
+  RUNNABLE STANDALONE IN THIS REPO" — they import `db`/`heat_calcs`/`open_meteo` modules that
+  only exist in the private `heat-risk-data-api` repo, with live Aurora/Open-Meteo access.
+  `CONTRIBUTING.md` line ~242 confirms `method.entrypoint` naming one of these is *provenance
+  metadata only* — "what you ran locally... not executed" — never something the referee (or a
+  worked example meant to run from the public repo alone) actually invokes. The runnable,
+  public-snapshot-only path is what `run_submission.py` and `score_forward_eval.py` already use:
+  `contract.FrozenPredictionAdapter` over a downloaded snapshot release, scored through
+  `score.score_band`. The Rung A worked example needs to be a new small script built on that same
+  path, not a wrapper around either validator.
+- **The L1 CV/cluster-bootstrap harness is NOT a fitting harness — it's scoring-only.** PRs
+  #27–#29's `covariate_linear` path (`_covariate_linear_effect`, `_bootstrap_reduction_ci` in
+  `score.py`) takes an *already-declared* `intercept`/`slope` per term from the manifest and
+  evaluates/CIs it against held-out data — it never fits a slope from a station subset. No public
+  script fits a covariate-linear candidate today. The Rung B/L1 worked example therefore needs its
+  own (small — this is a 1–2 term OLS/affine fit, not new infrastructure) fitting step in addition
+  to calling the existing scoring path; "don't re-derive it" above applies to the scoring/CI math
+  only, not to fitting.
+- **There is no existing "leaderboard staleness" CI check to mirror.** `docs/leaderboard.md` is
+  regenerated and diffed only inside `score-forward-eval.yml`'s monthly bot-PR job, which is a
+  different shape (decides whether to open a PR) from a per-PR staleness gate. `docs/models.md`'s
+  CI check is new, not a copy of an existing pattern.
+
 ## Standing process reminders (from this repo's own conventions)
 
 - Every PR gets code review before merge, even Tier 1: `/code-review medium` +
