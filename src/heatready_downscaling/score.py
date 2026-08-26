@@ -956,6 +956,7 @@ def score_band(
                     grid_err_stratum, corr_err, stratum_ids_full[mask],
                     fold_salt=fold_salt, stream=f"{zone}:{target}:{stratum}",
                 )
+                _stratum_verdict = _verdict(margin, ci, n_scored)
                 # Does the covariate term actually earn its keep, or would the
                 # intercept alone (i.e. a flat constant, the shape we already
                 # had) have done as well? This is exactly the comparison
@@ -1011,18 +1012,17 @@ def score_band(
                     "rmse_improvement_pct": margin,
                     "rmse_improvement_vs_basis_pct": margin_vs_basis,
                     "beats_grid": corr_rmse < grid_rmse,
-                    # Same bar as the flat proposed_correction_beats_grid_with_margin,
-                    # including the interval (code-review finding, PR #34). Fixing
-                    # the flat field and not its stratum sibling would have left two
-                    # near-identically-named fields disagreeing on the same rows --
-                    # which is the "two sources of truth" this PR's own test says
-                    # produced the original bug, reintroduced one function away.
+                    # DERIVED from the verdict, not a second encoding of it
+                    # (code-review finding, PR #34 round 2). Restating
+                    # _verdict's pass condition inline was byte-for-byte the
+                    # same predicate computed twice from the same three
+                    # variables, five lines apart -- exactly the drift risk the
+                    # comment I wrote here was warning about.
                     "beats_grid_with_margin": (
-                        (margin >= AUTO_ENABLE_MARGIN and ci is not None and ci[0] > 0)
-                        if (margin is not None and n_scored >= MIN_ZONE_N) else None
+                        None if _stratum_verdict is None else _stratum_verdict == "pass"
                     ),
                     "rmse_improvement_ci95_pct": list(ci) if ci is not None else None,
-                    "verdict": _verdict(margin, ci, n_scored),
+                    "verdict": _stratum_verdict,
                     "rmse_intercept_only_c": io_rmse,
                     "rmse_best_constant_c": best_const_rmse,
                     "covariate_earns_keep": earns_keep,
@@ -1119,12 +1119,39 @@ def score_band(
         # None for want of a second station -- and that is the expected shape
         # of exactly the submissions raw_grid was added to unlock, not an edge
         # case. A None interval cannot exclude zero, so it now cannot pass.
+        # Three states, not two (code-review finding, PR #34 round 2): None
+        # means UNMEASURABLE, False means measured and not good enough. The
+        # first version returned False when the interval was uncomputable,
+        # while its sibling gated_insufficient_n said True -- so one published
+        # cycle line carried both "cannot measure" and "not good enough" at
+        # once, reintroducing the exact conflation this change exists to
+        # remove.
+        # Three states, and the ORDER of these branches carries the meaning
+        # (code-review finding, PR #34 round 2, refined after a test caught the
+        # first version being too coarse). None means UNMEASURABLE; False means
+        # measured and not good enough.
+        #
+        # A proposal whose point estimate is NEGATIVE is demonstrably worse than
+        # the grid, and no interval is needed to say so -- returning None there
+        # would let an obviously bad proposal sit as insufficient_n forever
+        # instead of being recorded as the loss it is. Only a proposal that
+        # looks like an improvement but has no interval is genuinely
+        # unmeasurable. This mirrors _verdict, which returns "fail" for
+        # margin <= 0 regardless of the interval.
         _all_ci = _all.get("rmse_improvement_ci95_pct")
-        proposed_correction_beats_grid_with_margin = (
-            (proposed_correction_margin_pct >= AUTO_ENABLE_MARGIN
-             and _all_ci is not None and _all_ci[0] > 0)
-            if (proposed_correction_margin_pct is not None and gating_n >= MIN_ZONE_N) else None
-        )
+        _measurable = True
+        if proposed_correction_margin_pct is None or gating_n < MIN_ZONE_N:
+            proposed_correction_beats_grid_with_margin = None
+            _measurable = False
+        elif proposed_correction_margin_pct <= 0:
+            proposed_correction_beats_grid_with_margin = False
+        elif _all_ci is None:
+            proposed_correction_beats_grid_with_margin = None
+            _measurable = False
+        else:
+            proposed_correction_beats_grid_with_margin = (
+                proposed_correction_margin_pct >= AUTO_ENABLE_MARGIN and _all_ci[0] > 0
+            )
         # proposed_vs_best_fit_gap_c: how far the DECLARED value is from
         # what this function would have fit itself, evaluated on the
         # EFFECT (over the zone's own observed delta_c range), not raw
@@ -1259,10 +1286,12 @@ def score_band(
             # score and an unexplained perpetual loss. "We cannot measure this"
             # and "this is not good enough" are different answers and the
             # record should not confuse them.
+            # For a proposal this tracks _measurable above, so a
+            # demonstrably-worse proposal is recorded as a LOSS (measurable)
+            # rather than as insufficient_n -- only "looks like an improvement,
+            # cannot tell if it is real" is unmeasurable.
             "gated_insufficient_n": (
-                gating_n < MIN_ZONE_N
-                or (proposed_entry is not None
-                    and (_all.get("rmse_improvement_ci95_pct") is None))
+                (not _measurable) if proposed_entry is not None else gating_n < MIN_ZONE_N
             ),
             "proposed_correction_n_scored": proposed_correction_n_scored,
             # Rung B (2026-08-25): scoring a contributor-DECLARED, fixed

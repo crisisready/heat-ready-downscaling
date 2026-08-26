@@ -179,3 +179,19 @@ class TestBooleanTolerancesCannotBypassTheReferee:
         from heatready_downscaling import report
 
         assert report.compare_reports(self._r(value), self._r(value), {"qrf_beats_grid": 0.001}).passed
+
+
+def test_a_flipped_boolean_records_a_real_deviation_not_zero():
+    """PR #34 round 2: the mismatch branch left abs_diff None and
+    max_abs_deviation at 0.0, so a flipped boolean claim was written into the
+    APPEND-ONLY ledger and the referee comment as a 0.0 deviation -- a
+    permanent audit record saying a claim that inverted reproduced exactly.
+    The base commit recorded 1.0; the bypass fix regressed it."""
+    from heatready_downscaling import report
+
+    t = {"by_target": {"tmax": {"Cfb": {"qrf_beats_grid": True}}}}
+    f = {"by_target": {"tmax": {"Cfb": {"qrf_beats_grid": False}}}}
+    result = report.compare_reports(t, f, {"qrf_beats_grid": 0.001})
+    assert not result.passed
+    assert result.violations[0]["abs_diff"] == 1.0
+    assert result.max_abs_deviation["qrf_beats_grid"] == 1.0

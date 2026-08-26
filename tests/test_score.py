@@ -283,7 +283,9 @@ class TestScoreBandProposedCorrection:
         m = result["Cfa"]
         assert m["proposed_correction_beats_grid"] is True, "the point estimate is still good"
         assert m["proposed_correction_by_stratum"]["all"]["rmse_improvement_ci95_pct"] is None
-        assert m["proposed_correction_beats_grid_with_margin"] is False
+        # None means UNMEASURABLE. False would mean measured and not good
+        # enough, which is a different -- and here, wrong -- answer.
+        assert m["proposed_correction_beats_grid_with_margin"] is None
 
     def test_wildly_wrong_declared_bias_fails_to_beat_grid(self):
         """Overcorrecting by 10C on top of the real ~0.5C bias should end

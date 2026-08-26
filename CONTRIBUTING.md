@@ -90,7 +90,7 @@ provisional score as a PR comment.
 
 **Provisional scores are for ranking and feedback only. They are never a gate decision.** The
 provisional check is a zone-stratified 15% station holdout, computed in minutes so you get fast
-feedback. `_MIN_ZONE_N` (minimum stations per zone) and `_BIAS_CV_MIN_STATIONS` (minimum distinct
+feedback. `_MIN_ZONE_N` (minimum paired ROWS per zone -- not stations; see the two-distinct-stations note in the Rung B section, which is a separate and stricter bar) and `_BIAS_CV_MIN_STATIONS` (minimum distinct
 stations for the bias cross-validation) will not be met on a 15% slice for thin zones. A thin zone
 can show a promising provisional number that the real, official, monthly forward-eval check will
 not confirm. This is expected, not a bug in the provisional check.

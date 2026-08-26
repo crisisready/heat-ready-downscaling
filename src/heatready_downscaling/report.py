@@ -254,10 +254,20 @@ def compare_reports(claimed: dict, reproduced: dict, tolerance: dict[str, float]
                     if claimed_val is reproduced_val:
                         max_abs_deviation[metric] = max(max_abs_deviation[metric], 0.0)
                         continue
+                    # The deviation is REAL and must be recorded (code-review
+                    # finding, PR #34 round 2). Leaving abs_diff None and
+                    # max_abs_deviation at 0.0 meant a flipped boolean claim
+                    # was written into the APPEND-ONLY ledger and the referee
+                    # comment as a 0.0 deviation -- a permanent audit record
+                    # saying the claim reproduced exactly, for a claim that
+                    # inverted. The base commit recorded 1.0; this regressed
+                    # it while fixing the bypass above.
+                    abs_diff = abs(float(claimed_val) - float(reproduced_val))
+                    max_abs_deviation[metric] = max(max_abs_deviation[metric], abs_diff)
                     violations.append({
                         "target": target, "zone": zone, "metric": metric,
                         "claimed": claimed_val, "reproduced": reproduced_val,
-                        "abs_diff": None, "allowed": allowed,
+                        "abs_diff": abs_diff, "allowed": allowed,
                         "reason": "boolean metrics must match exactly -- a tolerance cannot "
                                   "make a claimed True reproduce against a derived False",
                     })

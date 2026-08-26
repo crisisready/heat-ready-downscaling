@@ -867,7 +867,9 @@ class TestTheIntervalActuallyGates:
 
         assert block["n_scored"] >= score.MIN_ZONE_N, "sanity: it clears the row-count bar"
         assert block["rmse_improvement_ci95_pct"] is None, "one station gives no interval"
-        assert res["proposed_correction_beats_grid_with_margin"] is False
+        # None, not False: unmeasurable is a different answer from measured-and-
+        # not-good-enough, and gated_insufficient_n says True on the same row.
+        assert res["proposed_correction_beats_grid_with_margin"] is None
 
     def test_the_flat_gate_and_the_stratum_verdict_agree(self):
         """Two sources of truth disagreeing is what produced this bug."""
@@ -934,3 +936,31 @@ def test_rung_a_gating_is_untouched_by_the_interval_rule():
         _Adapter(deltas, applied_idx=set(range(60))), rows, "tmax", fold_salt="v2026.08",
     )["BSh"]
     assert res["gated_insufficient_n"] is False
+
+
+def test_a_demonstrably_worse_proposal_is_a_loss_not_unmeasurable():
+    """PR #34 round 2: the first tri-state returned None whenever the interval
+    was uncomputable, which would have let an obviously bad proposal sit as
+    insufficient_n forever instead of being recorded as the loss it is. A
+    negative point estimate needs no interval to be judged."""
+    rows, deltas = _rows(n=60, slope=-0.04, intercept=0.8)
+    for r in rows:
+        r["station_id"] = "ONLY-ONE"          # no interval computable
+    res = _score(rows, deltas, _entry(slope=+0.04, intercept=0.8), applied_idx=set())
+
+    assert res["proposed_correction_by_stratum"]["all"]["rmse_improvement_ci95_pct"] is None
+    assert res["proposed_correction_by_stratum"]["all"]["rmse_improvement_pct"] < 0
+    assert res["proposed_correction_beats_grid_with_margin"] is False, "measurably worse"
+    assert res["gated_insufficient_n"] is False, "a loss, not 'we cannot tell'"
+
+
+def test_the_stratum_gate_is_derived_from_the_verdict_not_restated():
+    """One encoding of the rule. Restating _verdict's pass condition inline was
+    the same predicate computed twice from the same variables five lines
+    apart -- the drift risk the comment there warns about."""
+    for applied in (set(), set(range(60))):
+        rows, deltas = _rows(n=60)
+        block = _score(rows, deltas, _entry(), applied_idx=applied)[
+            "proposed_correction_by_stratum"]["all"]
+        expected = None if block["verdict"] is None else block["verdict"] == "pass"
+        assert block["beats_grid_with_margin"] == expected
