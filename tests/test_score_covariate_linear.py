@@ -880,3 +880,57 @@ class TestTheIntervalActuallyGates:
                 assert flat is True
             elif verdict in ("candidate", "fail"):
                 assert flat is not True
+
+
+def test_the_stratum_gate_and_the_flat_gate_use_the_same_bar():
+    """PR #34 round 1: I fixed the flat field and not its per-stratum sibling,
+    leaving two near-identically-named fields disagreeing on the same rows --
+    the exact 'two sources of truth' this PR's own tests say produced the
+    original bug, reintroduced one function away."""
+    grid_val = 20.0
+    rows, deltas = [], []
+    for i in range(60):
+        cov, sid = i % 30, i % 10
+        raw_err = (0.8 - 0.04 * cov) if sid != 0 else -(0.8 - 0.04 * cov)
+        rows.append({
+            "climate_zone": "BSh", "station_id": f"STN{sid:03d}",
+            "grid_tmax_c": grid_val, "station_tmax_c": grid_val + raw_err,
+            "lst_warm_season_anomaly_c": cov,
+        })
+        deltas.append(0.0)
+    res = _score(rows, deltas, _entry(), applied_idx=set())
+    block = res["proposed_correction_by_stratum"]["all"]
+
+    assert block["verdict"] == "candidate"
+    assert block["beats_grid_with_margin"] is False, "the stratum field must use the interval too"
+    assert res["proposed_correction_beats_grid_with_margin"] is False
+    assert block["beats_grid_with_margin"] == res["proposed_correction_beats_grid_with_margin"]
+
+
+def test_no_computable_interval_reads_as_insufficient_n_not_a_loss():
+    """PR #34 round 1: closing the win for a one-station zone left it recorded
+    as a perpetual LOSS, so the ledger attributed the failure to proposal
+    quality rather than zone geometry, and the contributor saw a good
+    provisional score and an unexplained forever-loss. 'We cannot measure
+    this' and 'this is not good enough' are different answers."""
+    rows, deltas = _rows(n=60)
+    for r in rows:
+        r["station_id"] = "ONLY-ONE"
+    res = _score(rows, deltas, _entry(), applied_idx=set())
+
+    assert res["proposed_correction_by_stratum"]["all"]["n_scored"] >= score.MIN_ZONE_N
+    assert res["proposed_correction_by_stratum"]["all"]["rmse_improvement_ci95_pct"] is None
+    assert res["gated_insufficient_n"] is True, (
+        "score_forward_eval branches on this first, so it decides whether the cycle records "
+        "'insufficient_n' or 'loss'"
+    )
+
+
+def test_rung_a_gating_is_untouched_by_the_interval_rule():
+    """The interval rule is about PROPOSALS. A Rung A cell has none, and its
+    gated_insufficient_n must still be the plain row-count test."""
+    rows, deltas = _rows(n=60)
+    res = score.score_band(
+        _Adapter(deltas, applied_idx=set(range(60))), rows, "tmax", fold_salt="v2026.08",
+    )["BSh"]
+    assert res["gated_insufficient_n"] is False

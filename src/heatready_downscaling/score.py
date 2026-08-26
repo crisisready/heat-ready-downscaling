@@ -985,16 +985,16 @@ def score_band(
                     # comparison PHASE6 actually ran by hand (coast-distance
                     # against the zone-mean constant, which it lost on tmax and
                     # won on tmin). rmse_intercept_only_c is reported alongside
-                    # so a reader can see both sides rather than one verdict. The declared intercept comes from a
-                    # JOINT fit with the slope and is not the optimal constant,
-                    # so comparing against it is biased toward keeping the
-                    # covariate: a proposal with a badly-placed intercept and a
-                    # near-zero slope would report earns_keep=True purely
-                    # because its own intercept-only variant is bad. The
-                    # documented question is "would the flat constant we
-                    # already had have done as well", and that constant is the
-                    # best one. (code-review finding, PR #27; this is also the
-                    # comparison PHASE6 actually ran, against the zone mean.)
+                    # so a reader can see both sides rather than one verdict.
+                    #
+                    # Why not the submitted intercept (the original comparator,
+                    # PR #27): it comes from a JOINT fit with the slope and is
+                    # not the optimal constant, so a proposal with a
+                    # badly-placed intercept and a near-zero slope reported
+                    # earns_keep=True purely because its own intercept-only
+                    # variant was bad. The documented question is "would the
+                    # flat constant we already had have done as well", and that
+                    # constant is the best one.
                     best_const_rmse = float(
                         np.sqrt(np.mean((base_err - float(np.mean(base_err))) ** 2)),
                     )
@@ -1011,8 +1011,14 @@ def score_band(
                     "rmse_improvement_pct": margin,
                     "rmse_improvement_vs_basis_pct": margin_vs_basis,
                     "beats_grid": corr_rmse < grid_rmse,
+                    # Same bar as the flat proposed_correction_beats_grid_with_margin,
+                    # including the interval (code-review finding, PR #34). Fixing
+                    # the flat field and not its stratum sibling would have left two
+                    # near-identically-named fields disagreeing on the same rows --
+                    # which is the "two sources of truth" this PR's own test says
+                    # produced the original bug, reintroduced one function away.
                     "beats_grid_with_margin": (
-                        (margin >= AUTO_ENABLE_MARGIN)
+                        (margin >= AUTO_ENABLE_MARGIN and ci is not None and ci[0] > 0)
                         if (margin is not None and n_scored >= MIN_ZONE_N) else None
                     ),
                     "rmse_improvement_ci95_pct": list(ci) if ci is not None else None,
@@ -1243,7 +1249,21 @@ def score_band(
             # score_forward_eval.py reads this to decide
             # win/loss/insufficient_n, so fixing it here fixes that consumer
             # too rather than needing a parallel change there.
-            "gated_insufficient_n": gating_n < MIN_ZONE_N,
+            # Also True when a PROPOSAL has enough rows but no computable
+            # interval (code-review finding, PR #34). Without this, a
+            # one-station zone -- 40 station-days, one station, no bootstrap --
+            # cleared the row-count bar, then score_forward_eval took the
+            # win/loss branch and recorded "loss" every cycle forever, with the
+            # ledger attributing the failure to proposal QUALITY rather than to
+            # zone geometry, and the contributor seeing a good provisional
+            # score and an unexplained perpetual loss. "We cannot measure this"
+            # and "this is not good enough" are different answers and the
+            # record should not confuse them.
+            "gated_insufficient_n": (
+                gating_n < MIN_ZONE_N
+                or (proposed_entry is not None
+                    and (_all.get("rmse_improvement_ci95_pct") is None))
+            ),
             "proposed_correction_n_scored": proposed_correction_n_scored,
             # Rung B (2026-08-25): scoring a contributor-DECLARED, fixed
             # correction, never the mechanically-derived one above -- see

@@ -147,3 +147,35 @@ class TestBooleanMetricsCompare:
         result = report.compare_reports(r, r, {"blk": 0.01})
         assert not result.passed
         assert "not a scalar" in (result.violations[0].get("reason") or "")
+
+
+class TestBooleanTolerancesCannotBypassTheReferee:
+    """PR #34 round 1, HIGH. Two wrongs in a row: #31 excluded bool and made
+    identical booleans a false REJECTION; the first version of #34's fix put
+    them on the numeric path and opened a false ACCEPTANCE. abs(True - False)
+    is 1, no boolean key has a _TOLERANCE_MAXIMA ceiling, and validate_manifest
+    accepts any positive number for an unlisted key -- so a manifest could
+    declare tolerance {qrf_beats_grid: 1.5} and have a claimed True
+    'reproduce' against an independently derived False."""
+
+    def _r(self, value):
+        return {"by_target": {"tmax": {"Cfb": {"qrf_beats_grid": value}}}}
+
+    def test_a_large_tolerance_cannot_make_true_reproduce_as_false(self):
+        from heatready_downscaling import report
+
+        result = report.compare_reports(self._r(True), self._r(False), {"qrf_beats_grid": 1.5})
+        assert not result.passed, "a tolerance must never launder a boolean mismatch"
+        assert "must match exactly" in (result.violations[0].get("reason") or "")
+
+    @pytest.mark.parametrize("tol", [0.001, 1.0, 1.5, 999.0])
+    def test_no_tolerance_at_all_launders_a_mismatch(self, tol):
+        from heatready_downscaling import report
+
+        assert not report.compare_reports(self._r(True), self._r(False), {"qrf_beats_grid": tol}).passed
+
+    @pytest.mark.parametrize("value", [True, False])
+    def test_identical_booleans_still_reproduce(self, value):
+        from heatready_downscaling import report
+
+        assert report.compare_reports(self._r(value), self._r(value), {"qrf_beats_grid": 0.001}).passed

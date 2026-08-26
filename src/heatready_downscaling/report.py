@@ -228,7 +228,41 @@ def compare_reports(claimed: dict, reproduced: dict, tolerance: dict[str, float]
                 # violation rather than a crash: a non-numeric metric can
                 # never be shown to reproduce within a numeric tolerance, and
                 # silently skipping it would let it pass unchecked.
-                # Booleans stay on the NUMERIC path (regression fix, PR #34).
+                # Booleans compare by EQUALITY, never by tolerance.
+                #
+                # Two wrongs in a row here, worth recording. #31 excluded bool
+                # from the numeric path to catch nested blocks, which made
+                # identical booleans a hard violation -- a false rejection.
+                # The first version of THIS fix put them back on the numeric
+                # path, which opened a false ACCEPTANCE: abs(True - False) is
+                # 1, no boolean key has a _TOLERANCE_MAXIMA ceiling, and
+                # validate_manifest accepts any positive number for an
+                # unlisted key -- so `tolerance: {qrf_beats_grid: 1.5}` made a
+                # claimed True "reproduce" against an independently derived
+                # False, and run_submission reported status: pass. Verified
+                # live before this rewrite. A referee bypass is strictly worse
+                # than the rejection it replaced.
+                #
+                # The comment I wrote then cited "none of which are
+                # ceiling-restricted" as evidence those keys were safe. That
+                # is exactly what made them exploitable; I had the fact
+                # backwards.
+                #
+                # A tolerance on a boolean is meaningless anyway: it either
+                # reproduces or it does not.
+                if isinstance(claimed_val, bool) or isinstance(reproduced_val, bool):
+                    if claimed_val is reproduced_val:
+                        max_abs_deviation[metric] = max(max_abs_deviation[metric], 0.0)
+                        continue
+                    violations.append({
+                        "target": target, "zone": zone, "metric": metric,
+                        "claimed": claimed_val, "reproduced": reproduced_val,
+                        "abs_diff": None, "allowed": allowed,
+                        "reason": "boolean metrics must match exactly -- a tolerance cannot "
+                                  "make a claimed True reproduce against a derived False",
+                    })
+                    continue
+                # Non-scalars (regression context, PR #34).
                 # Excluding them to catch non-scalars was too broad: bool is a
                 # subclass of int and compares perfectly well, so
                 # abs(True - True) == 0 passed before that guard and became a

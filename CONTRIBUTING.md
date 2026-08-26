@@ -214,10 +214,14 @@ shape** -- not just this one. A proposal whose interval includes zero does not w
 cannot accumulate the two consecutive wins promotion needs. Two practical consequences worth
 knowing before you submit:
 
-- **You need at least two distinct stations in the zone.** The interval comes from resampling
-  whole stations, so one station produces no interval at all, and no interval cannot exclude
-  zero. Row count is not a substitute: forty station-days from a single station still gives you
-  nothing to resample.
+- **You need at least two distinct stations among the rows your correction actually applies
+  to** -- not merely in the zone. The interval comes from resampling whole stations, and it is
+  computed over the scored rows only, so a narrow `valid_range` or a sparsely populated covariate
+  can leave you with a dozen stations in the zone and one among your scored rows. One station
+  produces no interval, and no interval cannot exclude zero. Row count is not a substitute:
+  forty station-days from a single station still gives you nothing to resample. A cell in that
+  position is reported as `insufficient_n`, not as a loss -- "we cannot measure this" and "this
+  is not good enough" are different answers.
 - **This was not always true.** Until 2026-08-26 the gate was the point estimate alone, while
   this paragraph already promised the interval bar. The documented bar was stricter than the
   enforced one. It is now the same bar, and this note stays because a contributor calibrating how
