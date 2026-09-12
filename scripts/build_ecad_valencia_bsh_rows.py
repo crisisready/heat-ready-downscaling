@@ -14,9 +14,36 @@ of GHCN-Daily), matching build_rows_for_country's exact row-assembly shape
 so downstream code (build_feature_matrix, eval_spatial_ranking_clusters.py)
 needs zero changes to consume these rows.
 
-Station IDs prefixed "EC" + 6-digit ECA&D STAID -- deliberately NOT a real
-GHCN 2-letter country prefix, so ghcn.region_from_station_id/dedup logic
-never confuses these with a real GHCN station.
+Station IDs prefixed "XC" + 6-digit ECA&D STAID (round-2 review finding, real,
+fixed 2026-09-12 -- see fix/ecad-station-id-prefix-collision): the ORIGINAL
+"EC" prefix here was documented as "deliberately NOT a real GHCN 2-letter
+country prefix," but that claim was wrong -- "EC" IS Ecuador's real GHCN/FIPS
+country code, so ghcn.region_from_station_id() (`station_id[:2].upper()`,
+always exactly 2 chars regardless of ID length) collided any real Ecuadorian
+GHCN station straight into this corridor's leave-region-out CV fold. Same bug
+class, found and fixed the same way, as build_aemet_valencia_bsh_rows.py's
+"AE"->"XA" and build_siar_valencia_bsh_rows.py's "SI"->"XS" (both in PR #41,
+which flagged this EC instance as its own follow-up rather than fixing it
+inline here -- fixed now instead of deferred, per Nishant's no-code-debt rule).
+"XC" is in ISO 3166-1's reserved "user-assigned" range (AA, QM-QZ, XA-XZ, ZZ)
+-- never a real or future-assignable country code, so it structurally cannot
+collide with anything region_from_station_id() would ever see, unlike simply
+widening the prefix's length (region_from_station_id always slices exactly 2
+characters, so a longer prefix does nothing to avoid the collision).
+
+PRODUCTION-DATA NOTE (not resolved by this PR, flagged not silently dropped):
+if this script has already been run for real against the production
+`ghcn_training` table (private heat-risk-data-api infra) since PR #22 merged
+2026-08-21, any rows already written there still carry the old "EC" prefix
+and will keep colliding until reprocessed. This worker has no visibility into
+or write access to that production database, so it cannot check or fix
+already-written rows -- only the maintainer can, by re-running this script
+(now emitting "XC") against the affected date range, in the private
+production environment. Re-running is safe/idempotent either way: the
+downstream upsert is keyed by station_id + date, so a rerun with the new
+prefix adds correctly-keyed rows rather than colliding with the old ones; the
+only actual cleanup, if the old rows exist, is deleting the stale "EC"-prefixed
+rows once the "XC" rerun has replaced them.
 """
 import json
 import os
@@ -103,13 +130,13 @@ def main():
     print(f"real corridor BSh station(s): {len(corridor)}")
 
     stations = [
-        {"station_id": f"EC{s['staid']:06d}", "lat": s["lat"], "lon": s["lon"], "elevation_m": None, "name": s["name"]}
+        {"station_id": f"XC{s['staid']:06d}", "lat": s["lat"], "lon": s["lon"], "elevation_m": None, "name": s["name"]}
         for s in corridor
     ]
 
     ghcn_by_station = {}
     for s in corridor:
-        sid = f"EC{s['staid']:06d}"
+        sid = f"XC{s['staid']:06d}"
         tx = parse_ecad_series(f"{ZIP_DIR}/tx.zip", "TX_STAID", s["staid"], "TX")
         tn = parse_ecad_series(f"{ZIP_DIR}/tn.zip", "TN_STAID", s["staid"], "TN")
         common_dates = sorted(set(tx) & set(tn))
