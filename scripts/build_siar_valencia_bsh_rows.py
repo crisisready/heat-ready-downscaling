@@ -155,11 +155,25 @@ def fetch_batch_via_browser(page, stations_batch, start, end):
     """)
     page.wait_for_timeout(200)
 
+    # Round-2 review finding, real: setting `.value` alone never fires an input/change event,
+    # unlike the province checkbox above (`cb.dispatchEvent(new Event('click', {bubbles: true}))`)
+    # -- if SIAR's page JS reads these fields through a bound model that only updates on such an
+    # event, #btnConsultar could submit stale/default dates instead of the intended range with
+    # no error at all. Dispatching both covers a plain unbound input (harmless no-op) and a
+    # bound one (the actual risk this fixes), same defensive-both-ways posture as the checkbox.
     page.evaluate(f"""
         const start = document.querySelector('#fechaInicialVal');
         const end = document.querySelector('#fechaFinalVal');
-        if (start) {{ start.value = '{start.isoformat()}'; }}
-        if (end) {{ end.value = '{end.isoformat()}'; }}
+        if (start) {{
+            start.value = '{start.isoformat()}';
+            start.dispatchEvent(new Event('input', {{bubbles: true}}));
+            start.dispatchEvent(new Event('change', {{bubbles: true}}));
+        }}
+        if (end) {{
+            end.value = '{end.isoformat()}';
+            end.dispatchEvent(new Event('input', {{bubbles: true}}));
+            end.dispatchEvent(new Event('change', {{bubbles: true}}));
+        }}
     """)
     page.wait_for_timeout(200)
 

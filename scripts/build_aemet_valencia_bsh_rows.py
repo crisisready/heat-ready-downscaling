@@ -121,9 +121,18 @@ def _dms_to_dd(dms, is_lon):
 def _parse_es_float(s):
     if s is None or s == "" or s == "Ip":  # "Ip" = trace precipitation, not relevant here
         return None
+    # Round-2 review finding, real: `s.replace(...)` assumed `s` is always a comma-decimal
+    # STRING (true for tmax/tmin) but this is also used for `altitud`, which AEMET could return
+    # as a plain JSON number -- `int.replace`/`float.replace` raises AttributeError, uncaught
+    # here (only ValueError was), propagating out of the caller's per-station loop and aborting
+    # station enumeration entirely on one such record: the same "one bad record kills
+    # everything" failure class this PR already fixes elsewhere for lat/lon parsing.
+    # str(s) first makes this correct for either shape, and the broadened except covers both a
+    # genuinely malformed string (ValueError) and a non-string input either str() or .replace()
+    # could still fail on.
     try:
-        return float(s.replace(",", "."))
-    except ValueError:
+        return float(str(s).replace(",", "."))
+    except (ValueError, AttributeError, TypeError):
         return None
 
 
@@ -156,6 +165,16 @@ def fetch_station_daily(indicativo, api_key, start, end):
         envelope = _fetch_json(url, api_key)
         if envelope.get("estado") == 200 and envelope.get("datos"):
             results.extend(_fetch_json(envelope["datos"]))
+        else:
+            # Round-2 review finding, real: this used to silently drop the whole chunk with no
+            # signal at all -- the run finished as a normal "complete" pass with silently half
+            # (or less) a station's year of data, the same "looks complete but isn't" failure
+            # class this file's own retry-with-backoff/per-row .get() guards exist to avoid
+            # elsewhere. Logged, not raised: one bad chunk for one station during a real,
+            # documented-as-flaky endpoint shouldn't abort every OTHER station's fetch.
+            print(f"  WARNING: AEMET daily data chunk {fecha_ini}..{fecha_fin} for station "
+                  f"{indicativo} failed (estado={envelope.get('estado')}) -- this chunk's data "
+                  f"is missing from the output")
         chunk_start = chunk_end + timedelta(days=1)
     return results
 
@@ -176,10 +195,14 @@ def main():
         except Exception:
             continue
         # Scoped to the coastal Mediterranean corridor (same real, disclosed
-        # bbox as the ECA&D pull) -- avoids classifying AEMET's many inland
+        # bbox as the ECA&D pull -- round-2 review finding, real: this
+        # previously used a narrower lon window, -1.0..1.0, that silently
+        # dropped real BSh stations near Almeria (lon ~ -2.4) the ECA&D
+        # pull's own -3.0..0.0 window includes, despite the comment already
+        # claiming parity) -- avoids classifying AEMET's many inland
         # mountain stations (Ademuz, Utiel etc., real but a different,
         # non-BSh climate) one by one against kgcpy for no benefit.
-        if not (36.0 <= lat <= 40.0 and -1.0 <= lon <= 1.0):
+        if not (36.0 <= lat <= 40.0 and -3.0 <= lon <= 0.0):
             continue
         zone = ghcn.koppen_climate_zone(lat, lon)
         if zone == "BSh":
