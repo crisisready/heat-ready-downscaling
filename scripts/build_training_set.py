@@ -120,6 +120,7 @@ import re
 import shutil
 import sys
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 
@@ -479,11 +480,37 @@ def fetch_era5_land_for_stations(
                 # Write-to-tmp-then-rename so a process killed mid-copy never
                 # leaves a partial file at cache_path that a relaunch would
                 # wrongly treat as a complete cache hit (os.rename is atomic
-                # within the same filesystem).
-                os.makedirs(cache_dir, exist_ok=True)
-                tmp_cache_path = cache_path + ".tmp"
-                shutil.copy2(nc_path, tmp_cache_path)
-                os.rename(tmp_cache_path, cache_path)
+                # within the same filesystem). Tmp name includes pid + a
+                # random suffix (round-1 review finding, real): a FIXED
+                # ".tmp" name would let two processes racing to fill the
+                # same missing segment (the exact crash-resume-relaunch
+                # scenario this feature exists for) interleave writes into
+                # the same tmp file before either renames, committing a
+                # corrupted/mixed netCDF that a later run would then treat
+                # as a valid cache hit.
+                #
+                # Caching is a best-effort optimization, not a correctness
+                # requirement (round-1 review finding, real): if it fails
+                # (cache_dir's filesystem full/unwritable/quota), that must
+                # NOT prevent the normal nc_path cleanup below -- an
+                # exception escaping this block used to skip the
+                # try/finally os.unlink(nc_path) entirely, leaking the
+                # multi-GB downloaded temp file on every subsequent
+                # chunk/retry. Caught and logged instead of raised; the
+                # fetch still succeeds, it just isn't cached this time.
+                tmp_cache_path = None
+                try:
+                    os.makedirs(cache_dir, exist_ok=True)
+                    tmp_cache_path = f"{cache_path}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}"
+                    shutil.copy2(nc_path, tmp_cache_path)
+                    os.rename(tmp_cache_path, cache_path)
+                except OSError as exc:
+                    logger.warning("[%s] failed to persist ERA5 cache entry for %s..%s (%s) -- "
+                                    "continuing without caching this segment",
+                                    batch_label, padded_start, padded_end, exc)
+                    if tmp_cache_path:
+                        with contextlib.suppress(OSError):
+                            os.unlink(tmp_cache_path)
         try:
             hourly = era5.extract_era5_means(nc_path, geojson_obj)
         finally:
