@@ -117,8 +117,10 @@ import logging
 import math
 import os
 import re
+import shutil
 import sys
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 
@@ -370,9 +372,159 @@ def _date_chunks(start_date: date, end_date: date, chunk_days: int = _ERA5_CHUNK
     return chunks
 
 
+def _era5_segment_cache_path(
+    cache_dir: str, batch_label: str, padded_start: date, padded_end: date,
+    bbox: str, dataset: str, variables: list[str],
+) -> str:
+    """Stable on-disk path for one (bbox, padded date window, dataset,
+    variables) ERA5 segment -- lets a killed-and-relaunched build skip
+    segments it already downloaded instead of re-paying every CDS
+    round-trip from scratch. batch_label is cosmetic (readable filename
+    only); the hash of the actual request parameters is what makes this
+    collision-safe across zones/batches, not the label.
+
+    A deliberately SEPARATE mechanism from ghcn._fetch_cached's own tmp-then-rename cache
+    (round-2 review finding, investigated and confirmed a justified divergence, not an
+    unprincipled duplication): that cache's resumable unit is a small JSON-serializable record
+    keyed by a string; this one's is a multi-GB netCDF blob read by path -- forcing it through
+    the same key->JSON-record abstraction would mean either inlining binary blobs into JSONL or
+    maintaining a side path-table anyway, not a clean generalization. Documented here so a
+    future reader doesn't independently rediscover/relitigate the same question.
+
+    batch_label is sanitized the same way build_rows_for_country's own `country_key` already is
+    (round-2 review finding, real: this function previously used batch_label raw, inconsistent
+    with that existing precedent for the identical value -- station_id[:2].upper(), unsanitized
+    at its GHCN source) before it touches a filesystem path."""
+    safe_batch_label = re.sub(r"[^a-zA-Z0-9_]", "", batch_label) or "batch"
+    key_material = f"{bbox}|{dataset}|{sorted(variables)}|{padded_start.isoformat()}|{padded_end.isoformat()}"
+    digest = hashlib.sha256(key_material.encode()).hexdigest()[:16]
+    fname = f"{safe_batch_label}_{padded_start.isoformat()}_{padded_end.isoformat()}_{digest}.nc"
+    return os.path.join(cache_dir, fname)
+
+
+_ERA5_CACHE_TMP_SWEPT_DIRS: set[str] = set()
+_ERA5_CACHE_TMP_STALE_AGE_SECONDS = 24 * 3600
+
+
+def _sweep_stale_era5_cache_tmp_files(cache_dir: str) -> None:
+    """Round-2 review finding, real: a process SIGKILLed (OOM-killed, supervisor kill --
+    exactly the crash-resume scenario this cache exists for) mid-write leaves an orphaned
+    `<cache_path>.tmp.<pid>.<uuid>` file behind (Python's except/finally in the cache-persist
+    block never runs on SIGKILL). Nothing previously scanned for these, so repeated
+    kill-and-relaunch cycles accumulate multi-GB orphans and can silently fill the disk this
+    cache exists to conserve.
+
+    Best-effort, once per (cache_dir, process) -- run at the start of a batch, not per-segment,
+    so it can't itself become a per-chunk cost. A generous age floor (24h) avoids racing a
+    genuinely-in-progress write from a concurrent process's own currently-running cache-persist
+    (see _era5_download_lock's own docstring: concurrent processes sharing a cache_dir is normal
+    usage). Fails soft throughout -- a permissions error or an already-vanished file (another
+    sweep, or the writer finishing normally, won across a race) is not this function's problem
+    to report."""
+    real_cache_dir = os.path.realpath(cache_dir)
+    if real_cache_dir in _ERA5_CACHE_TMP_SWEPT_DIRS:
+        return
+    _ERA5_CACHE_TMP_SWEPT_DIRS.add(real_cache_dir)
+    try:
+        entries = os.listdir(cache_dir)
+    except OSError:
+        return
+    now = time.time()
+    for name in entries:
+        if ".tmp." not in name:
+            continue
+        path = os.path.join(cache_dir, name)
+        try:
+            age = now - os.path.getmtime(path)
+        except OSError:
+            continue
+        if age < _ERA5_CACHE_TMP_STALE_AGE_SECONDS:
+            continue
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+            logger.info("swept stale ERA5 cache tmp file %s (%.0fh old)", path, age / 3600)
+
+
+def _resolve_era5_segment(cache_path, bbox, padded_start, padded_end, batch_label, cache_dir):
+    """Returns (nc_path, owns_nc_path) for one ERA5 segment. Checks cache_path first (fast
+    path, no lock needed); on a miss, re-checks cache_path again immediately after acquiring
+    the account-concurrency lock (round-2 review finding, real: without this re-check, two
+    processes racing on the same missing segment could both see a miss before either's write
+    landed, and both redundantly download the identical segment from CDS -- the lock's own
+    docstring already anticipates concurrent processes sharing a cache_dir as normal usage,
+    this closes the race that usage pattern creates) before actually downloading. On an actual
+    download, best-effort persists it to cache_path afterward, outside the lock (local disk
+    I/O, not CDS's own concurrency concern)."""
+    if cache_path and os.path.exists(cache_path):
+        logger.info("[%s] ERA5 cache hit for %s..%s -- skipping CDS download",
+                    batch_label, padded_start, padded_end)
+        return cache_path, False
+    # _era5_download_lock serializes ONLY this call across concurrent
+    # build_training_set.py processes (CDS's own per-account concurrency
+    # cap -- see the lock's own docstring); the acquired slot's
+    # account_index is threaded into download_era5 so it actually
+    # downloads under that slot's CDS credential.
+    with _era5_download_lock() as account_index:
+        if cache_path and os.path.exists(cache_path):
+            logger.info("[%s] ERA5 cache hit for %s..%s after acquiring the lock -- "
+                        "skipping CDS download", batch_label, padded_start, padded_end)
+            return cache_path, False
+        nc_path = era5.download_era5(
+            bbox, padded_start, padded_end,
+            dataset="reanalysis-era5-land", variables=_TRAINING_ERA5_VARIABLES,
+            account_index=account_index,
+        )
+    if cache_path:
+        _persist_era5_cache_entry(nc_path, cache_path, cache_dir, batch_label, padded_start, padded_end)
+    return nc_path, True
+
+
+def _persist_era5_cache_entry(nc_path, cache_path, cache_dir, batch_label, padded_start, padded_end):
+    """Write-to-tmp-then-rename so a process killed mid-write never leaves a partial file at
+    cache_path that a relaunch would wrongly treat as a complete cache hit (os.rename is atomic
+    within the same filesystem). Tmp name includes pid + a random suffix (round-1 review
+    finding, real): a FIXED ".tmp" name would let two processes racing to fill the same missing
+    segment (the exact crash-resume-relaunch scenario this feature exists for) interleave
+    writes into the same tmp file before either renames, committing a corrupted/mixed netCDF
+    that a later run would then treat as a valid cache hit.
+
+    Tries a hard link before falling back to a real copy (round-2 review finding, real:
+    shutil.copy2 alone always did a full duplicate read+write of what this file's own comments
+    call a potentially multi-GB file, even when cache_dir shares a filesystem with the
+    download's own /tmp, where a hard link is a same-filesystem, near-zero-cost alternative) --
+    os.link() leaves nc_path itself fully independent and unaffected either way, so no caller
+    logic needs to change based on which path was taken. Falls back to shutil.copy2 when
+    cache_dir is on a different filesystem (or the filesystem doesn't support hard links).
+
+    Caching is a best-effort optimization, not a correctness requirement (round-1 review
+    finding, real; widened from `except OSError` to `except Exception` in round-2 -- a non-OSError
+    failure here, e.g. a MemoryError during the copy fallback, used to escape this block
+    entirely, skipping the caller's own try/finally os.unlink(nc_path) and leaking the
+    multi-GB downloaded temp file for that exception class): any failure here must NOT prevent
+    the caller's normal nc_path cleanup. Caught and logged instead of raised; the fetch still
+    succeeds, it just isn't cached this time."""
+    tmp_cache_path = None
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+        tmp_cache_path = f"{cache_path}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}"
+        try:
+            os.link(nc_path, tmp_cache_path)
+        except OSError:
+            shutil.copy2(nc_path, tmp_cache_path)
+        os.rename(tmp_cache_path, cache_path)
+    except Exception as exc:
+        logger.warning("[%s] failed to persist ERA5 cache entry for %s..%s (%s) -- "
+                        "continuing without caching this segment",
+                        batch_label, padded_start, padded_end, exc)
+        if tmp_cache_path:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_cache_path)
+
+
 def fetch_era5_land_for_stations(
     stations: list[dict], start_date: date, end_date: date,
-    bbox: str | None = None, geojson_obj: dict | None = None,
+    bbox: str | None = None, geojson_obj: dict | None = None, *,
+    cache_dir: str | None = None, batch_label: str = "batch",
 ) -> tuple[dict[str, dict[str, float]], dict[str, dict[str, float]], dict[str, dict[str, float]]]:
     """
     Download ERA5-Land for the bbox covering all given stations, chunked into
@@ -397,6 +549,14 @@ def fetch_era5_land_for_stations(
     rather than each recomputing the identical structure from the same
     station list); computed from `stations` if omitted, for standalone use.
 
+    cache_dir, if given, persists each downloaded segment to a stable path
+    keyed by (bbox, padded date window, dataset, variables) via
+    _era5_segment_cache_path and reuses it on a cache hit instead of
+    re-acquiring the lock and re-downloading -- makes a killed/relaunched
+    batch resume from wherever it left off rather than re-paying every
+    CDS round-trip already completed. batch_label is used only for the
+    cache filename's readability.
+
     Returns (daily_tmax_tmin_by_station, humidity_by_station, nighttime_wind_by_station):
       - daily_tmax_tmin_by_station: {station_id: {date_iso: {"tmax": .., "tmin": ..}}}
       - humidity_by_station: {station_id: {date_iso: specific_humidity_kgkg}}
@@ -405,6 +565,8 @@ def fetch_era5_land_for_stations(
     bbox = bbox if bbox is not None else stations_bbox(stations)
     geojson_obj = geojson_obj if geojson_obj is not None else stations_to_geojson(stations)
     tz_map = _timezones_for_stations(stations)
+    if cache_dir:
+        _sweep_stale_era5_cache_tmp_files(cache_dir)
 
     daily_by_station: dict[str, dict[str, dict]] = {}
     humidity_by_station: dict[str, dict[str, float]] = {}
@@ -424,22 +586,41 @@ def fetch_era5_land_for_stations(
         # at the edges of the requested window -- a shift=+1 lookup for obs_day=
         # chunk_end needs local day chunk_end+1 to be complete, which itself needs
         # ERA5-Land UTC data through chunk_end+2.
-        #
-        # _era5_download_lock serializes ONLY this call across concurrent
-        # build_training_set.py processes (CDS's own per-account concurrency
-        # cap -- see the lock's own docstring); the acquired slot's
-        # account_index is threaded into download_era5 so it actually
-        # downloads under that slot's CDS credential.
-        with _era5_download_lock() as account_index:
-            nc_path = era5.download_era5(
-                bbox, chunk_start - timedelta(days=2), chunk_end + timedelta(days=2),
-                dataset="reanalysis-era5-land", variables=_TRAINING_ERA5_VARIABLES,
-                account_index=account_index,
-            )
+        padded_start = chunk_start - timedelta(days=2)
+        padded_end = chunk_end + timedelta(days=2)
+
+        cache_path = (
+            _era5_segment_cache_path(cache_dir, batch_label, padded_start, padded_end, bbox,
+                                      "reanalysis-era5-land", _TRAINING_ERA5_VARIABLES)
+            if cache_dir else None
+        )
+        nc_path, owns_nc_path = _resolve_era5_segment(
+            cache_path, bbox, padded_start, padded_end, batch_label, cache_dir)
         try:
-            hourly = era5.extract_era5_means(nc_path, geojson_obj)
+            try:
+                hourly = era5.extract_era5_means(nc_path, geojson_obj)
+            except Exception as exc:
+                if owns_nc_path:
+                    raise
+                # Round-2 review finding, real: a cache hit used to be trusted purely on
+                # os.path.exists with no integrity check -- a corrupted/truncated cache entry
+                # (disk-full truncation mid-write outside this file's own atomic-rename
+                # protection, bit rot, an out-of-band copy) permanently poisoned that segment:
+                # every future relaunch hit the same exception at the same cache_path forever,
+                # strictly worse than pre-PR behavior (always a fresh download). Delete the bad
+                # entry and retry ONCE as a genuine fresh download; a second failure is a real
+                # error (a genuinely bad CDS response, a real extract_era5_means bug), not a
+                # caching artifact, and propagates normally.
+                logger.warning("[%s] cached ERA5 segment %s failed to parse (%s) -- deleting "
+                                "and re-downloading", batch_label, cache_path, exc)
+                with contextlib.suppress(OSError):
+                    os.unlink(cache_path)
+                nc_path, owns_nc_path = _resolve_era5_segment(
+                    cache_path, bbox, padded_start, padded_end, batch_label, cache_dir)
+                hourly = era5.extract_era5_means(nc_path, geojson_obj)
         finally:
-            os.unlink(nc_path)
+            if owns_nc_path:
+                os.unlink(nc_path)
 
         daily = heat_calcs.aggregate_hourly_to_daily(hourly, tz_map)
         for row in daily:
@@ -1043,6 +1224,7 @@ def build_rows_for_country(
     landscan_bucket: str, landscan_key: str, *,
     ghcn_max_workers: int = 8, ghcn_checkpoint_path: str | None = None,
     era5_source: str = "cds", era5_checkpoint_path: str | None = None,
+    era5_cache_dir: str | None = None,
 ) -> list[dict]:
     """Assemble ghcn_training rows for every station in one country/batch:
     fetch GHCN + ERA5-Land + covariates once per batch, align each
@@ -1052,6 +1234,11 @@ def build_rows_for_country(
     ghcn_max_workers/ghcn_checkpoint_path pass straight through to
     ghcn.fetch_ghcn_daily_bulk_concurrent (adaptive-concurrency GHCN fetch,
     2026-08-03 -- see that function's own docstring).
+
+    era5_cache_dir passes straight through to fetch_era5_land_for_stations
+    (see that function's own docstring) -- crash-resume for a killed/
+    relaunched CDS-source run. Only applies when era5_source="cds" (the
+    openmeteo path has no equivalent lock/queue to resume around).
 
     era5_source="openmeteo" (2026-08-20) swaps the CDS-queue ERA5-Land fetch
     for Open-Meteo's own era5_land model on the archive API -- confirmed
@@ -1098,7 +1285,10 @@ def build_rows_for_country(
                 stations, start_date, end_date, checkpoint_path=era5_checkpoint_path,
             )
         else:
-            result = fetch_era5_land_for_stations(stations, start_date, end_date, bbox=bbox, geojson_obj=geojson_obj)
+            result = fetch_era5_land_for_stations(
+                stations, start_date, end_date, bbox=bbox, geojson_obj=geojson_obj,
+                cache_dir=era5_cache_dir, batch_label=country,
+            )
         logger.info("[%s] ERA5 fetch finished in %.1fs", country, time.monotonic() - t0)
         return result
 
@@ -1470,6 +1660,12 @@ def main() -> None:
                               "variables those are derived from) and won't pass build_feature_matrix's "
                               "complete_mask until backfilled by a later --era5-source cds pass over the "
                               "same stations.")
+    parser.add_argument("--era5-cache-dir", default=None,
+                         help="Directory to persist each downloaded ERA5 segment (--era5-source cds only), "
+                              "keyed by (bbox, padded date window, dataset, variables) -- a killed/"
+                              "relaunched run reuses a cached segment instead of re-acquiring the lock and "
+                              "re-downloading it from CDS. Omit for no cross-run resume (fine for a small/"
+                              "test run).")
     parser.add_argument("--dry-run", action="store_true",
                          help="Run the full fetch/covariate/row-build pipeline exactly as a real build "
                               "would, but skip the final ghcn.upsert_ghcn_training_rows call -- print a "
@@ -1497,6 +1693,13 @@ def main() -> None:
     if args.station_ids_file and (args.max_stations_per_country is not None or args.max_bbox_extent_deg is not None):
         parser.error("--max-stations-per-country/--max-bbox-extent-deg are not compatible with "
                       "--station-ids-file (the file's station list is used in full)")
+    # Round-2 review finding, real: --era5-cache-dir only applies to the cds source
+    # (build_rows_for_country's own docstring already says so, but nothing enforced or even
+    # warned about it) -- passed alongside --era5-source openmeteo, it silently did nothing,
+    # discoverable only by finding an empty cache dir after a killed run.
+    if args.era5_cache_dir and args.era5_source != "cds":
+        parser.error("--era5-cache-dir only applies with --era5-source cds "
+                      "(the openmeteo source has its own --ghcn-checkpoint-dir-based resume)")
 
     if args.profile:
         # Unconditional override, not setdefault -- matches scripts/deploy.py's
@@ -1600,6 +1803,7 @@ def main() -> None:
                     batch_label, chunk_stations, start_date, end_date, vuln_bucket, landscan_bucket, landscan_key,
                     ghcn_max_workers=args.ghcn_max_workers, ghcn_checkpoint_path=ghcn_checkpoint_path,
                     era5_source=args.era5_source, era5_checkpoint_path=era5_checkpoint_path,
+                    era5_cache_dir=args.era5_cache_dir,
                 )
                 if rows and not args.dry_run:
                     ghcn.upsert_ghcn_training_rows(rows)
