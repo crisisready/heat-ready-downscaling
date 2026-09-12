@@ -49,9 +49,14 @@ Reuses build_training_set.py's own already-tested Open-Meteo ERA5-Land
 fetch/covariate-snapshot code, exactly like the ECA&D and AEMET scripts --
 only the station-observation source changes.
 
-Station IDs prefixed "SI" + "{provinceId}-{stationId}", matching the
-"EC"/"AE" convention so ghcn.py's region/dedup logic never confuses these
-with a real GHCN station.
+Station IDs prefixed "XS" + "{provinceId}-{stationId}" -- NOT "SI" (round-1 review finding,
+real, same class as the AEMET script's own "AE"->"XA" fix): ghcn.region_from_station_id() reads
+only the first two characters for the leave-region-out CV fold key, and "SI" is the real
+ISO-3166/FIPS code for Slovenia. "XS" is in ISO 3166-1's reserved "user-assigned" range
+(XA-XZ), structurally guaranteed never to collide with a real country code. See the AEMET
+script's own module docstring for the full reasoning, including why the already-merged ECA&D
+script's "EC" (Ecuador's real code) is flagged as a separate DB-migration follow-up rather than
+fixed here.
 """
 import json
 import os
@@ -191,7 +196,7 @@ def parse_results_html(html, stations_batch):
                 continue
             series.append({"date": d, "station_tmax_c": tmax, "station_tmin_c": tmin})
         if series:
-            sid = f"SI{s['idProvincia']}-{s['idEstacion']}"
+            sid = f"XS{s['idProvincia']}-{s['idEstacion']}"
             series_by_station[sid] = series
     return series_by_station
 
@@ -210,7 +215,7 @@ def main():
         zone = ghcn.koppen_climate_zone(lat, lon)
         if zone == "BSh":
             bsh_candidates.append({
-                "sid": f"SI{s['idProvincia']}-{s['idEstacion']}",
+                "sid": f"XS{s['idProvincia']}-{s['idEstacion']}",
                 "idProvincia": s["idProvincia"], "idEstacion": s["idEstacion"],
                 "lat": lat, "lon": lon, "elevation_m": s.get("altitud"),
                 "name": f"{s.get('sestacionCortoProv', '')}{s.get('sestacionCortoId', '')} - {s.get('sestacion', s.get('municipio'))}",

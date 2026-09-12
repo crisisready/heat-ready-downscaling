@@ -25,9 +25,20 @@ Reuses build_training_set.py's own already-tested Open-Meteo ERA5-Land
 fetch/covariate-snapshot code, exactly like build_ecad_valencia_bsh_rows.py
 -- only the station-observation source changes.
 
-Station IDs prefixed "AE" + AEMET's own `indicativo` code, matching the
-"EC"-for-ECA&D convention so ghcn.py's region/dedup logic never confuses
-these with a real GHCN station.
+Station IDs prefixed "XA" + AEMET's own `indicativo` code -- NOT "AE" (round-1 review finding,
+real): ghcn.region_from_station_id() derives the leave-region-out CV fold key from the first
+TWO characters only (station_id[:2].upper()), and "AE" is the real ISO-3166/FIPS code for the
+United Arab Emirates -- so any real UAE GHCN station sharing a training run would silently fold
+together with these synthetic Spanish AEMET rows, weakening the cross-climate-transfer test the
+fold split exists to provide. "EC"-for-ECA&D (the existing, already-merged convention this
+originally matched) has the identical bug -- "EC" is Ecuador's real code -- but changing an
+already-merged, already-in-the-live-training-database prefix is a separate, larger, DB-migration
+decision outside this PR's scope; flagged for that as its own follow-up, not fixed here. "XA" is
+in ISO 3166-1's own reserved "user-assigned" range (XA-XZ, alongside AA/QM-QZ/ZZ) -- GUARANTEED
+never to be assigned to a real country, so this specific collision class is structurally
+impossible for any station_id built with this prefix, not just avoided by choosing an
+unclaimed-so-far code the way the original "AE" choice (documented in its own commit as
+deliberate but based on an incorrect assumption it wasn't a real country code) was.
 """
 import json
 import os
@@ -172,7 +183,7 @@ def main():
         zone = ghcn.koppen_climate_zone(lat, lon)
         if zone == "BSh":
             bsh_stations.append({
-                "station_id": f"AE{s['indicativo']}", "aemet_id": s["indicativo"],
+                "station_id": f"XA{s['indicativo']}", "aemet_id": s["indicativo"],
                 "lat": lat, "lon": lon, "elevation_m": _parse_es_float(s.get("altitud")),
                 "name": s.get("nombre"),
             })
