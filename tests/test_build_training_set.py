@@ -311,6 +311,220 @@ class TestFetchEra5LandForStationsCache:
         mock_dl.assert_called_once()
         mock_unlink.assert_called_once_with("/tmp/fake.nc")
 
+    def test_corrupted_cache_entry_is_deleted_and_retried_once(self, tmp_path):
+        """Round-2 review finding, real: a cache hit was previously trusted purely on
+        os.path.exists with no integrity check -- a corrupted/truncated cache entry
+        permanently poisoned that segment (every relaunch hit the same exception at the same
+        cache_path forever). Must now delete the bad entry and retry as a genuine fresh
+        download, succeeding on the retry."""
+        cache_dir = str(tmp_path / "era5_cache")
+        os.makedirs(cache_dir)
+        bbox = bts.stations_bbox(_STATIONS)
+        cache_path = bts._era5_segment_cache_path(
+            cache_dir, "US_test", date(2016, 6, 13), date(2016, 6, 18),
+            bbox, "reanalysis-era5-land", bts._TRAINING_ERA5_VARIABLES,
+        )
+        with open(cache_path, "wb") as f:
+            f.write(b"corrupted netcdf bytes")
+
+        fresh_file = tmp_path / "fresh.nc"
+        fresh_file.write_bytes(b"real netcdf bytes")
+
+        with patch.object(bts.era5, "download_era5", return_value=str(fresh_file)) as mock_dl, \
+             patch.object(bts.era5, "extract_era5_means",
+                           side_effect=[ValueError("bad netcdf"), []]) as mock_extract:
+            daily, _, _ = bts.fetch_era5_land_for_stations(
+                _STATIONS, date(2016, 6, 15), date(2016, 6, 16),
+                cache_dir=cache_dir, batch_label="US_test",
+            )
+
+        assert mock_extract.call_count == 2
+        mock_dl.assert_called_once()  # exactly one real fresh download for the retry
+        assert not os.path.exists(cache_path.replace(".nc", "-does-not-exist"))  # sanity
+        # the original corrupted entry is gone, replaced by the freshly re-downloaded one
+        assert os.path.exists(cache_path)
+        assert open(cache_path, "rb").read() == b"real netcdf bytes"
+        assert not fresh_file.exists()  # the fresh download's own tmp file was still cleaned up
+
+    def test_freshly_downloaded_segment_failing_to_parse_is_not_retried(self, tmp_path):
+        """A FRESH download (not a cache hit) failing to parse is a real error -- retrying it
+        as if it were a caching artifact would mask a genuine bug/bad CDS response."""
+        cache_dir = str(tmp_path / "era5_cache")
+        real_file = tmp_path / "fake.nc"
+        real_file.write_bytes(b"fake netcdf bytes")
+
+        with patch.object(bts.era5, "download_era5", return_value=str(real_file)) as mock_dl, \
+             patch.object(bts.era5, "extract_era5_means",
+                           side_effect=ValueError("bad netcdf")) as mock_extract, \
+             pytest.raises(ValueError):
+            bts.fetch_era5_land_for_stations(
+                _STATIONS, date(2016, 6, 15), date(2016, 6, 16),
+                cache_dir=cache_dir, batch_label="US_test",
+            )
+
+        mock_dl.assert_called_once()
+        mock_extract.assert_called_once()
+        assert not real_file.exists()  # still cleaned up despite the raised exception
+
+    def test_cache_reappears_after_lock_acquired_skips_redundant_download(self, tmp_path):
+        """Round-2 review finding, real: the cache-existence check used to sit entirely
+        outside _era5_download_lock, so two processes racing on the same missing segment could
+        both see a miss before either's write landed and both redundantly download. Simulates
+        a concurrent process finishing its own download+cache-write during the time this call
+        spent waiting for the lock -- the segment must be reused, not re-downloaded."""
+        cache_dir = str(tmp_path / "era5_cache")
+        os.makedirs(cache_dir)
+        bbox = bts.stations_bbox(_STATIONS)
+        cache_path = bts._era5_segment_cache_path(
+            cache_dir, "US_test", date(2016, 6, 13), date(2016, 6, 18),
+            bbox, "reanalysis-era5-land", bts._TRAINING_ERA5_VARIABLES,
+        )
+
+        class _FakeLock:
+            def __enter__(self):
+                # simulates a concurrent process finishing its own cache write while this
+                # call was waiting to acquire the lock
+                with open(cache_path, "wb") as f:
+                    f.write(b"written by a concurrent process")
+                return 0
+
+            def __exit__(self, *a):
+                return False
+
+        with patch.object(bts, "_era5_download_lock", return_value=_FakeLock()), \
+             patch.object(bts.era5, "download_era5") as mock_dl, \
+             patch.object(bts.era5, "extract_era5_means", return_value=[]) as mock_extract:
+            bts.fetch_era5_land_for_stations(
+                _STATIONS, date(2016, 6, 15), date(2016, 6, 16),
+                cache_dir=cache_dir, batch_label="US_test",
+            )
+
+        mock_dl.assert_not_called()  # the re-check inside the lock found it -- no download
+        mock_extract.assert_called_once_with(cache_path, mock_extract.call_args[0][1])
+
+    def test_cache_path_sanitizes_batch_label(self, tmp_path):
+        """Round-2 review finding, real: batch_label was used raw in the cache filename,
+        inconsistent with this same file's own established sanitization precedent for the
+        identical value (build_rows_for_country's own country_key)."""
+        cache_dir = str(tmp_path / "era5_cache")
+        path = bts._era5_segment_cache_path(
+            cache_dir, "US/../evil name!", date(2023, 1, 1), date(2023, 2, 1),
+            "-115,30,-110,35", "reanalysis-era5-land", bts._TRAINING_ERA5_VARIABLES,
+        )
+        fname = os.path.basename(path)
+        assert "/" not in fname and ".." not in fname and " " not in fname and "!" not in fname
+        assert fname.startswith("USevilname_")
+
+    def test_cache_persist_prefers_hard_link_over_full_copy(self, tmp_path):
+        """Round-2 review finding, real: shutil.copy2 always did a full duplicate read+write of
+        a potentially multi-GB file even when cache_dir shares a filesystem with the download's
+        own tmp dir, where a hard link is a same-filesystem, near-zero-cost alternative."""
+        cache_dir = str(tmp_path / "era5_cache")
+        real_file = tmp_path / "fake.nc"
+        real_file.write_bytes(b"fake netcdf bytes")
+
+        with patch.object(bts.era5, "download_era5", return_value=str(real_file)), \
+             patch.object(bts.era5, "extract_era5_means", return_value=[]), \
+             patch("os.link", wraps=os.link) as mock_link, \
+             patch("shutil.copy2") as mock_copy:
+            bts.fetch_era5_land_for_stations(
+                _STATIONS, date(2016, 6, 15), date(2016, 6, 16),
+                cache_dir=cache_dir, batch_label="US_test",
+            )
+
+        mock_link.assert_called_once()
+        mock_copy.assert_not_called()
+
+    def test_cache_persist_falls_back_to_copy_when_hard_link_fails(self, tmp_path):
+        """Cross-device (or hard-link-unsupported) cache_dir must still work via a real copy."""
+        cache_dir = str(tmp_path / "era5_cache")
+        real_file = tmp_path / "fake.nc"
+        real_file.write_bytes(b"fake netcdf bytes")
+
+        with patch.object(bts.era5, "download_era5", return_value=str(real_file)), \
+             patch.object(bts.era5, "extract_era5_means", return_value=[]), \
+             patch("os.link", side_effect=OSError("cross-device link")):
+            bts.fetch_era5_land_for_stations(
+                _STATIONS, date(2016, 6, 15), date(2016, 6, 16),
+                cache_dir=cache_dir, batch_label="US_test",
+            )
+
+        cached_files = list(os.scandir(cache_dir))
+        assert len(cached_files) == 1
+        assert open(cached_files[0].path, "rb").read() == b"fake netcdf bytes"
+
+    def test_cache_persist_exception_class_widened_beyond_oserror(self, tmp_path):
+        """Round-2 review finding, real: the persist block only caught OSError -- a non-OSError
+        failure during the copy/rename used to escape it entirely, skipping the caller's own
+        try/finally cleanup of the downloaded temp file for that exception class."""
+        cache_dir = str(tmp_path / "era5_cache")
+        real_file = tmp_path / "fake.nc"
+        real_file.write_bytes(b"fake netcdf bytes")
+
+        with patch.object(bts.era5, "download_era5", return_value=str(real_file)), \
+             patch.object(bts.era5, "extract_era5_means", return_value=[]), \
+             patch("os.link", side_effect=OSError), \
+             patch("shutil.copy2", side_effect=MemoryError("simulated")):
+            # must not raise -- caching is best-effort, and the temp file must still be cleaned up
+            bts.fetch_era5_land_for_stations(
+                _STATIONS, date(2016, 6, 15), date(2016, 6, 16),
+                cache_dir=cache_dir, batch_label="US_test",
+            )
+
+        assert not real_file.exists()
+        assert list(os.scandir(cache_dir)) == []
+
+
+class TestSweepStaleEra5CacheTmpFiles:
+    def setup_method(self):
+        bts._ERA5_CACHE_TMP_SWEPT_DIRS.clear()
+
+    def test_removes_stale_tmp_files_older_than_threshold(self, tmp_path):
+        cache_dir = str(tmp_path / "era5_cache")
+        os.makedirs(cache_dir)
+        stale = os.path.join(cache_dir, "seg_2023-01-01_2023-02-01_abc.nc.tmp.123.deadbeef")
+        with open(stale, "wb") as f:
+            f.write(b"orphaned")
+        old_time = time.time() - bts._ERA5_CACHE_TMP_STALE_AGE_SECONDS - 3600
+        os.utime(stale, (old_time, old_time))
+
+        bts._sweep_stale_era5_cache_tmp_files(cache_dir)
+
+        assert not os.path.exists(stale)
+
+    def test_leaves_recent_tmp_files_alone(self, tmp_path):
+        """A tmp file from a genuinely-in-progress concurrent write must survive."""
+        cache_dir = str(tmp_path / "era5_cache")
+        os.makedirs(cache_dir)
+        recent = os.path.join(cache_dir, "seg_2023-01-01_2023-02-01_abc.nc.tmp.123.deadbeef")
+        with open(recent, "wb") as f:
+            f.write(b"in progress")
+
+        bts._sweep_stale_era5_cache_tmp_files(cache_dir)
+
+        assert os.path.exists(recent)
+
+    def test_only_sweeps_once_per_cache_dir_per_process(self, tmp_path):
+        cache_dir = str(tmp_path / "era5_cache")
+        os.makedirs(cache_dir)
+        with patch("os.listdir", wraps=os.listdir) as mock_listdir:
+            bts._sweep_stale_era5_cache_tmp_files(cache_dir)
+            bts._sweep_stale_era5_cache_tmp_files(cache_dir)
+        mock_listdir.assert_called_once()
+
+    def test_leaves_non_tmp_cache_files_alone(self, tmp_path):
+        cache_dir = str(tmp_path / "era5_cache")
+        os.makedirs(cache_dir)
+        real_cache_entry = os.path.join(cache_dir, "seg_2023-01-01_2023-02-01_abc.nc")
+        with open(real_cache_entry, "wb") as f:
+            f.write(b"a real, complete cache entry")
+        old_time = time.time() - bts._ERA5_CACHE_TMP_STALE_AGE_SECONDS - 3600
+        os.utime(real_cache_entry, (old_time, old_time))
+
+        bts._sweep_stale_era5_cache_tmp_files(cache_dir)
+
+        assert os.path.exists(real_cache_entry)
+
 
 class TestDateChunks:
     def test_splits_long_window_into_bounded_chunks(self):
@@ -1239,6 +1453,20 @@ class TestMainStationIdsFileAndDryRun:
         with pytest.raises(SystemExit):
             bts.main()
         assert "not compatible with --station-ids-file" in capsys.readouterr().err
+
+    def test_era5_cache_dir_rejected_with_openmeteo_source(self, monkeypatch, tmp_path, capsys):
+        """Round-2 review finding, real: --era5-cache-dir only applies to --era5-source cds
+        (build_rows_for_country's own docstring already said so, but nothing enforced or even
+        warned about it) -- used to be a silent no-op, discoverable only by finding an empty
+        cache dir after a killed run. Must now fail fast at argument-parsing time instead."""
+        monkeypatch.setattr(sys, "argv", [
+            "build_training_set.py", "--countries", "US",
+            "--start-date", "2016-06-01", "--end-date", "2016-06-30",
+            "--era5-source", "openmeteo", "--era5-cache-dir", str(tmp_path / "cache"),
+        ])
+        with pytest.raises(SystemExit):
+            bts.main()
+        assert "--era5-cache-dir only applies with --era5-source cds" in capsys.readouterr().err
 
     def test_station_ids_file_derives_countries_and_filters_to_requested_ids(self, monkeypatch, tmp_path):
         """Pooled US+MX file: countries must be derived from the IDs'
