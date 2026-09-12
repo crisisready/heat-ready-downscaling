@@ -54,9 +54,9 @@ real, same class as the AEMET script's own "AE"->"XA" fix): ghcn.region_from_sta
 only the first two characters for the leave-region-out CV fold key, and "SI" is the real
 ISO-3166/FIPS code for Slovenia. "XS" is in ISO 3166-1's reserved "user-assigned" range
 (XA-XZ), structurally guaranteed never to collide with a real country code. See the AEMET
-script's own module docstring for the full reasoning, including why the already-merged ECA&D
-script's "EC" (Ecuador's real code) is flagged as a separate DB-migration follow-up rather than
-fixed here.
+script's own module docstring for the full reasoning, including the already-merged ECA&D
+script's identical "EC" (Ecuador's real code) bug, since fixed directly rather than left as
+debt (PR #43, "EC" -> "XC").
 """
 import json
 import os
@@ -144,12 +144,22 @@ def fetch_batch_via_browser(page, stations_batch, start, end):
     page.click("#btnVerSeleccion", force=True)
     page.wait_for_timeout(300)
 
-    page.evaluate("document.querySelector('#popup-estaciones').style.display = 'none';")
+    # Round-1 review finding, real: these three DOM lookups had no null guard, unlike every
+    # other querySelector() call in this function (#checkProv_*, #checkEstacion_* above) --
+    # a renamed/absent element would throw a JS TypeError inside page.evaluate, surfacing as an
+    # opaque Python exception that aborts the whole batch rather than the more informative
+    # missing-element diagnosis the guarded calls elsewhere in this same function give.
+    page.evaluate("""
+        const popup = document.querySelector('#popup-estaciones');
+        if (popup) { popup.style.display = 'none'; }
+    """)
     page.wait_for_timeout(200)
 
     page.evaluate(f"""
-        document.querySelector('#fechaInicialVal').value = '{start.isoformat()}';
-        document.querySelector('#fechaFinalVal').value = '{end.isoformat()}';
+        const start = document.querySelector('#fechaInicialVal');
+        const end = document.querySelector('#fechaFinalVal');
+        if (start) {{ start.value = '{start.isoformat()}'; }}
+        if (end) {{ end.value = '{end.isoformat()}'; }}
     """)
     page.wait_for_timeout(200)
 
@@ -182,7 +192,20 @@ def parse_results_html(html, stations_batch):
         rows = re.findall(r'<tr class="fondo-row">(.*?)</tr>', table_html, re.S)
         series = []
         for row_html in rows:
-            cells = re.findall(r'<td[^>]*>([^<]*)</td>', row_html)
+            # Round-1 review finding, real: the original `<td[^>]*>([^<]*)</td>` assumed a flat
+            # text node -- a cell wrapped in ANY nested tag (e.g. `<td><span>37,2</span></td>`,
+            # common for CSS styling on government sites) matches an empty capture group instead
+            # of the real content, which _parse_es_float() below then silently turns into None
+            # and the row gets skipped -- a parsing miss that finishes as a normal "complete"
+            # run with a silently near-zero row count, not the job-exception failure mode the
+            # retry logic elsewhere in this file already covers. Captures the full inner HTML
+            # (`.*?`, non-greedy) then strips any nested tags before parsing, so nesting depth
+            # no longer matters for a plain data cell (no further TABLE robustness attempted
+            # here -- e.g. a table nested INSIDE this one before its own real `</table>` -- since
+            # that would need a real HTML parser, not a regex tweak, and there's no evidence yet
+            # that SIAR's actual page structure does that).
+            cells_html = re.findall(r'<td[^>]*>(.*?)</td>', row_html, re.S)
+            cells = [re.sub(r'<[^>]+>', '', c).strip() for c in cells_html]
             if len(cells) < 5:
                 continue
             fecha, _tmedia, tmax_s, _hora_max, tmin_s = cells[:5]
@@ -208,7 +231,6 @@ def main():
     catalog = fetch_station_catalog_with_coords()
     print(f"real active station(s) across Valencia/Alicante/Castellon: {len(catalog)}")
 
-    import kgcpy
     bsh_candidates = []
     for s in catalog:
         lat, lon = s["coordenadas"]["lat"], s["coordenadas"]["lng"]

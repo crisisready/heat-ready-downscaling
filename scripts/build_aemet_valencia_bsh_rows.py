@@ -15,9 +15,11 @@ later succeeded in under a second) -- retried with backoff here rather
 than treated as a hard failure on the first miss.
 
 Station coordinates are given in a real, unusual DMS-packed string format
-(e.g. "384648N" = 38 deg 46' 48" N, "004745W" = 0 deg 47' 45" W -- lon
-carries a 3-digit degree field, lat a 2-digit one) -- parsed explicitly,
-not assumed to match any other source's format.
+(e.g. "384648N" = 38 deg 46' 48" N, "004745W" = 0 deg 47' 45" W -- a
+2-digit degree field for BOTH lat and lon, despite lon's string being one
+character longer; see _dms_to_dd()'s own docstring for why an initial
+3-digit-longitude assumption was wrong and how it was caught) -- parsed
+explicitly, not assumed to match any other source's format.
 
 tmax/tmin values use Spanish-locale comma decimals ("37,2" not "37.2").
 
@@ -31,18 +33,18 @@ TWO characters only (station_id[:2].upper()), and "AE" is the real ISO-3166/FIPS
 United Arab Emirates -- so any real UAE GHCN station sharing a training run would silently fold
 together with these synthetic Spanish AEMET rows, weakening the cross-climate-transfer test the
 fold split exists to provide. "EC"-for-ECA&D (the existing, already-merged convention this
-originally matched) has the identical bug -- "EC" is Ecuador's real code -- but changing an
-already-merged, already-in-the-live-training-database prefix is a separate, larger, DB-migration
-decision outside this PR's scope; flagged for that as its own follow-up, not fixed here. "XA" is
-in ISO 3166-1's own reserved "user-assigned" range (XA-XZ, alongside AA/QM-QZ/ZZ) -- GUARANTEED
-never to be assigned to a real country, so this specific collision class is structurally
-impossible for any station_id built with this prefix, not just avoided by choosing an
-unclaimed-so-far code the way the original "AE" choice (documented in its own commit as
+originally matched) had the identical bug -- "EC" is Ecuador's real code -- flagged at the time
+as a separate, larger decision outside this PR's scope; since fixed directly instead of left as
+debt (PR #43, "EC" -> "XC", 2026-09-12 -- see that PR's own note on the still-open, maintainer-
+only question of whether any already-materialized production `ghcn_training` rows need a
+reprocess). "XA" is in ISO 3166-1's own reserved "user-assigned" range (XA-XZ, alongside
+AA/QM-QZ/ZZ) -- GUARANTEED never to be assigned to a real country, so this specific collision
+class is structurally impossible for any station_id built with this prefix, not just avoided by
+choosing an unclaimed-so-far code the way the original "AE" choice (documented in its own commit as
 deliberate but based on an incorrect assumption it wasn't a real country code) was.
 """
 import json
 import os
-import re
 import sys
 import time
 import urllib.error
@@ -166,7 +168,6 @@ def main():
     all_stations = fetch_all_stations(api_key)
     print(f"real station(s) fleet-wide: {len(all_stations)}")
 
-    import kgcpy
     bsh_stations = []
     for s in all_stations:
         try:
