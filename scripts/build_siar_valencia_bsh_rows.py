@@ -125,9 +125,19 @@ def fetch_batch_via_browser(page, stations_batch, start, end):
         """)
     page.wait_for_timeout(200)
 
-    if page.locator("#btnVerSeleccion").count() > 0:
-        page.click("#btnVerSeleccion", force=True)
-        page.wait_for_timeout(300)
+    # #btnVerSeleccion is load-bearing, not optional (see the module docstring: it's the
+    # actual click that populates the real hidden idEstaciones field via a live :checked DOM
+    # query -- the checkbox's own registered handler only updates a cosmetic display list).
+    # A fixed page.wait_for_timeout(300) + locator.count()>0 check here used to silently skip
+    # the click (and so the field population) if the button hadn't rendered by the 300ms mark
+    # under slower rendering -- indistinguishable downstream from those stations genuinely
+    # having no data. wait_for_selector actually waits (bounded, 5s -- generous for a DOM
+    # element appearing after a popup open, not a full page navigation) and raises Playwright's
+    # own clear TimeoutError if it never appears, which the caller's existing per-job
+    # try/except in main() already handles as a real failure rather than a silent no-op.
+    page.wait_for_selector("#btnVerSeleccion", timeout=5000, state="visible")
+    page.click("#btnVerSeleccion", force=True)
+    page.wait_for_timeout(300)
 
     page.evaluate("document.querySelector('#popup-estaciones').style.display = 'none';")
     page.wait_for_timeout(200)
@@ -242,17 +252,30 @@ def main():
                 job_i += 1
                 print(f"job {job_i}/{total_jobs}: batch {i+1}/{len(batches)} "
                       f"({len(batch)} station(s)) x {c_start}..{c_end}...", flush=True)
-                page = browser.new_page()
-                try:
-                    html = fetch_batch_via_browser(page, batch_stations, c_start, c_end)
-                    series = parse_results_html(html, batch_stations)
-                    for sid, obs in series.items():
-                        ghcn_by_station.setdefault(sid, []).extend(obs)
-                    print(f"  real station(s) with data this chunk: {len(series)}")
-                except Exception as exc:
-                    print(f"  job {job_i} FAILED: {exc!r}")
-                finally:
-                    page.close()
+                # One retry (2 attempts total, not this file's own timeout budget again on top
+                # of that) with a fresh page each time -- round-1 review finding, real: this
+                # loop previously dropped a job for good on its first failure, even though the
+                # module's own docstring documents large-batch renders as genuinely timing out
+                # (a transient render timeout) and the sibling AEMET script already retries its
+                # own flaky endpoint. Without this, the final output is written with
+                # "complete": True and a silently lower row count, with nothing distinguishing
+                # a transient miss from genuine data absence. Bounded to one retry (not
+                # AEMET's 4) because each attempt here is a real browser page load that can
+                # itself take up to ~120s under slow rendering, not a cheap HTTP request.
+                for job_attempt in range(2):
+                    page = browser.new_page()
+                    try:
+                        html = fetch_batch_via_browser(page, batch_stations, c_start, c_end)
+                        series = parse_results_html(html, batch_stations)
+                        for sid, obs in series.items():
+                            ghcn_by_station.setdefault(sid, []).extend(obs)
+                        print(f"  real station(s) with data this chunk: {len(series)}")
+                        break
+                    except Exception as exc:
+                        verb = "retrying" if job_attempt == 0 else "giving up"
+                        print(f"  job {job_i} attempt {job_attempt + 1} FAILED ({verb}): {exc!r}")
+                    finally:
+                        page.close()
                 time.sleep(2)
         browser.close()
 

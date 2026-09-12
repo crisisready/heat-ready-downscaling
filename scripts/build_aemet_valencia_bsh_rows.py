@@ -116,6 +116,12 @@ def _parse_es_float(s):
 
 def fetch_all_stations(api_key):
     envelope = _fetch_json(f"{BASE}/api/valores/climatologicos/inventarioestaciones/todasestaciones", api_key)
+    # Same envelope shape (and same real flakiness) as fetch_station_daily's own check below --
+    # a non-200 envelope with no "datos" key (rate-limited, transient error) used to raise an
+    # uncaught, uninformative KeyError here and kill the whole script before a single station
+    # was fetched.
+    if envelope.get("estado") != 200 or not envelope.get("datos"):
+        raise RuntimeError(f"AEMET station inventory request failed: estado={envelope.get('estado')}")
     stations = _fetch_json(envelope["datos"])
     return stations
 
@@ -188,11 +194,19 @@ def main():
             continue
         series = []
         for row in daily:
+            # .get() throughout, not direct indexing -- AEMET's own docstring
+            # above calls this endpoint flaky, and a single malformed record
+            # (missing "fecha") used to raise an uncaught KeyError here,
+            # crashing the ENTIRE run and discarding every station's already-
+            # fetched series (nothing is written to disk until after this
+            # whole loop completes). A malformed row is skipped the same way
+            # an incomplete tmax/tmin row already is, not treated as fatal.
+            fecha = row.get("fecha")
             tmax = _parse_es_float(row.get("tmax"))
             tmin = _parse_es_float(row.get("tmin"))
-            if tmax is None or tmin is None:
+            if fecha is None or tmax is None or tmin is None:
                 continue
-            series.append({"date": row["fecha"], "station_tmax_c": tmax, "station_tmin_c": tmin})
+            series.append({"date": fecha, "station_tmax_c": tmax, "station_tmin_c": tmin})
         if series:
             ghcn_by_station[sid] = series
         print(f"  {sid} {s['name']}: {len(series)} real quality day(s)")
