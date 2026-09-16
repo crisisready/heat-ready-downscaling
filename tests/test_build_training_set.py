@@ -19,6 +19,7 @@ import time
 from datetime import date
 from unittest.mock import MagicMock, patch
 
+import cads_api_client.processing
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -228,6 +229,113 @@ class TestFetchEra5LandForStations:
         assert "2016-06-15" in daily["USW00023183"]
         assert "2016-01-15" in humidity["USW00023183"]
         assert "2016-06-15" in humidity["USW00023183"]
+
+
+class TestCdsRejectedRetry:
+    """issue #648: a CDS job that resolves to 'rejected' raised a generic
+    cads_api_client.processing.ProcessingFailedError("Unknown API state 'rejected'") that
+    propagated all the way out of build_rows_for_country and killed the whole process -- lost
+    the still-queued US/VM/VQ countries in one lane to a single rejected request live
+    2026-09-16. _download_era5_with_rejected_retry must retry that specific outcome with
+    backoff instead of letting it propagate on the first attempt."""
+
+    def _rejected_error(self):
+        return cads_api_client.processing.ProcessingFailedError("Unknown API state 'rejected'")
+
+    def test_retries_on_rejected_and_eventually_succeeds(self, monkeypatch):
+        @contextlib.contextmanager
+        def fake_lock():
+            yield 0
+
+        monkeypatch.setattr(bts, "_era5_download_lock", fake_lock)
+        with patch.object(bts.era5, "download_era5",
+                           side_effect=[self._rejected_error(), self._rejected_error(), "/tmp/fake.nc"]) as mock_dl, \
+             patch.object(bts.time, "sleep") as mock_sleep:
+            nc_path, owns = bts._download_era5_with_rejected_retry(
+                None, "-115,30,-110,35", date(2016, 6, 15), date(2016, 6, 16), "US_Af",
+            )
+        assert (nc_path, owns) == ("/tmp/fake.nc", True)
+        assert mock_dl.call_count == 3
+        # backoff, not a flat delay -- each retry waits longer than the last
+        delays = [c.args[0] for c in mock_sleep.call_args_list]
+        assert delays == sorted(delays) and len(set(delays)) == len(delays)
+
+    def test_gives_up_after_max_retries_and_raises(self, monkeypatch):
+        @contextlib.contextmanager
+        def fake_lock():
+            yield 0
+
+        monkeypatch.setattr(bts, "_era5_download_lock", fake_lock)
+        with patch.object(bts.era5, "download_era5",
+                           side_effect=self._rejected_error()) as mock_dl, \
+             patch.object(bts.time, "sleep"), \
+             pytest.raises(cads_api_client.processing.ProcessingFailedError):
+            bts._download_era5_with_rejected_retry(
+                None, "-115,30,-110,35", date(2016, 6, 15), date(2016, 6, 16), "US_Af",
+            )
+        # the first attempt plus exactly _CDS_REJECTED_MAX_RETRIES retries, not one more/fewer
+        assert mock_dl.call_count == bts._CDS_REJECTED_MAX_RETRIES + 1
+
+    def test_non_rejected_processing_failure_is_not_retried(self, monkeypatch):
+        """'dismissed'/'deleted' terminal states raise the exact same exception class as
+        'rejected' -- only the 'rejected' outcome specifically is worth retrying."""
+        @contextlib.contextmanager
+        def fake_lock():
+            yield 0
+
+        monkeypatch.setattr(bts, "_era5_download_lock", fake_lock)
+        dismissed_error = cads_api_client.processing.ProcessingFailedError("API state 'dismissed'")
+        with patch.object(bts.era5, "download_era5", side_effect=dismissed_error) as mock_dl, \
+             patch.object(bts.time, "sleep") as mock_sleep, \
+             pytest.raises(cads_api_client.processing.ProcessingFailedError):
+            bts._download_era5_with_rejected_retry(
+                None, "-115,30,-110,35", date(2016, 6, 15), date(2016, 6, 16), "US_Af",
+            )
+        mock_dl.assert_called_once()
+        mock_sleep.assert_not_called()
+
+    def test_unrelated_exception_is_not_retried(self, monkeypatch):
+        @contextlib.contextmanager
+        def fake_lock():
+            yield 0
+
+        monkeypatch.setattr(bts, "_era5_download_lock", fake_lock)
+        with patch.object(bts.era5, "download_era5", side_effect=RuntimeError("connection reset")) as mock_dl, \
+             patch.object(bts.time, "sleep") as mock_sleep, \
+             pytest.raises(RuntimeError, match="connection reset"):
+            bts._download_era5_with_rejected_retry(
+                None, "-115,30,-110,35", date(2016, 6, 15), date(2016, 6, 16), "US_Af",
+            )
+        mock_dl.assert_called_once()
+        mock_sleep.assert_not_called()
+
+    def test_backoff_sleep_happens_with_the_lock_released(self, monkeypatch):
+        """A rejection means CDS is contended -- holding this process's CDS concurrency slot
+        idle for the whole backoff delay would only make that worse for every other lane/
+        process waiting on the same slot, so each retry must re-acquire the lock fresh rather
+        than sleep while still holding it."""
+        lock_held = []
+
+        @contextlib.contextmanager
+        def tracking_lock():
+            lock_held.append(True)
+            try:
+                yield 0
+            finally:
+                lock_held.append(False)
+
+        monkeypatch.setattr(bts, "_era5_download_lock", tracking_lock)
+
+        def fake_sleep(_delay):
+            # the lock must already be released by the time we're sleeping
+            assert lock_held[-1] is False
+
+        with patch.object(bts.era5, "download_era5",
+                           side_effect=[self._rejected_error(), "/tmp/fake.nc"]), \
+             patch.object(bts.time, "sleep", side_effect=fake_sleep):
+            bts._download_era5_with_rejected_retry(
+                None, "-115,30,-110,35", date(2016, 6, 15), date(2016, 6, 16), "US_Af",
+            )
 
 
 class TestFetchEra5LandForStationsCache:
@@ -1736,3 +1844,95 @@ class TestMainStationIdsFileAndDryRun:
         assert mock_build.call_count == 2
         batch_labels = sorted(call.args[0] for call in mock_build.call_args_list)
         assert batch_labels == ["US_BWh_c0", "US_BWh_c1"]
+
+
+class TestMainPerBatchIsolation:
+    """issue #648: a real 2026-09-16 incident -- one CDS 'rejected' exception raised by
+    build_rows_for_country while building the US batch propagated all the way out of main()'s
+    country loop and killed the process before the still-queued VM/VQ countries in the same
+    --countries invocation ever started. One batch's failure must not stop the rest."""
+
+    def test_one_countrys_failure_does_not_stop_the_next_country(self, monkeypatch):
+        monkeypatch.setattr(sys, "argv", [
+            "build_training_set.py", "--countries", "US,MX",
+            "--start-date", "2016-06-01", "--end-date", "2016-06-30",
+        ])
+
+        def fake_build_rows(batch_label, stations, *a, **k):
+            if batch_label.startswith("US"):
+                raise cads_api_client.processing.ProcessingFailedError("Unknown API state 'rejected'")
+            return [{"station_id": s["station_id"], "date": "2016-06-15"} for s in stations]
+
+        with patch.object(bts, "_bucket_from_credentials", return_value="vuln-bucket"), \
+             patch.object(bts, "_landscan_from_credentials", return_value=("ls-bucket", "ls-key")), \
+             patch.object(bts.ghcn, "create_ghcn_training_table"), \
+             patch.object(bts.ghcn, "list_ghcn_stations", return_value=[_US_STATION, _MX_STATION]), \
+             patch.object(bts.ghcn, "active_station_ids", return_value={"USW00023183", "MXM00076040"}), \
+             patch.object(bts, "build_rows_for_country", side_effect=fake_build_rows) as mock_build, \
+             patch.object(bts.ghcn, "upsert_ghcn_training_rows") as mock_upsert, \
+             patch.object(bts.ghcn, "koppen_climate_zone", return_value="BWh"), \
+             pytest.raises(SystemExit) as exc_info:
+            bts.main()
+
+        # a failed batch must still surface as a non-zero exit -- a caller scripting a re-run
+        # of just the failed countries needs this to be machine-checkable, not just printed
+        assert exc_info.value.code == 1
+        # BOTH countries were attempted, in the order given -- MX was not skipped just because
+        # US (processed first) failed
+        built_batches = [call.args[0] for call in mock_build.call_args_list]
+        assert built_batches == ["US_BWh", "MX_BWh"]
+        # MX's real rows were still computed and written despite US's failure
+        mock_upsert.assert_called_once_with([{"station_id": "MXM00076040", "date": "2016-06-15"}])
+
+    def test_rows_out_confirmation_still_prints_when_a_batch_failed(self, monkeypatch, tmp_path, capsys):
+        """Round-1 review finding, real: the new `if failed_batches: ... sys.exit(1)` block was
+        inserted directly above the pre-existing `--rows-out: wrote ...` confirmation print
+        without re-indenting it back under `if args.rows_out:` -- so it silently became
+        unreachable in every case (dead if failed_batches was empty, skipped by sys.exit(1) if
+        not). The file write itself was unaffected, but the confirmation message regressed
+        silently with no test to catch it. --rows-out's own file write already happens
+        unconditionally before this new exit path (issue #648's own requirement), so the print
+        confirming it must too."""
+        out = tmp_path / "rows.json"
+        monkeypatch.setattr(sys, "argv", [
+            "build_training_set.py", "--countries", "US,MX",
+            "--start-date", "2016-06-01", "--end-date", "2016-06-30",
+            "--rows-out", str(out),
+        ])
+
+        def fake_build_rows(batch_label, stations, *a, **k):
+            if batch_label.startswith("US"):
+                raise cads_api_client.processing.ProcessingFailedError("Unknown API state 'rejected'")
+            return [{"station_id": s["station_id"], "date": "2016-06-15"} for s in stations]
+
+        with patch.object(bts, "_bucket_from_credentials", return_value="vuln-bucket"), \
+             patch.object(bts, "_landscan_from_credentials", return_value=("ls-bucket", "ls-key")), \
+             patch.object(bts.ghcn, "create_ghcn_training_table"), \
+             patch.object(bts.ghcn, "list_ghcn_stations", return_value=[_US_STATION, _MX_STATION]), \
+             patch.object(bts.ghcn, "active_station_ids", return_value={"USW00023183", "MXM00076040"}), \
+             patch.object(bts, "build_rows_for_country", side_effect=fake_build_rows), \
+             patch.object(bts.ghcn, "upsert_ghcn_training_rows"), \
+             patch.object(bts.ghcn, "koppen_climate_zone", return_value="BWh"), \
+             pytest.raises(SystemExit):
+            bts.main()
+
+        stdout = capsys.readouterr().out
+        assert f"--rows-out: wrote 1 row(s) to {out}" in stdout
+        assert json.loads(out.read_text())["complete"] is True
+
+    def test_all_batches_succeeding_does_not_exit_nonzero(self, monkeypatch):
+        """Sanity check for the new exit-code path: a clean run (no failed batches) must not
+        start unconditionally exiting non-zero now that failure tracking exists."""
+        monkeypatch.setattr(sys, "argv", [
+            "build_training_set.py", "--countries", "US",
+            "--start-date", "2016-06-01", "--end-date", "2016-06-30",
+        ])
+        with patch.object(bts, "_bucket_from_credentials", return_value="vuln-bucket"), \
+             patch.object(bts, "_landscan_from_credentials", return_value=("ls-bucket", "ls-key")), \
+             patch.object(bts.ghcn, "create_ghcn_training_table"), \
+             patch.object(bts.ghcn, "list_ghcn_stations", return_value=[_US_STATION]), \
+             patch.object(bts.ghcn, "active_station_ids", return_value={"USW00023183"}), \
+             patch.object(bts, "build_rows_for_country", return_value=[]), \
+             patch.object(bts.ghcn, "upsert_ghcn_training_rows"), \
+             patch.object(bts.ghcn, "koppen_climate_zone", return_value="BWh"):
+            bts.main()  # must not raise SystemExit
