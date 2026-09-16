@@ -127,6 +127,7 @@ from datetime import date, datetime, timedelta
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import api_call_manager
+import cads_api_client.processing
 import dem
 import era5
 import ghcn
@@ -445,38 +446,97 @@ def _sweep_stale_era5_cache_tmp_files(cache_dir: str) -> None:
             logger.info("swept stale ERA5 cache tmp file %s (%.0fh old)", path, age / 3600)
 
 
-def _resolve_era5_segment(cache_path, bbox, padded_start, padded_end, batch_label, cache_dir):
-    """Returns (nc_path, owns_nc_path) for one ERA5 segment. Checks cache_path first (fast
-    path, no lock needed); on a miss, re-checks cache_path again immediately after acquiring
-    the account-concurrency lock (round-2 review finding, real: without this re-check, two
+# issue #648: a CDS job that resolves to the 'rejected' state raises
+# cads_api_client.processing.ProcessingFailedError, but as a generic "Unknown API state
+# 'rejected'" -- processing.py's own results_ready only special-cases "successful"/"failed"/
+# "dismissed"/"deleted"; everything else, 'rejected' included, falls through to that same
+# catch-all (see cads_api_client/processing.py). multiurl already retries transport-level
+# failures (502/RemoteDisconnected/ConnectionReset/read-timeout) inside cdsapi itself, but a
+# 'rejected' job outcome is a real, terminal-looking CDS response, not a transport error, so it
+# was never retried and instead propagated all the way out of build_rows_for_country and killed
+# the whole process -- confirmed live 2026-09-16: one rejected request for the US Af cluster
+# took the same lane's still-queued VM/VQ countries down with it. A fleet-wide rejection storm
+# (11-12 events/30min across 6+ unrelated prod projects, same date) is live proof this is
+# transient queue-side congestion, not a request any specific retry could never satisfy, so
+# retrying with backoff is worth it here in a way it wouldn't be for a real 400/auth failure.
+_CDS_REJECTED_MAX_RETRIES = 3
+_CDS_REJECTED_BACKOFF_BASE_S = 60.0
+
+
+def _is_cds_rejected_error(exc: BaseException) -> bool:
+    """True only for a CDS job that actually resolved to 'rejected', not every
+    ProcessingFailedError -- 'dismissed'/'deleted' terminal states raise the exact same
+    exception class (see the module comment above _CDS_REJECTED_MAX_RETRIES) and are not the
+    same, likely-transient condition worth retrying."""
+    return (
+        isinstance(exc, cads_api_client.processing.ProcessingFailedError)
+        and "rejected" in str(exc).lower()
+    )
+
+
+def _download_era5_with_rejected_retry(cache_path, bbox, padded_start, padded_end, batch_label):
+    """Returns (nc_path, owns_nc_path). Re-checks cache_path immediately after acquiring the
+    account-concurrency lock (round-2 review finding, real: without this re-check, two
     processes racing on the same missing segment could both see a miss before either's write
     landed, and both redundantly download the identical segment from CDS -- the lock's own
     docstring already anticipates concurrent processes sharing a cache_dir as normal usage,
-    this closes the race that usage pattern creates) before actually downloading. On an actual
-    download, best-effort persists it to cache_path afterward, outside the lock (local disk
-    I/O, not CDS's own concurrency concern)."""
+    this closes the race that usage pattern creates), then calls era5.download_era5, retrying
+    with backoff specifically on a CDS 'rejected' outcome (issue #648) -- any other exception
+    (a real transport failure past cdsapi's own retries, an auth/400 error) propagates
+    immediately on the first attempt, unchanged from calling era5.download_era5 directly.
+
+    Re-acquires the lock fresh on every retry (rather than holding it across the backoff
+    sleep) so a rejection's backoff delay releases this process's CDS concurrency slot instead
+    of holding it idle -- a rejection is itself evidence CDS is contended, so sitting on a slot
+    doing nothing during the retry delay would only make that worse for every other lane/
+    process waiting on the same slot."""
+    attempt = 0
+    while True:
+        last_exc = None  # Python clears an `except ... as exc` name at the end of its own
+        # except block (PEP 3110) -- stashed under a different name here so the retry log
+        # below (deliberately outside the `with`, so the lock is already released by then)
+        # can still reference it.
+        with _era5_download_lock() as account_index:
+            if cache_path and os.path.exists(cache_path):
+                logger.info("[%s] ERA5 cache hit for %s..%s after acquiring the lock -- "
+                            "skipping CDS download", batch_label, padded_start, padded_end)
+                return cache_path, False
+            try:
+                nc_path = era5.download_era5(
+                    bbox, padded_start, padded_end,
+                    dataset="reanalysis-era5-land", variables=_TRAINING_ERA5_VARIABLES,
+                    account_index=account_index,
+                )
+                return nc_path, True
+            except Exception as exc:
+                if not _is_cds_rejected_error(exc) or attempt >= _CDS_REJECTED_MAX_RETRIES:
+                    raise
+                last_exc = exc
+        delay = _CDS_REJECTED_BACKOFF_BASE_S * (2 ** attempt)
+        attempt += 1
+        logger.warning(
+            "[%s] CDS rejected the request for %s..%s (attempt %d/%d) -- retrying in %.0fs: %s",
+            batch_label, padded_start, padded_end, attempt, _CDS_REJECTED_MAX_RETRIES, delay, last_exc,
+        )
+        time.sleep(delay)
+
+
+def _resolve_era5_segment(cache_path, bbox, padded_start, padded_end, batch_label, cache_dir):
+    """Returns (nc_path, owns_nc_path) for one ERA5 segment. Checks cache_path first (fast
+    path, no lock needed) before handing off to _download_era5_with_rejected_retry, which
+    re-checks cache_path again after acquiring the account-concurrency lock and does the
+    actual download (see that function's own docstring). On an actual download, best-effort
+    persists it to cache_path afterward, outside the lock (local disk I/O, not CDS's own
+    concurrency concern)."""
     if cache_path and os.path.exists(cache_path):
         logger.info("[%s] ERA5 cache hit for %s..%s -- skipping CDS download",
                     batch_label, padded_start, padded_end)
         return cache_path, False
-    # _era5_download_lock serializes ONLY this call across concurrent
-    # build_training_set.py processes (CDS's own per-account concurrency
-    # cap -- see the lock's own docstring); the acquired slot's
-    # account_index is threaded into download_era5 so it actually
-    # downloads under that slot's CDS credential.
-    with _era5_download_lock() as account_index:
-        if cache_path and os.path.exists(cache_path):
-            logger.info("[%s] ERA5 cache hit for %s..%s after acquiring the lock -- "
-                        "skipping CDS download", batch_label, padded_start, padded_end)
-            return cache_path, False
-        nc_path = era5.download_era5(
-            bbox, padded_start, padded_end,
-            dataset="reanalysis-era5-land", variables=_TRAINING_ERA5_VARIABLES,
-            account_index=account_index,
-        )
-    if cache_path:
+    nc_path, owns_nc_path = _download_era5_with_rejected_retry(
+        cache_path, bbox, padded_start, padded_end, batch_label)
+    if cache_path and owns_nc_path:
         _persist_era5_cache_entry(nc_path, cache_path, cache_dir, batch_label, padded_start, padded_end)
-    return nc_path, True
+    return nc_path, owns_nc_path
 
 
 def _persist_era5_cache_entry(nc_path, cache_path, cache_dir, batch_label, padded_start, padded_end):
@@ -1760,6 +1820,13 @@ def main() -> None:
     total_rows = 0
     all_rows: list[dict] = [] if args.rows_out else None  # None (not []) when unused, so a caller
     # that forgets --rows-out can't mistake an always-empty list for "genuinely zero rows computed."
+    failed_batches: list[tuple[str, str]] = []  # (batch_label, error) -- issue #648: one
+    # batch's real failure (a CDS rejection that survives every _download_era5_with_rejected_retry
+    # attempt, or any other exception build_rows_for_country raises) must not take out every
+    # batch/country still queued behind it in this same process -- confirmed live 2026-09-16, one
+    # rejected request for the US Af cluster killed the still-unstarted VM/VQ countries in the
+    # same lane too. Collected rather than just logged so the end-of-run summary (and a nonzero
+    # exit code) make a partial run impossible to mistake for a complete one.
     for country in countries:
         stations = stations_by_country.get(country, [])
         before_active_filter = len(stations)
@@ -1799,12 +1866,23 @@ def main() -> None:
                     if args.ghcn_checkpoint_dir and args.era5_source == "openmeteo" else None
                 )
                 print(f"[{batch_label}] building training rows for {len(chunk_stations)} station(s)...")
-                rows = build_rows_for_country(
-                    batch_label, chunk_stations, start_date, end_date, vuln_bucket, landscan_bucket, landscan_key,
-                    ghcn_max_workers=args.ghcn_max_workers, ghcn_checkpoint_path=ghcn_checkpoint_path,
-                    era5_source=args.era5_source, era5_checkpoint_path=era5_checkpoint_path,
-                    era5_cache_dir=args.era5_cache_dir,
-                )
+                try:
+                    rows = build_rows_for_country(
+                        batch_label, chunk_stations, start_date, end_date, vuln_bucket, landscan_bucket, landscan_key,
+                        ghcn_max_workers=args.ghcn_max_workers, ghcn_checkpoint_path=ghcn_checkpoint_path,
+                        era5_source=args.era5_source, era5_checkpoint_path=era5_checkpoint_path,
+                        era5_cache_dir=args.era5_cache_dir,
+                    )
+                except Exception as exc:  # noqa: BLE001 -- deliberate per-batch isolation
+                    # boundary (issue #648): this batch's failure must have a blast radius of
+                    # itself, not "every batch still queued behind it in this process's country
+                    # list" -- matches manager.py's own established convention of catching
+                    # broadly around an ERA5 call and continuing rather than crashing (see
+                    # _download_and_insert_metrics's era5_error handling).
+                    logger.error("[%s] FAILED, skipping this batch and continuing: %s",
+                                 batch_label, exc, exc_info=True)
+                    failed_batches.append((batch_label, str(exc)))
+                    continue
                 if rows and not args.dry_run:
                     ghcn.upsert_ghcn_training_rows(rows)
                 if all_rows is not None:
@@ -1853,6 +1931,17 @@ def main() -> None:
                 # mere existence means the run finished.
             }, f)
         print(f"--rows-out: wrote {len(all_rows)} row(s) to {args.rows_out}")
+
+    if failed_batches:
+        # Nonzero exit (not just the printed summary) so a caller/orchestrator scripting a
+        # re-run can tell "some batches failed" apart from a clean run by exit code alone,
+        # without having to scrape stdout -- issue #648's own resume story (re-pull only the
+        # countries that actually failed, not the whole request) depends on this being
+        # machine-checkable.
+        print(f"FAILED {len(failed_batches)} batch(es) (see errors above for detail):")
+        for batch_label, err in failed_batches:
+            print(f"  - [{batch_label}] {err}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
