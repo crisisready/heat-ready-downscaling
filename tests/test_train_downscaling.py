@@ -382,6 +382,21 @@ class TestSaveModelArtifacts:
         for c in mock_s3.put_object.call_args_list:
             assert c.kwargs["Bucket"] == "test-bucket"
 
+    def test_candidate_only_writes_outside_the_serving_prefix(self):
+        mock_s3 = MagicMock()
+        with patch("boto3.client", return_value=mock_s3):
+            td.save_model_artifacts(
+                "test-bucket", "ds-2026.07-rf1", {"model_tmax": "X"},
+                {"model_version": "ds-2026.07-rf1"}, candidate_only=True,
+            )
+        assert mock_s3.put_object.call_count == 2
+        keys = [c.kwargs["Key"] for c in mock_s3.put_object.call_args_list]
+        assert "research/candidate-models/ds-2026.07-rf1/model.joblib" in keys
+        assert "research/candidate-models/ds-2026.07-rf1/metadata.json" in keys
+        assert not any(k.startswith("downscaling/") for k in keys)
+        for c in mock_s3.put_object.call_args_list:
+            assert c.kwargs["Bucket"] == "test-bucket"
+
 
 class TestMain:
     def test_no_rows_returns_without_calling_save(self):
@@ -410,3 +425,16 @@ class TestMain:
         assert "conformal_q95_by_zone" in metadata
         assert "conformal_q95_by_zone_tmin" in metadata
         assert metadata["ood_aoa_threshold"] is not None
+        assert mock_save.call_args.kwargs["candidate_only"] is False
+
+    def test_candidate_only_flag_is_passed_through_to_save(self):
+        rows = _make_rows(60, ["US", "FR"], {"US": "Cfa", "FR": "Cfb"})
+        with patch.object(td, "load_training_rows", return_value=rows), \
+             patch.object(td, "_bucket_from_credentials", return_value="test-bucket"), \
+             patch.object(td, "_MIN_FOLD_TRAIN_ROWS", 10), \
+             patch.object(td, "save_model_artifacts") as mock_save, \
+             patch("sys.argv", ["train_downscaling.py", "--model-version", "ds-test-1", "--candidate-only"]):
+            td.main()
+
+        mock_save.assert_called_once()
+        assert mock_save.call_args.kwargs["candidate_only"] is True

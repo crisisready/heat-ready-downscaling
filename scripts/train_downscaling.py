@@ -528,20 +528,39 @@ def _build_aoa_index(model, X: np.ndarray, target: str, seed: int) -> dict:
     }
 
 
-def save_model_artifacts(bucket: str, model_version: str, artifact_bundle: dict, metadata: dict) -> None:
+def save_model_artifacts(
+    bucket: str, model_version: str, artifact_bundle: dict, metadata: dict,
+    candidate_only: bool = False,
+) -> None:
+    """Writes to s3://{bucket}/downscaling/models/{model_version}/ -- the exact prefix
+    src/downscaling.py's load_model()/load_model_metadata() read from, i.e. this is the
+    live-serving publish path. `candidate_only=True` writes the SAME artifacts to a
+    sibling prefix outside `downscaling/` entirely (`research/candidate-models/`) so a
+    retrain's held-out results can be reported, and the fitted model kept around for a
+    later publish, without ever touching the tree any serving code reads -- see
+    docs/pipeline-fable-consult-2026-07-19-downscaling-diagnosis.md's own publish-gate
+    discussion for why a retrain and a publish are deliberately two separate actions."""
     import boto3
     import joblib
 
     buf = io.BytesIO()
     joblib.dump(artifact_bundle, buf)
     client = boto3.client("s3")
-    prefix = f"downscaling/models/{model_version}/"
+    prefix = (
+        f"research/candidate-models/{model_version}/" if candidate_only
+        else f"downscaling/models/{model_version}/"
+    )
     client.put_object(Bucket=bucket, Key=f"{prefix}model.joblib", Body=buf.getvalue())
     client.put_object(
         Bucket=bucket, Key=f"{prefix}metadata.json",
         Body=json.dumps(metadata, indent=2).encode(), ContentType="application/json",
     )
-    print(f"Wrote model artifacts to s3://{bucket}/{prefix}")
+    if candidate_only:
+        print(f"CANDIDATE ONLY -- not published. Wrote to s3://{bucket}/{prefix} "
+              f"(outside downscaling/, nothing live reads this). Re-run without "
+              f"--candidate-only, with Nishant's own live go-ahead, to publish for real.")
+    else:
+        print(f"Wrote model artifacts to s3://{bucket}/{prefix}")
 
 
 def main() -> None:
@@ -549,6 +568,10 @@ def main() -> None:
     parser.add_argument("--model-version", required=True, help="e.g. ds-2026.07-rf1")
     parser.add_argument("--bucket", default=None, help="S3 bucket for model artifacts; defaults to credentials.yaml/VULNERABILITY_DATA_BUCKET")
     parser.add_argument("--profile", default=None, help="Named AWS profile (omit on EC2 with an attached IAM role).")
+    parser.add_argument("--candidate-only", action="store_true",
+                         help="Write model.joblib/metadata.json to research/candidate-models/{version}/ "
+                              "instead of the live-serving downscaling/models/{version}/ prefix. Use this "
+                              "for every retrain until a human has explicitly approved publishing it.")
     args = parser.parse_args()
 
     if args.profile:
@@ -620,7 +643,7 @@ def main() -> None:
         "cv": {"leave_region_out": metadata_cv},
     }
 
-    save_model_artifacts(bucket, args.model_version, artifact_bundle, metadata)
+    save_model_artifacts(bucket, args.model_version, artifact_bundle, metadata, candidate_only=args.candidate_only)
 
 
 if __name__ == "__main__":
