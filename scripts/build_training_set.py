@@ -1166,11 +1166,41 @@ _TIMESERIES_MAX_WORKERS = 6
 # keeps the two in step if the radius ever changes.
 _TIMESERIES_SECONDS_PER_REQUEST_BUDGET = 60.0  # 2x a ~30s observed fetch
 
+# Retry budget for a CDS 'rejected' outcome, shared across a station's WHOLE
+# rescue walk rather than per candidate cell.
+#
+# This is the issue #648 fix, which the gridded path has had since 2026-09-16 as
+# _download_era5_with_rejected_retry and which I failed to carry into this path
+# when I wrote it. The cost of that omission, measured across the corpus
+# relaunch: 49 stations lost outright to a single transient rejection, including
+# six Indonesian ones -- Jakarta's own country. A rejection is transient
+# queue-side congestion, not a terminal error, so not retrying it is exactly
+# the "lean into a faulty system" failure this whole task existed to fix,
+# reintroduced by me in the new code path.
+#
+# Budgeted PER STATION, not per candidate, deliberately: a per-candidate budget
+# would make the worst case 25 candidates x 4 attempts x backoff, which is hours
+# for one station and would blow the wall-clock ceiling below. A shared budget
+# keeps a station's worst case bounded no matter how the rejections land across
+# its rescue walk.
+_TIMESERIES_REJECTED_MAX_RETRIES = 3
+_TIMESERIES_REJECTED_BACKOFF_BASE_S = 20.0
+
 
 def _timeseries_station_timeout_s() -> float:
-    """Per-station wall-clock ceiling, sized for the worst case: the station's
-    own cell plus every rescue candidate."""
-    return _TIMESERIES_SECONDS_PER_REQUEST_BUDGET * (1 + len(_land_rescue_offsets()))
+    """Per-station wall-clock ceiling, sized for the genuine worst case: the
+    station's own cell, plus every rescue candidate, plus the whole shared
+    rejected-retry budget and its backoff sleeps.
+
+    Kept derived rather than a round number for the same reason as before -- an
+    earlier flat 600s silently stopped covering the worst case the moment the
+    rescue walk was added, and the retry budget below would have done it again."""
+    requests = 1 + len(_land_rescue_offsets()) + _TIMESERIES_REJECTED_MAX_RETRIES
+    backoff = sum(
+        _TIMESERIES_REJECTED_BACKOFF_BASE_S * (2 ** attempt)
+        for attempt in range(_TIMESERIES_REJECTED_MAX_RETRIES)
+    )
+    return _TIMESERIES_SECONDS_PER_REQUEST_BUDGET * requests + backoff
 
 # ERA5-Land grid spacing, and how far to search for an unmasked cell when a
 # station's OWN nearest cell is masked (ocean/lake).
@@ -1215,8 +1245,56 @@ def _land_rescue_offsets(radius_cells: int = _TIMESERIES_RESCUE_RADIUS_CELLS) ->
     return sorted(offsets, key=lambda o: (o[0] ** 2 + o[1] ** 2, o))
 
 
+def _download_timeseries_with_rejected_retry(
+    lat: float, lon: float, padded_start: date, padded_end: date,
+    account_index: int, configured_accounts: list[int], retry_budget: list[int],
+) -> str:
+    """era5.download_era5_timeseries, retrying a CDS 'rejected' outcome.
+
+    Mirrors what _download_era5_with_rejected_retry does for the gridded path
+    (issue #648): a 'rejected' job is transient queue-side congestion, not a
+    terminal error, so it is worth retrying with backoff where a real 400/auth
+    failure would not be.
+
+    retry_budget is a single-element list used as a shared mutable counter
+    across one station's entire rescue walk -- see
+    _TIMESERIES_REJECTED_MAX_RETRIES for why the budget is per-station rather
+    than per-candidate-cell.
+
+    Each retry moves to a DIFFERENT account. Rejections were measured to be a
+    per-account queue-allowance signal rather than a global one (2026-09-17:
+    one account rejecting 43% while another succeeded 17 times in the same
+    minutes, including a pair 89 ms apart), so retrying on the account that
+    just rejected is the one choice guaranteed to be wrong."""
+    attempt = 0
+    while True:
+        try_account = configured_accounts[
+            (configured_accounts.index(account_index) + attempt) % len(configured_accounts)
+        ]
+        try:
+            return era5.download_era5_timeseries(
+                lat, lon, padded_start, padded_end,
+                variables=_TRAINING_ERA5_VARIABLES, account_index=try_account,
+            )
+        except Exception as exc:  # noqa: BLE001 -- narrowed immediately below
+            if not _is_cds_rejected_error(exc) or retry_budget[0] <= 0:
+                raise
+            retry_budget[0] -= 1
+            delay = _TIMESERIES_REJECTED_BACKOFF_BASE_S * (2 ** attempt)
+            attempt += 1
+            logger.warning(
+                "[timeseries] CDS rejected the request for (%.4f, %.4f) on account %d -- "
+                "retrying in %.0fs on a different account (%d retr%s left in this station's "
+                "budget)",
+                lat, lon, try_account, delay, retry_budget[0],
+                "y" if retry_budget[0] == 1 else "ies",
+            )
+            time.sleep(delay)
+
+
 def _fetch_station_rows_with_land_rescue(
     station: dict, padded_start: date, padded_end: date, account_index: int,
+    configured_accounts: list[int] | None = None,
 ) -> tuple[list[dict], tuple[float, float] | None, tuple[int, int] | None, str | None]:
     """One station's hourly rows, falling back to the nearest UNMASKED
     neighbouring grid cell when the station's own cell is masked.
@@ -1243,12 +1321,14 @@ def _fetch_station_rows_with_land_rescue(
         for offset in _land_rescue_offsets()
     ]
 
+    accounts = configured_accounts or [account_index]
+    # One shared retry budget for this station's whole walk -- see
+    # _TIMESERIES_REJECTED_MAX_RETRIES.
+    retry_budget = [_TIMESERIES_REJECTED_MAX_RETRIES]
     first_error: Exception | None = None
     for offset, lat, lon in attempts:
-        path = era5.download_era5_timeseries(
-            lat, lon, padded_start, padded_end,
-            variables=_TRAINING_ERA5_VARIABLES, account_index=account_index,
-        )
+        path = _download_timeseries_with_rejected_retry(
+            lat, lon, padded_start, padded_end, account_index, accounts, retry_budget)
         try:
             rows = era5.extract_era5_timeseries_rows(path, station["station_id"])
         except ValueError as exc:
@@ -1378,7 +1458,8 @@ def fetch_era5_land_for_stations_via_timeseries(
         nc_path = None
         try:
             rows, grid_point, rescue_offset, nc_path = _fetch_station_rows_with_land_rescue(
-                station, padded_start, padded_end, account_index)
+                station, padded_start, padded_end, account_index,
+                configured_accounts=configured_accounts)
             one_tz = {sid: tz_map.get(sid, "UTC")}
             daily = heat_calcs.aggregate_hourly_to_daily(rows, one_tz)
             wind_by_date = heat_calcs.daily_mean_nighttime_wind(rows, one_tz).get(sid, {})
