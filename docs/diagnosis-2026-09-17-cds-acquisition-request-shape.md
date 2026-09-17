@@ -450,6 +450,49 @@ problem twice in two days.
 **Net effect on the headline number: the achievable reduction is 8x, all of it from the clustering
 in 5.1, and 18x was never available.**
 
+## 6. The three outcomes a station can have, and why they must not be merged
+
+Reporting a single "permanent gaps" list during the 2026-09-17 relaunch silently
+mixed causes with different implications. A station that ever hit a land-mask
+refusal ends in exactly one of three states, and they want separating:
+
+| outcome | meaning | recoverable? |
+|---|---|---|
+| **recovered** | rows in `ghcn_training`, either from its own cell or a rescued neighbour | n/a |
+| **ERA5 rescued, no GHCN observations** | the grid value was obtained fine, but the station reported no daily Tmax/Tmin for the window, so no row is constructible (a row needs `station_tmax_c` to form `delta_tmax_c`) | **No** - upstream NOAA, nothing in this pipeline touches it |
+| **true land-mask gap** | no unmasked ERA5-Land cell anywhere in the rescue radius | **No** - structural, see below |
+
+Conflating the middle row with the bottom one attributes a NOAA data gap to the
+ERA5-Land grid, which is wrong in the one place someone would later reason from
+it. `VMW00041024` is the worked example: rescued successfully, still absent,
+because it has no 2023 observations.
+
+### 6.1 The structural limit, stated plainly
+
+A true land-mask gap is not a pipeline defect and no acquisition change fixes
+it. ERA5-Land is land-only at 0.1 degrees, so a station whose surroundings are
+all water within the rescue radius has no cell to borrow from - and the gridded
+`--era5-source cds` path cannot help either, because `extract_era5_means`'
+own rescue searches the same masked grid.
+
+This bites small islands and narrow coastal spits specifically, which is exactly
+the Af/Am population. It bounds what the downscaling model can ever be validated
+against for somewhere like the US Virgin Islands, independent of anything here.
+
+### 6.2 Rescued stations carry a substituted cell, up to 31.4 km away
+
+Worth knowing before validation numbers are interpreted rather than after. A
+rescued station's `grid_daily_value_c` - the regression **target** - comes from a
+neighbouring cell, and `elevation_rel_to_gridcell_m` is computed against that
+cell. The radius-2 box has five distinct distances: 11.1, 15.7, 22.2, 24.8 and
+31.4 km (the corner). Measured across the relaunch, 65 rescue events over 38
+stations: 11.1 km x51, 15.7 km x4, 22.2 km x8, 31.4 km x2 - so 85% stay within
+one cell, but the tail reaches 31 km.
+
+Every rescue logs its substituted cell, offset and distance at WARNING, so this
+is auditable per station. If residuals look odd for coastal stations, that log
+is the first place to look.
+
 ---
 
 ## Appendix: corrections to the first version of this document
@@ -482,3 +525,13 @@ A third correction, after the first two above:
   change whose whole value depends on the exact value of such a limit must probe it first. The
   headline reduction moved 30-80x → 18x → **8x** across these three corrections; only the last is
   measured end to end.
+
+A fourth correction:
+
+- **The rescue radius was documented as "~22 km" and is really 31.4 km.** 22.2 km
+  is only the axis distance for a 2-cell offset; the 5x5 box's corner is
+  `sqrt(2^2+2^2) x 11.1`. Understated by 40% in the code comment, the PR body
+  and every verbal report. Compounding it, my first attempt at the test pinning
+  this asserted four distances and missed the knight-move offsets at 24.8 km -
+  there are five. Both now computed from the offsets actually tried rather than
+  written from memory, which is the only version of this that cannot drift.

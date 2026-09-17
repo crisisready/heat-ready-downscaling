@@ -1221,9 +1221,30 @@ def _timeseries_station_timeout_s() -> float:
 #
 # Verified live on a refused station (USW00021504, Kona coast, Hawaii): its own
 # cell 19.70/-155.00 returned 0 usable hours, and BOTH 19.60/-155.10 and
-# 19.60/-155.00 returned 48/48. Radius 2 gives 24 candidate cells, ~22 km at
-# this latitude, which is the same order as the ERA5-Land cell size the model
-# already treats as one grid value.
+# 19.60/-155.00 returned 48/48.
+#
+# HOW FAR THIS CAN REACH -- corrected 2026-09-17, the first version of this
+# comment said "~22 km" and understated it by 40%. Radius 2 gives 24 candidates
+# over a 5x5 box, so the reachable distances are NOT a single number:
+#     (1,0)  1 cell, edge        11.1 km
+#     (1,1)  1 cell, diagonal    15.7 km
+#     (2,0)  2 cells, edge       22.2 km
+#     (2,1)  knight move         24.8 km
+#     (2,2)  2 cells, diagonal   31.4 km   <- the true maximum, the box CORNER
+# FIVE distinct distances, not four -- (+/-1,+/-2) and (+/-2,+/-1) are easy to
+# forget, and I did forget them once while writing the test that pins this.
+# 22.2 km is merely the axis distance for a 2-cell offset. Measured over the
+# 2026-09-17 corpus relaunch, 65 rescue events across 38 stations landed at:
+# 11.1 km x51, 15.7 km x4, 22.2 km x8, 31.4 km x2. So 85% stay within one cell,
+# but the tail is real and reaches 31 km.
+#
+# WHY THAT MATTERS TO A READER OF THE CORPUS, not just to this function: a
+# rescued station's grid_daily_value_c -- the model's regression TARGET -- comes
+# from the substituted cell, and elevation_rel_to_gridcell_m is computed against
+# it. At 31 km that is a materially different place, so anyone interpreting
+# residuals for coastal stations needs the real bound, not the understated one.
+# Every rescue logs its own substituted cell, offset and distance at WARNING
+# precisely so this is auditable per station rather than inferred from a radius.
 _ERA5_LAND_GRID_DEG = 0.1
 _TIMESERIES_RESCUE_RADIUS_CELLS = 2
 
