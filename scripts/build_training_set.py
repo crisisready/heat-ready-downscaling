@@ -1156,12 +1156,119 @@ _TIMESERIES_MAX_WORKERS = 6
 # alive processes, CLOSE-WAIT sockets piled up against CDS, no log line, no
 # crash, nothing ever firing again.
 #
-# A normal station fetch is ~30s, so 10 minutes is ~20x headroom. On expiry the
-# station is recorded as failed and the batch continues. The worker thread is
-# NOT killable in Python and may linger -- that is accepted deliberately: a
-# leaked thread on a process that finishes and reports is strictly better than
-# a batch that hangs forever and reports nothing.
-_TIMESERIES_STATION_TIMEOUT_S = 600.0
+# DERIVED from the rescue's probe count, not a round number (code review
+# finding, real): a station whose own cell is masked walks outward through every
+# candidate offset before it correctly gives up, so its worst case is
+# 1 + len(_land_rescue_offsets()) = 25 requests, not one. At a ~30s normal fetch
+# that is ~750s, which a flat 600s ceiling would have cut short -- turning a
+# genuinely open-ocean station (a correct, expected outcome) into a spurious
+# "batch budget exhausted" for every station sharing its batch. Deriving it
+# keeps the two in step if the radius ever changes.
+_TIMESERIES_SECONDS_PER_REQUEST_BUDGET = 60.0  # 2x a ~30s observed fetch
+
+
+def _timeseries_station_timeout_s() -> float:
+    """Per-station wall-clock ceiling, sized for the worst case: the station's
+    own cell plus every rescue candidate."""
+    return _TIMESERIES_SECONDS_PER_REQUEST_BUDGET * (1 + len(_land_rescue_offsets()))
+
+# ERA5-Land grid spacing, and how far to search for an unmasked cell when a
+# station's OWN nearest cell is masked (ocean/lake).
+#
+# era5.TIMESERIES_ERA5_LAND_DATASET serves the nearest grid point only, with no
+# rescue -- unlike era5.extract_era5_means, whose documented behaviour is "a
+# centroid whose nearest cell is masked (coastal, small-island, or harbour
+# polygons) is rescued by substituting the nearest unmasked cell instead of
+# silently returning NaN". This restores that same rescue for the timeseries
+# path by re-requesting at neighbouring grid points, nearest first.
+#
+# It matters far more than "corner case" suggests: the Af/Am corpus is tropical
+# coastal and small-island stations, and ~18% of them were refused outright for
+# sitting on an ocean cell (measured 2026-09-17 across the corpus relaunch --
+# 36 of ~199). The alternative was a --era5-source cds pass for every one of
+# them at 14 CDS segments per bbox and ~33 min per segment, i.e. tens of hours;
+# a rescue probe is one more ~30s request.
+#
+# Verified live on a refused station (USW00021504, Kona coast, Hawaii): its own
+# cell 19.70/-155.00 returned 0 usable hours, and BOTH 19.60/-155.10 and
+# 19.60/-155.00 returned 48/48. Radius 2 gives 24 candidate cells, ~22 km at
+# this latitude, which is the same order as the ERA5-Land cell size the model
+# already treats as one grid value.
+_ERA5_LAND_GRID_DEG = 0.1
+_TIMESERIES_RESCUE_RADIUS_CELLS = 2
+
+
+def _land_rescue_offsets(radius_cells: int = _TIMESERIES_RESCUE_RADIUS_CELLS) -> list[tuple[int, int]]:
+    """Neighbouring grid-cell offsets to try, NEAREST FIRST, excluding (0, 0).
+
+    Ordered by true Euclidean distance so the substituted cell is the closest
+    land available, which is what makes it a defensible stand-in for the
+    station's own cell rather than an arbitrary nearby one. Deterministic:
+    ties break on the offset tuple, so two runs pick the same cell and a
+    re-run cannot silently change a station's provenance."""
+    offsets = [
+        (dlat, dlon)
+        for dlat in range(-radius_cells, radius_cells + 1)
+        for dlon in range(-radius_cells, radius_cells + 1)
+        if (dlat, dlon) != (0, 0)
+    ]
+    return sorted(offsets, key=lambda o: (o[0] ** 2 + o[1] ** 2, o))
+
+
+def _fetch_station_rows_with_land_rescue(
+    station: dict, padded_start: date, padded_end: date, account_index: int,
+) -> tuple[list[dict], tuple[float, float] | None, tuple[int, int] | None, str | None]:
+    """One station's hourly rows, falling back to the nearest UNMASKED
+    neighbouring grid cell when the station's own cell is masked.
+
+    Returns (rows, grid_point, rescue_offset, path_to_delete). rescue_offset is
+    None when the station's own cell served it, and the (dlat, dlon) cell
+    offset otherwise -- the caller logs that, because grid values sourced from
+    a neighbouring cell are provenance worth seeing.
+
+    Restores for the timeseries path the same rescue era5.extract_era5_means
+    already performs for the gridded path (see _TIMESERIES_RESCUE_RADIUS_CELLS
+    for the measurement behind the radius). Re-raises the ORIGINAL land-mask
+    error if no candidate within the radius has data, so a genuinely
+    open-ocean station still fails loudly rather than reaching for an
+    ever-more-distant cell.
+    """
+    attempts: list[tuple[tuple[int, int] | None, float, float]] = [
+        (None, station["lat"], station["lon"])
+    ]
+    attempts += [
+        (offset,
+         station["lat"] + offset[0] * _ERA5_LAND_GRID_DEG,
+         station["lon"] + offset[1] * _ERA5_LAND_GRID_DEG)
+        for offset in _land_rescue_offsets()
+    ]
+
+    first_error: Exception | None = None
+    for offset, lat, lon in attempts:
+        path = era5.download_era5_timeseries(
+            lat, lon, padded_start, padded_end,
+            variables=_TRAINING_ERA5_VARIABLES, account_index=account_index,
+        )
+        try:
+            rows = era5.extract_era5_timeseries_rows(path, station["station_id"])
+        except ValueError as exc:
+            # Only a masked/empty point is worth walking outward from. Anything
+            # else (inconsistent grid points across variable families,
+            # conflicting duplicate timestamps) is a data-integrity refusal
+            # that a different cell would not fix, so it propagates.
+            if "no usable hours" not in str(exc):
+                with contextlib.suppress(OSError):
+                    os.unlink(path)
+                raise
+            if first_error is None:
+                first_error = exc
+            with contextlib.suppress(OSError):
+                os.unlink(path)
+            continue
+        return rows, era5.timeseries_grid_point(path), offset, path
+
+    assert first_error is not None  # the loop only exits here via a land-mask miss
+    raise first_error
 
 
 def fetch_era5_land_for_stations_via_timeseries(
@@ -1199,12 +1306,18 @@ def fetch_era5_land_for_stations_via_timeseries(
     without pretending the two access patterns are the same thing.
 
     Per-station failures are isolated and reported, never fatal to the batch.
-    The land-mask case is the one that matters: this dataset serves the nearest
-    grid point ONLY, with no masked-cell rescue, so a coastal or small-island
-    station can come back with no usable hours. era5.
-    extract_era5_timeseries_rows raises on that, this function records it as a
-    failed station, and the caller is left with a real gap it can see rather
-    than NULL grid values that look like data.
+
+    The land-mask case is the one that matters. This dataset serves the nearest
+    grid point ONLY, so a coastal or small-island station's own cell is often
+    ocean -- ~18% of the Af/Am corpus, measured 2026-09-17.
+    _fetch_station_rows_with_land_rescue handles that by re-requesting at the
+    nearest UNMASKED neighbouring cell, the same substitution
+    era5.extract_era5_means performs for the gridded path, and logs the
+    substituted cell at WARNING because it is real provenance.
+
+    A station with no land anywhere inside the rescue radius still fails, and
+    is then ABSENT from the returned dicts -- a gap the caller can see -- rather
+    than present with NULL grid values that look like data.
     """
     if max_workers is None:
         max_workers = _TIMESERIES_MAX_WORKERS
@@ -1264,12 +1377,8 @@ def fetch_era5_land_for_stations_via_timeseries(
         account_index = configured_accounts[index % len(configured_accounts)]
         nc_path = None
         try:
-            nc_path = era5.download_era5_timeseries(
-                station["lat"], station["lon"], padded_start, padded_end,
-                variables=_TRAINING_ERA5_VARIABLES, account_index=account_index,
-            )
-            rows = era5.extract_era5_timeseries_rows(nc_path, sid)
-            grid_point = era5.timeseries_grid_point(nc_path)
+            rows, grid_point, rescue_offset, nc_path = _fetch_station_rows_with_land_rescue(
+                station, padded_start, padded_end, account_index)
             one_tz = {sid: tz_map.get(sid, "UTC")}
             daily = heat_calcs.aggregate_hourly_to_daily(rows, one_tz)
             wind_by_date = heat_calcs.daily_mean_nighttime_wind(rows, one_tz).get(sid, {})
@@ -1291,8 +1400,20 @@ def fetch_era5_land_for_stations_via_timeseries(
             # new entries rather than a stale snapshot (verified in
             # api_call_manager.JsonlCheckpointStore.persist).
             store.persist(_key(station), payload)
-            logger.info("[timeseries] %s: %d complete day(s) from grid point %s (account %d)",
-                        sid, len(payload["daily"]), grid_point, account_index)
+            if rescue_offset is None:
+                logger.info("[timeseries] %s: %d complete day(s) from grid point %s (account %d)",
+                            sid, len(payload["daily"]), grid_point, account_index)
+            else:
+                # Loud on purpose: this station's grid values come from a cell
+                # that is NOT its own nearest one, which is real provenance a
+                # reader of the corpus should be able to see in the logs.
+                logger.warning(
+                    "[timeseries] %s: own cell was masked -- RESCUED from neighbouring grid "
+                    "point %s at offset %s (%.1f km), %d complete day(s) (account %d)",
+                    sid, grid_point, rescue_offset,
+                    _ERA5_LAND_GRID_DEG * 111.0 * math.hypot(*rescue_offset),
+                    len(payload["daily"]), account_index,
+                )
         except Exception as exc:  # noqa: BLE001 -- per-station isolation is the point
             with lock:
                 failures.append((sid, f"{type(exc).__name__}: {exc}"))
@@ -1344,7 +1465,7 @@ def fetch_era5_land_for_stations_via_timeseries(
             threading.Thread(target=_worker, daemon=True).start()
 
         # One deadline for the whole set, derived from the per-station ceiling.
-        budget = _TIMESERIES_STATION_TIMEOUT_S * (
+        budget = _timeseries_station_timeout_s() * (
             1 + (len(pending) + max_workers - 1) // max_workers)
         end_by = time.monotonic() + budget
         finished = 0
@@ -1362,7 +1483,7 @@ def fetch_era5_land_for_stations_via_timeseries(
             logger.error(
                 "[timeseries] batch budget of %.0fs exhausted with %d of %d station-fetches "
                 "unfinished. Continuing -- a bounded gap we can see beats a silent hang "
-                "(see _TIMESERIES_STATION_TIMEOUT_S). Abandoned workers are daemon threads "
+                "(see _timeseries_station_timeout_s). Abandoned workers are daemon threads "
                 "and will not block process exit.",
                 budget, len(pending) - finished, len(pending),
             )

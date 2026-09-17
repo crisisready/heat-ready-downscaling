@@ -1631,6 +1631,139 @@ class TestEra5DownloadLockAccountRotation:
                     assert account_index in (0, 2)
 
 
+class TestTimeseriesLandMaskRescue:
+    """era5.TIMESERIES_ERA5_LAND_DATASET serves the nearest grid point only,
+    with no masked-cell rescue -- unlike extract_era5_means, which substitutes
+    the nearest UNMASKED cell. This restores that for the timeseries path.
+
+    Not a corner case: the Af/Am corpus is tropical coastal and small-island
+    stations, and ~18% were refused outright for sitting on an ocean cell
+    (36 of ~199, measured live 2026-09-17). Verified on a real refused station
+    (USW00021504, Kona coast): own cell 19.70/-155.00 gave 0 usable hours,
+    neighbours 19.60/-155.10 and 19.60/-155.00 gave 48/48."""
+
+    def test_offsets_are_nearest_first_and_exclude_the_station_itself(self):
+        offsets = bts._land_rescue_offsets()
+        assert (0, 0) not in offsets
+        dists = [o[0] ** 2 + o[1] ** 2 for o in offsets]
+        assert dists == sorted(dists), "candidates must be ordered nearest-first"
+        # the 4 edge-adjacent cells come before the 4 diagonals
+        assert set(offsets[:4]) == {(-1, 0), (1, 0), (0, -1), (0, 1)}
+        assert len(offsets) == 24  # 5x5 block minus the centre
+
+    def test_station_timeout_covers_the_full_rescue_walk(self):
+        """Code review finding, real: the per-station ceiling was a flat 600s
+        while a masked station's worst case is its own cell PLUS every rescue
+        candidate -- 25 requests, ~750s at a ~30s fetch. A flat 600s would cut
+        a genuinely open-ocean station short and turn a correct, expected
+        outcome into a spurious 'batch budget exhausted' for every station
+        sharing its batch."""
+        worst_case_requests = 1 + len(bts._land_rescue_offsets())
+        assert worst_case_requests == 25
+        timeout = bts._timeseries_station_timeout_s()
+        assert timeout >= worst_case_requests * 30.0, (
+            f"{timeout}s cannot cover {worst_case_requests} requests at ~30s each"
+        )
+
+    def test_offsets_are_deterministic(self):
+        """A re-run must pick the SAME rescue cell, or a station's provenance
+        changes silently between runs."""
+        assert bts._land_rescue_offsets() == bts._land_rescue_offsets()
+
+    def _patch(self, land_at, capture):
+        """land_at: set of (dlat, dlon) offsets that have data; everything else
+        is masked. (0, 0) means the station's own cell."""
+        station_lat, station_lon = 19.719, -155.049
+
+        def fake_download(lat, lon, s, e, variables=None, account_index=0):
+            dlat = round((lat - station_lat) / bts._ERA5_LAND_GRID_DEG)
+            dlon = round((lon - station_lon) / bts._ERA5_LAND_GRID_DEG)
+            capture.setdefault("tried", []).append((dlat, dlon))
+            path = f"/tmp/_rescue_{dlat}_{dlon}.zip"
+            open(path, "w").close()
+            return path
+
+        def fake_extract(path, name):
+            dlat, dlon = (int(x) for x in path[len("/tmp/_rescue_"):-4].split("_"))
+            if (dlat, dlon) not in land_at:
+                raise ValueError(
+                    f"ERA5-Land timeseries returned no usable hours for {name!r} "
+                    f"(grid point(s) [('x','y')]). nearest grid point ONLY")
+            return [
+                {"name": name, "datetime": f"2023-03-1{d}T{h:02d}:00:00",
+                 "t2m": 25.0, "d2m": 20.0, "sp": 101325.0, "wind_ms": 3.0}
+                for d in range(1, 6) for h in range(24)
+            ]
+
+        return patch.object(bts.era5, "download_era5_timeseries", side_effect=fake_download), \
+            patch.object(bts.era5, "extract_era5_timeseries_rows", side_effect=fake_extract), \
+            patch.object(bts.era5, "timeseries_grid_point", return_value=(19.6, -155.1)), \
+            patch("os.unlink")
+
+    def test_own_cell_is_used_when_it_has_data(self):
+        cap = {}
+        a, b, c, d = self._patch(land_at={(0, 0)}, capture=cap)
+        with a, b, c, d:
+            rows, gp, offset, path = bts._fetch_station_rows_with_land_rescue(
+                {"station_id": "S", "lat": 19.719, "lon": -155.049},
+                date(2023, 3, 9), date(2023, 3, 13), 0)
+        assert offset is None, "no rescue should be reported when the own cell works"
+        assert cap["tried"] == [(0, 0)], "must not probe neighbours unnecessarily"
+        assert rows
+
+    def test_masked_own_cell_is_rescued_from_the_nearest_land_neighbour(self):
+        """The real case, modelled on USW00021504."""
+        cap = {}
+        a, b, c, d = self._patch(land_at={(-1, -1), (-1, 0)}, capture=cap)
+        with a, b, c, d:
+            rows, gp, offset, path = bts._fetch_station_rows_with_land_rescue(
+                {"station_id": "USW00021504", "lat": 19.719, "lon": -155.049},
+                date(2023, 3, 9), date(2023, 3, 13), 0)
+        assert rows, "the station must be rescued, not lost"
+        # (-1, 0) is edge-adjacent (distance 1) and must win over the (-1,-1) diagonal
+        assert offset == (-1, 0), f"expected the nearest land cell, got {offset}"
+        assert cap["tried"][0] == (0, 0), "must try the station's own cell first"
+
+    def test_genuinely_open_ocean_station_still_fails_loudly(self):
+        """A station with no land within the radius must still refuse, rather
+        than reaching for an ever-more-distant cell -- the guard exists so a
+        bad grid value never silently enters the corpus."""
+        cap = {}
+        a, b, c, d = self._patch(land_at=set(), capture=cap)
+        with a, b, c, d:
+            with pytest.raises(ValueError, match="no usable hours"):
+                bts._fetch_station_rows_with_land_rescue(
+                    {"station_id": "OCEAN1", "lat": 19.719, "lon": -155.049},
+                    date(2023, 3, 9), date(2023, 3, 13), 0)
+        assert len(cap["tried"]) == 25, "should have exhausted own cell + 24 candidates"
+
+    def test_a_non_landmask_refusal_is_not_walked_outward(self):
+        """Inconsistent grid points across variable families, or conflicting
+        duplicate timestamps, are data-integrity refusals that a different cell
+        would not fix. They must propagate immediately, not trigger 24 more
+        requests."""
+        cap = {}
+
+        def fake_download(lat, lon, s, e, variables=None, account_index=0):
+            cap.setdefault("n", 0)
+            cap["n"] += 1
+            path = "/tmp/_rescue_0_0.zip"
+            open(path, "w").close()
+            return path
+
+        def fake_extract(path, name):
+            raise ValueError("ERA5-Land timeseries returned INCONSISTENT grid points for 'S'")
+
+        with patch.object(bts.era5, "download_era5_timeseries", side_effect=fake_download), \
+             patch.object(bts.era5, "extract_era5_timeseries_rows", side_effect=fake_extract), \
+             patch("os.unlink"):
+            with pytest.raises(ValueError, match="INCONSISTENT grid points"):
+                bts._fetch_station_rows_with_land_rescue(
+                    {"station_id": "S", "lat": 19.719, "lon": -155.049},
+                    date(2023, 3, 9), date(2023, 3, 13), 0)
+        assert cap["n"] == 1, "must not probe neighbours for a non-land-mask refusal"
+
+
 class TestFetchEra5LandForStationsViaTimeseries:
     """The --era5-source timeseries path. Validated live 2026-09-17 against an
     already-ingested station-year: max|diff| 0.000078 C on daily tmax and
