@@ -371,9 +371,9 @@ class TestResolveEra5Range:
         monkeypatch.setattr(bts, "_era5_download_lock", fake_lock)
         with patch.object(bts.era5, "download_era5", return_value="/tmp/seg.nc") as mock_dl, \
              patch.object(bts.era5, "_merge_era5_segments", return_value="/tmp/merged.nc"):
-            nc_path, owns = bts._resolve_era5_range(
+            nc_path, owns, used_cache = bts._resolve_era5_range(
                 "-10,40,10,50", date(2016, 1, 30), date(2016, 4, 2), "batch", cache_dir=None)
-        assert (nc_path, owns) == ("/tmp/merged.nc", True)
+        assert (nc_path, owns, used_cache) == ("/tmp/merged.nc", True, False)
         assert mock_dl.call_count == 4
         called_ranges = [(c.args[1], c.args[2]) for c in mock_dl.call_args_list]
         assert called_ranges == [
@@ -397,9 +397,9 @@ class TestResolveEra5Range:
                            side_effect=["/tmp/jan.nc", rejected, "/tmp/feb.nc"]) as mock_dl, \
              patch.object(bts.era5, "_merge_era5_segments", return_value="/tmp/merged.nc"), \
              patch.object(bts.time, "sleep"):
-            nc_path, owns = bts._resolve_era5_range(
+            nc_path, owns, used_cache = bts._resolve_era5_range(
                 "-10,40,10,50", date(2016, 1, 30), date(2016, 2, 5), "batch", cache_dir=None)
-        assert (nc_path, owns) == ("/tmp/merged.nc", True)
+        assert (nc_path, owns, used_cache) == ("/tmp/merged.nc", True, False)
         # January (already succeeded) called exactly once; February retried exactly once
         # after its rejection -- never re-submitted January to get there.
         assert mock_dl.call_count == 3
@@ -435,6 +435,36 @@ class TestResolveEra5Range:
         # ...but released again after every single call, not just after the last one --
         # a snapshot mid-loop would find it free, unlike the old whole-range hold.
         assert held_during_each_call == [False, False, False]
+
+    def test_used_cache_is_true_when_any_segment_is_a_cache_hit(self, tmp_path):
+        """Round-1 /code-review finding, real: a multi-segment merge always returns a fresh
+        temp file (owns_nc_path=True), even when every constituent segment was a pure cache
+        hit -- fetch_era5_land_for_stations used to gate its corrupted-cache retry on
+        owns_nc_path alone, which this made permanently dead for any multi-month range (the
+        exact case this whole module exists for). used_cache must reflect whether ANY segment
+        actually came from cache, independent of owns_nc_path."""
+        cache_dir = str(tmp_path)
+        # Pre-seed a real cache hit for the first (January) segment only.
+        jan_cache_path = bts._era5_segment_cache_path(
+            cache_dir, "batch", date(2016, 1, 30), date(2016, 1, 31), "-10,40,10,50",
+            "reanalysis-era5-land", bts._TRAINING_ERA5_VARIABLES)
+        with open(jan_cache_path, "w") as f:
+            f.write("fake cached netcdf bytes")
+
+        @contextlib.contextmanager
+        def fake_lock():
+            yield 0
+
+        with patch.object(bts, "_era5_download_lock", fake_lock), \
+             patch.object(bts.era5, "download_era5", return_value="/tmp/feb.nc") as mock_dl, \
+             patch.object(bts.era5, "_merge_era5_segments", return_value="/tmp/merged.nc"):
+            nc_path, owns, used_cache = bts._resolve_era5_range(
+                "-10,40,10,50", date(2016, 1, 30), date(2016, 2, 5), "batch", cache_dir=cache_dir)
+        assert (nc_path, owns) == ("/tmp/merged.nc", True)
+        assert used_cache is True
+        # February (no cache entry) still had to be downloaded; January didn't.
+        mock_dl.assert_called_once()
+        assert mock_dl.call_args.args[1] == date(2016, 2, 1)
 
 
 class TestFetchEra5LandForStationsCache:

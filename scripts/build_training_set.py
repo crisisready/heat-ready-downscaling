@@ -540,9 +540,18 @@ def _resolve_era5_segment(cache_path, bbox, padded_start, padded_end, batch_labe
 
 
 def _resolve_era5_range(bbox, padded_start, padded_end, batch_label, cache_dir, force_fresh=False):
-    """Returns (nc_path, owns_nc_path) for the FULL padded_start..padded_end range, same
-    contract as _resolve_era5_segment, but resolves it one calendar-month sub-range at a
-    time (era5._split_by_calendar_month -- the exact same split era5.download_era5 would do
+    """Returns (nc_path, owns_nc_path, used_cache) for the FULL padded_start..padded_end
+    range. owns_nc_path matches _resolve_era5_segment's own meaning (True -> caller must
+    os.unlink(nc_path) when done); used_cache is a SEPARATE signal -- True if ANY constituent
+    sub-segment was a cache hit, even though a multi-segment result's nc_path is always a
+    freshly-merged temp file (owns_nc_path=True) regardless (round-1 review finding, real:
+    conflating the two let a corrupted CACHED segment that merges fine but fails
+    era5.extract_era5_means later look identical to a genuinely bad FRESH download to this
+    function's caller, which used owns_nc_path alone to decide whether a parse failure is a
+    recoverable caching artifact -- since a multi-segment merge is always "owned", that
+    caller's retry-once-on-cache-corruption path was silently dead for every multi-month
+    range, the exact case this function exists for). Resolves the range one calendar-month
+    sub-range at a time (era5._split_by_calendar_month -- the exact same split era5.download_era5 would do
     internally for a multi-month range, so this changes zero request boundaries/counts, not
     the correctness-driven cartesian-date-field fix _ERA5_CHUNK_DAYS=400's own comment
     documents) and merges the results, instead of one _resolve_era5_segment call covering
@@ -585,8 +594,9 @@ def _resolve_era5_range(bbox, padded_start, padded_end, batch_label, cache_dir, 
 
     if len(segments) == 1:
         seg_start, seg_end = segments[0]
-        return _resolve_era5_segment(_cache_path_for(seg_start, seg_end), bbox, seg_start, seg_end,
-                                      batch_label, cache_dir)
+        nc_path, owns_nc_path = _resolve_era5_segment(
+            _cache_path_for(seg_start, seg_end), bbox, seg_start, seg_end, batch_label, cache_dir)
+        return nc_path, owns_nc_path, not owns_nc_path
 
     seg_paths = []
     try:
@@ -615,12 +625,13 @@ def _resolve_era5_range(bbox, padded_start, padded_end, batch_label, cache_dir, 
             seg_paths = []
             return _resolve_era5_range(bbox, padded_start, padded_end, batch_label, cache_dir,
                                         force_fresh=True)
+        used_cache = any(not owns for _, owns in seg_paths)
     finally:
         for p, owns in seg_paths:
             if owns:
                 with contextlib.suppress(OSError):
                     os.unlink(p)
-    return merged_path, True
+    return merged_path, True, used_cache
 
 
 def _persist_era5_cache_entry(nc_path, cache_path, cache_dir, batch_label, padded_start, padded_end):
@@ -733,12 +744,12 @@ def fetch_era5_land_for_stations(
         padded_start = chunk_start - timedelta(days=2)
         padded_end = chunk_end + timedelta(days=2)
 
-        nc_path, owns_nc_path = _resolve_era5_range(bbox, padded_start, padded_end, batch_label, cache_dir)
+        nc_path, owns_nc_path, used_cache = _resolve_era5_range(bbox, padded_start, padded_end, batch_label, cache_dir)
         try:
             try:
                 hourly = era5.extract_era5_means(nc_path, geojson_obj)
             except Exception as exc:
-                if owns_nc_path:
+                if not used_cache:
                     raise
                 # Round-2 review finding, real: a cache hit used to be trusted purely on
                 # os.path.exists with no integrity check -- a corrupted/truncated cache entry
@@ -748,10 +759,15 @@ def fetch_era5_land_for_stations(
                 # strictly worse than pre-PR behavior (always a fresh download). Delete the bad
                 # entry/entries and retry ONCE as a genuine fresh download; a second failure is
                 # a real error (a genuinely bad CDS response, a real extract_era5_means bug),
-                # not a caching artifact, and propagates normally.
+                # not a caching artifact, and propagates normally. Gated on used_cache, NOT
+                # owns_nc_path (round-1 review finding, real: a multi-segment merge always
+                # produces a fresh temp file -- owns_nc_path=True -- even when every
+                # constituent segment was a cache hit, which silently made this whole retry
+                # path dead code for any multi-month range; used_cache tracks the thing that
+                # actually matters, whether a cached segment could be the culprit).
                 logger.warning("[%s] cached ERA5 range %s..%s failed to parse (%s) -- deleting "
                                 "and re-downloading", batch_label, padded_start, padded_end, exc)
-                nc_path, owns_nc_path = _resolve_era5_range(
+                nc_path, owns_nc_path, used_cache = _resolve_era5_range(
                     bbox, padded_start, padded_end, batch_label, cache_dir, force_fresh=True)
                 hourly = era5.extract_era5_means(nc_path, geojson_obj)
         finally:
