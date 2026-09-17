@@ -256,23 +256,32 @@ def _era5_download_lock(deprioritize_account_index: int | None = None):
     # created the imbalance. Deliberately not round-robin via a counter:
     # concurrent processes are independent and each would start its own counter
     # at 0, reproducing the same pile-up on account 0.
-    configured = list(configured)
-    random.shuffle(configured)
-
-    # On a retry after a CDS 'rejected', the caller passes the account that just
-    # rejected. A rejection is now known to be a per-account queue-allowance
-    # signal rather than a global one, so retrying on the SAME account is the
-    # one choice guaranteed to be wrong. Moved to the back rather than excluded:
-    # it must stay reachable, or a single-account deployment (ERA5_SECRET_ARN_2
-    # unset) would have no slot left to wait on and could never make progress.
-    if deprioritize_account_index is not None and len(configured) > 1:
-        configured.sort(key=lambda entry: entry[1] == deprioritize_account_index)
+    def _scan_order():
+        """A fresh preference order for one scan pass. Re-derived per pass, not
+        computed once outside the retry loop: under sustained contention a
+        caller can sit in the re-scan loop for many passes, and reusing one
+        fixed order would have it race the same peer for the same slot every
+        second. Re-shuffling 2-3 entries per second is free next to the
+        multi-minute CDS queue the caller is waiting on anyway."""
+        order = list(configured)
+        random.shuffle(order)
+        # On a retry after a CDS 'rejected', the caller passes the account that
+        # just rejected. A rejection is now known to be a per-account
+        # queue-allowance signal rather than a global one, so retrying on the
+        # SAME account is the one choice guaranteed to be wrong. Moved to the
+        # back rather than excluded: it must stay reachable, or a
+        # single-account deployment (ERA5_SECRET_ARN_2 unset) would have no
+        # slot left to wait on and could never make progress. list.sort is
+        # stable, so the shuffle survives among the others.
+        if deprioritize_account_index is not None and len(order) > 1:
+            order.sort(key=lambda entry: entry[1] == deprioritize_account_index)
+        return order
 
     fh = None
     acquired_account_index = None
     try:
         while fh is None:
-            for path, account_index in configured:
+            for path, account_index in _scan_order():
                 candidate = open(path, "w")
                 try:
                     fcntl.flock(candidate, fcntl.LOCK_EX | fcntl.LOCK_NB)
