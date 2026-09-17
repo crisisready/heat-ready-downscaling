@@ -360,9 +360,17 @@ clustered than that guess assumed:
 | After + segment widening (5.2) | 2 clusters | 2 x 6 = **12** |
 
 The two clusters are the natural geography: 268 stations in S. Florida
-(lat 25.32..27.19, lon -80.82..-80.03, 570 cells) and 121 on Hawaii's Big
-Island (lat 19.18..20.14, lon -155.58..-154.80, 399 cells). Both sit far under
+(lat 25.32..27.19, lon -80.82..-80.03, 600 cells) and 121 on Hawaii's Big
+Island (lat 19.18..20.14, lon -155.58..-154.80, 418 cells). Both sit far under
 the 10,000-cell budget, so nothing is being pushed to a limit.
+
+(Cell counts here are the corrected ones: `_bbox_cell_count` originally
+approximated the grid-point count as `round(extent / res) + 1`, which could
+undercount what CDS actually receives by several percent because
+`era5._build_era5_request` snaps the bbox outward to the grid. It now mirrors
+that snap exactly, asserted by a test that pushes 400 random bboxes through
+`_build_era5_request` and compares against the `area` it really sends. The
+cluster count, and therefore every reduction figure above, is unchanged.)
 
 So the honest reduction is **8x from clustering alone, 18x with the segment
 widening** — not the 30-80x earlier estimated from the wrong cell count. At
