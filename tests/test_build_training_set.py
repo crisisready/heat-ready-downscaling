@@ -253,7 +253,7 @@ class TestCdsRejectedRetry:
 
     def test_retries_on_rejected_and_eventually_succeeds(self, monkeypatch):
         @contextlib.contextmanager
-        def fake_lock():
+        def fake_lock(deprioritize_account_index=None):
             yield 0
 
         monkeypatch.setattr(bts, "_era5_download_lock", fake_lock)
@@ -271,7 +271,7 @@ class TestCdsRejectedRetry:
 
     def test_gives_up_after_max_retries_and_raises(self, monkeypatch):
         @contextlib.contextmanager
-        def fake_lock():
+        def fake_lock(deprioritize_account_index=None):
             yield 0
 
         monkeypatch.setattr(bts, "_era5_download_lock", fake_lock)
@@ -289,7 +289,7 @@ class TestCdsRejectedRetry:
         """'dismissed'/'deleted' terminal states raise the exact same exception class as
         'rejected' -- only the 'rejected' outcome specifically is worth retrying."""
         @contextlib.contextmanager
-        def fake_lock():
+        def fake_lock(deprioritize_account_index=None):
             yield 0
 
         monkeypatch.setattr(bts, "_era5_download_lock", fake_lock)
@@ -305,7 +305,7 @@ class TestCdsRejectedRetry:
 
     def test_unrelated_exception_is_not_retried(self, monkeypatch):
         @contextlib.contextmanager
-        def fake_lock():
+        def fake_lock(deprioritize_account_index=None):
             yield 0
 
         monkeypatch.setattr(bts, "_era5_download_lock", fake_lock)
@@ -326,7 +326,7 @@ class TestCdsRejectedRetry:
         lock_held = []
 
         @contextlib.contextmanager
-        def tracking_lock():
+        def tracking_lock(deprioritize_account_index=None):
             lock_held.append(True)
             try:
                 yield 0
@@ -365,7 +365,7 @@ class TestResolveEra5Range:
         """A range spanning 4 calendar months must call era5.download_era5 once per month,
         each with that month's own exact start/end, not once for the whole range."""
         @contextlib.contextmanager
-        def fake_lock():
+        def fake_lock(deprioritize_account_index=None):
             yield 0
 
         monkeypatch.setattr(bts, "_era5_download_lock", fake_lock)
@@ -388,7 +388,7 @@ class TestResolveEra5Range:
         already-succeeded months and re-submitting them on every retry. Per-segment
         resolution means only the failed segment retries."""
         @contextlib.contextmanager
-        def fake_lock():
+        def fake_lock(deprioritize_account_index=None):
             yield 0
 
         monkeypatch.setattr(bts, "_era5_download_lock", fake_lock)
@@ -414,7 +414,7 @@ class TestResolveEra5Range:
         held_during_each_call = []
 
         @contextlib.contextmanager
-        def tracking_lock():
+        def tracking_lock(deprioritize_account_index=None):
             held_during_each_call.append(True)
             try:
                 yield 0
@@ -452,7 +452,7 @@ class TestResolveEra5Range:
             f.write("fake cached netcdf bytes")
 
         @contextlib.contextmanager
-        def fake_lock():
+        def fake_lock(deprioritize_account_index=None):
             yield 0
 
         with patch.object(bts, "_era5_download_lock", fake_lock), \
@@ -796,7 +796,7 @@ class TestFetchEra5LandForStationsAccountIndex:
         slot was actually acquired (docs/plan-2026-07-19-cds-dual-account-
         split.md, Phase 3, test item 18)."""
         @contextlib.contextmanager
-        def fake_lock():
+        def fake_lock(deprioritize_account_index=None):
             yield 1
 
         monkeypatch.setattr(bts, "_era5_download_lock", fake_lock)
@@ -834,12 +834,20 @@ class TestEra5DownloadLockFreeSlotFirst:
         with bts._era5_download_lock() as account_index:
             assert account_index == 0
 
-    def test_yields_account_index_zero_when_both_slots_free(self, tmp_path, monkeypatch):
+    def test_yields_some_configured_slot_when_both_are_free(self, tmp_path, monkeypatch):
+        """Was test_yields_account_index_zero_when_both_slots_free, asserting
+        "first free configured slot wins". That assertion encoded the defect:
+        scanning in index order meant account 0 won EVERY uncontended
+        acquisition, so accounts 1 and 2 went unused (measured 322/111/82 jobs
+        in one bastion session, with all 106 rejections on account 0). The
+        contract is now "some free configured slot", with the choice randomised
+        -- see TestEra5DownloadLockAccountRotation for the load-spreading
+        assertions."""
         monkeypatch.setenv("ERA5_SECRET_ARN_2", "arn:aws:secretsmanager:us-east-1:123:secret:era5-2")
         monkeypatch.delenv("ERA5_SECRET_ARN_3", raising=False)
         self._patch_lock_paths(tmp_path, monkeypatch)
         with bts._era5_download_lock() as account_index:
-            assert account_index == 0  # first free configured slot wins
+            assert account_index in (0, 1)
 
     def test_falls_through_to_second_slot_when_first_is_already_held(self, tmp_path, monkeypatch):
         monkeypatch.setenv("ERA5_SECRET_ARN_2", "arn:aws:secretsmanager:us-east-1:123:secret:era5-2")
@@ -1529,6 +1537,91 @@ class TestGroupStationsByZone:
         with patch.object(bts.ghcn, "koppen_climate_zone", return_value="BWh") as mock_zone:
             bts._group_stations_by_zone(stations)
         mock_zone.assert_called_once_with(33.4, -112.0)
+
+
+class TestEra5DownloadLockAccountRotation:
+    """Defect found live 2026-09-17: the slot scan ran in index order and took
+    the first free slot, so at concurrency 1 -- the normal case for a single
+    lane -- account 0 was chosen EVERY time and accounts 1 and 2 were never
+    touched. Measured 322/111/82 jobs across three supposedly-equal accounts in
+    one bastion session, with ALL 106 rejections on account 0, whose per-user
+    CDS queue allowance was saturated while the other two sat idle."""
+
+    def _isolated_lock_paths(self, tmp_path, monkeypatch, n=3):
+        """Never touch the real /tmp/build_training_set_era5_download_*.lock
+        files -- those are the live cross-process slots a real corpus pull
+        coordinates on. Same convention as
+        TestEra5DownloadLockFreeSlotFirst._patch_lock_paths."""
+        paths = [str(tmp_path / f"{chr(ord('a') + i)}.lock") for i in range(n)]
+        monkeypatch.setattr(bts, "_ERA5_DOWNLOAD_LOCK_PATHS", paths)
+        return paths
+
+    def _all_accounts_configured(self):
+        return patch.object(bts.era5, "account_configured", return_value=True)
+
+    def test_uses_every_account_across_repeated_uncontended_acquisitions(self, tmp_path, monkeypatch):
+        """The actual regression. With no contention at all, every acquisition
+        can take slot 0 -- and did. Over many acquisitions the lock must spread
+        across all configured accounts, not pin to one."""
+        self._isolated_lock_paths(tmp_path, monkeypatch)
+        seen = set()
+        with self._all_accounts_configured():
+            for _ in range(200):
+                with bts._era5_download_lock() as account_index:
+                    seen.add(account_index)
+        assert seen == {0, 1, 2}, (
+            f"only accounts {sorted(seen)} were ever used; the index-order bias is back"
+        )
+
+    def test_distribution_is_not_pinned_to_one_account(self, tmp_path, monkeypatch):
+        """Stronger than 'every account appears once': no account may take a
+        dominant share. 3 accounts over 300 draws should sit near 100 each;
+        allow generous slack for randomness but reject anything approaching the
+        old 100%-on-account-0 behaviour."""
+        from collections import Counter
+        self._isolated_lock_paths(tmp_path, monkeypatch)
+        counts = Counter()
+        with self._all_accounts_configured():
+            for _ in range(300):
+                with bts._era5_download_lock() as account_index:
+                    counts[account_index] += 1
+        n_accounts = 3
+        for account_index in range(n_accounts):
+            assert counts[account_index] > 300 / n_accounts * 0.5, (
+                f"account {account_index} got only {counts[account_index]}/300 -- too skewed"
+            )
+
+    def test_deprioritized_account_is_tried_last_not_excluded(self, tmp_path, monkeypatch):
+        """A retry after a CDS 'rejected' must steer AWAY from the rejecting
+        account, since a rejection is a per-account queue signal rather than a
+        global one -- but the account must stay reachable, or a single-account
+        deployment would have no slot to wait on."""
+        self._isolated_lock_paths(tmp_path, monkeypatch)
+        with self._all_accounts_configured():
+            for _ in range(60):
+                with bts._era5_download_lock(deprioritize_account_index=0) as account_index:
+                    # slots are all free, so the deprioritized one must never win
+                    assert account_index != 0
+
+    def test_deprioritizing_the_only_account_still_makes_progress(self, tmp_path, monkeypatch):
+        """Single-account deployment (ERA5_SECRET_ARN_2 unset): deprioritizing
+        account 0 must not leave the caller with nothing to acquire."""
+        self._isolated_lock_paths(tmp_path, monkeypatch)
+        def only_account_0(account_index):
+            return account_index == 0
+        with patch.object(bts.era5, "account_configured", side_effect=only_account_0):
+            with bts._era5_download_lock(deprioritize_account_index=0) as account_index:
+                assert account_index == 0
+
+    def test_still_yields_a_configured_account_only(self, tmp_path, monkeypatch):
+        """Never hand back an account with no credential wired up."""
+        self._isolated_lock_paths(tmp_path, monkeypatch)
+        def only_0_and_2(account_index):
+            return account_index in (0, 2)
+        with patch.object(bts.era5, "account_configured", side_effect=only_0_and_2):
+            for _ in range(40):
+                with bts._era5_download_lock() as account_index:
+                    assert account_index in (0, 2)
 
 
 class TestClusterStationsByBboxCells:

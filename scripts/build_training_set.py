@@ -123,6 +123,7 @@ import json
 import logging
 import math
 import os
+import random
 import re
 import shutil
 import sys
@@ -193,7 +194,7 @@ _ERA5_DOWNLOAD_LOCK_PATHS = [
 
 
 @contextlib.contextmanager
-def _era5_download_lock():
+def _era5_download_lock(deprioritize_account_index: int | None = None):
     """
     Acquire whichever configured CDS-account lock slot is free right now --
     free-slot-first, not a deterministic per-country/per-process split
@@ -204,12 +205,23 @@ def _era5_download_lock():
     small country counts (or whenever one country's bbox/volume dwarfs
     another's).
 
-    Mechanism: try each configured lock file non-blocking, in order; the
-    first one successfully locked is the acquired slot. If every configured
-    slot is already held, block on the first configured one (guaranteed
-    eventual progress -- exactly what a single lock would always have
-    given). Yields the account_index of whichever slot was acquired, to
-    pass into era5.download_era5.
+    Mechanism: try each configured lock file non-blocking, in RANDOM order;
+    the first one successfully locked is the acquired slot. If every
+    configured slot is already held, re-scan every slot once a second rather
+    than committing to one (guaranteed eventual progress -- see the
+    2026-08-20 note below). Yields the account_index of whichever slot was
+    acquired, to pass into era5.download_era5.
+
+    The random order is load-balancing, not decoration: an index-order scan
+    gave account 0 every acquisition at concurrency 1 and left the other two
+    accounts idle. See the comment on the shuffle below for the measured
+    numbers and for the wrong diagnosis the imbalance caused.
+
+    deprioritize_account_index: an account to try LAST rather than at a
+    random position -- passed by _download_era5_with_rejected_retry so a
+    retry after a CDS 'rejected' steers away from the account that just
+    rejected it. Never excluded, only reordered, so a single-account
+    deployment still has a slot to wait on.
 
     When ERA5_SECRET_ARN_2 is unset, only lock A / account_index 0 is
     configured -- every acquisition blocks on that one file exactly as a
@@ -222,6 +234,39 @@ def _era5_download_lock():
     ]
     # account_index 0 is always configured (era5.account_configured(0) is
     # unconditionally True), so `configured` is never empty here.
+
+    # Scan the slots in RANDOM order, not index order. Measured live 2026-09-17:
+    # scanning 0,1,2 and taking the first free slot means that at concurrency 1 --
+    # the normal case for a single lane -- account 0 is chosen EVERY time and
+    # accounts 1 and 2 are never touched at all. Job counts across the three
+    # supposedly-equal accounts over one bastion session were 322 / 111 / 82, and
+    # ALL 106 rejections landed on account 0, whose per-user CDS queue allowance
+    # was saturated while the other two sat idle.
+    #
+    # That bias also produced a wrong diagnosis, which is the real cost: a
+    # 2-day Sierra Leone request rejected 3/3 was read as "genuine severe global
+    # CDS congestion" when account 1 was succeeding 17 times in the same
+    # minutes -- including one pair 89 ms apart, account 0 rejected and account 1
+    # successful against the same shared archive. Congestion is a property of
+    # that shared archive, so it cannot hit one account and spare two.
+    #
+    # Shuffling preserves everything the free-slot-first design was for (see the
+    # docstring, and the 2026-08-20 fix below for re-scanning rather than
+    # committing to one slot) and removes only the index-order tie-break that
+    # created the imbalance. Deliberately not round-robin via a counter:
+    # concurrent processes are independent and each would start its own counter
+    # at 0, reproducing the same pile-up on account 0.
+    configured = list(configured)
+    random.shuffle(configured)
+
+    # On a retry after a CDS 'rejected', the caller passes the account that just
+    # rejected. A rejection is now known to be a per-account queue-allowance
+    # signal rather than a global one, so retrying on the SAME account is the
+    # one choice guaranteed to be wrong. Moved to the back rather than excluded:
+    # it must stay reachable, or a single-account deployment (ERA5_SECRET_ARN_2
+    # unset) would have no slot left to wait on and could never make progress.
+    if deprioritize_account_index is not None and len(configured) > 1:
+        configured.sort(key=lambda entry: entry[1] == deprioritize_account_index)
 
     fh = None
     acquired_account_index = None
@@ -498,12 +543,14 @@ def _download_era5_with_rejected_retry(cache_path, bbox, padded_start, padded_en
     doing nothing during the retry delay would only make that worse for every other lane/
     process waiting on the same slot."""
     attempt = 0
+    rejected_on_account_index = None
     while True:
         last_exc = None  # Python clears an `except ... as exc` name at the end of its own
         # except block (PEP 3110) -- stashed under a different name here so the retry log
         # below (deliberately outside the `with`, so the lock is already released by then)
         # can still reference it.
-        with _era5_download_lock() as account_index:
+        with _era5_download_lock(
+                deprioritize_account_index=rejected_on_account_index) as account_index:
             if cache_path and os.path.exists(cache_path):
                 logger.info("[%s] ERA5 cache hit for %s..%s after acquiring the lock -- "
                             "skipping CDS download", batch_label, padded_start, padded_end)
@@ -519,6 +566,9 @@ def _download_era5_with_rejected_retry(cache_path, bbox, padded_start, padded_en
                 if not _is_cds_rejected_error(exc) or attempt >= _CDS_REJECTED_MAX_RETRIES:
                     raise
                 last_exc = exc
+                # Steer the retry away from this account -- see
+                # _era5_download_lock's deprioritize_account_index.
+                rejected_on_account_index = account_index
         delay = _CDS_REJECTED_BACKOFF_BASE_S * (2 ** attempt)
         attempt += 1
         logger.warning(
