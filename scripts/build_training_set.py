@@ -1235,6 +1235,21 @@ def fetch_era5_land_for_stations_via_timeseries(
     )
 
     configured_accounts = [i for i in era5.all_account_indices() if era5.account_configured(i)]
+    # Guarded on `pending` (code review finding): a fully-checkpointed resume
+    # needs no CDS access at all, so raising here would break the resume path in
+    # an environment with no credentials -- exactly the case the checkpoint
+    # exists to make cheap.
+    if pending and not configured_accounts:
+        # Code review finding: without this, the round-robin index below raises
+        # ZeroDivisionError per station. That IS caught one level up, so every
+        # station is correctly recorded as failed -- but with "unhandled
+        # ZeroDivisionError: integer division or modulo by zero" instead of the
+        # actual cause, after paying a GHCN fetch for each one.
+        raise RuntimeError(
+            "No CDS account is configured (checked era5.account_configured across "
+            f"{era5.all_account_indices()}) -- set ERA5_SECRET_ARN. Failing up front rather "
+            "than once per station."
+        )
     failures: list[tuple[str, str]] = []
     lock = threading.Lock()
 
@@ -1288,44 +1303,72 @@ def fetch_era5_land_for_stations_via_timeseries(
                     os.unlink(nc_path)
 
     if pending:
-        # as_completed(timeout=...) rather than pool.map: map() blocks
-        # indefinitely on the slowest worker, which is precisely the failure
-        # mode _TIMESERIES_STATION_TIMEOUT_S exists to prevent. A deadline on
-        # the whole set, derived from the per-station ceiling, bounds the batch
-        # even if several stations hang at once.
-        from concurrent.futures import as_completed
-        deadline = _TIMESERIES_STATION_TIMEOUT_S * (
+        # DAEMON threads over a queue, deliberately NOT ThreadPoolExecutor.
+        #
+        # Code review finding, and it invalidated an earlier version of this
+        # comment: concurrent.futures.thread registers an atexit hook that
+        # unconditionally .join()s every worker thread of every pool, with no
+        # timeout. So pool.shutdown(wait=False) only stops the shutdown CALL
+        # from blocking -- a genuinely stuck worker still hangs the interpreter
+        # at exit. That reproduces the exact symptom this guard exists to
+        # eliminate (alive process, no log line, nothing ever firing again),
+        # merely deferred from the middle of the run to the end of it.
+        #
+        # Daemon threads are not joined at interpreter exit, so abandoning one
+        # really does mean the process finishes and reports. That is the whole
+        # claim, and with a pool it was not true.
+        import queue as _queue
+
+        work: "_queue.Queue" = _queue.Queue()
+        for indexed_station in enumerate(pending):
+            work.put(indexed_station)
+        completed = threading.Semaphore(0)
+
+        def _worker():
+            while True:
+                try:
+                    indexed_station = work.get_nowait()
+                except _queue.Empty:
+                    return
+                try:
+                    _fetch_one(indexed_station)
+                except Exception as exc:  # noqa: BLE001 -- _fetch_one records its own
+                    # failures; this only catches something escaping it entirely.
+                    sid = indexed_station[1]["station_id"]
+                    with lock:
+                        failures.append((sid, f"unhandled {type(exc).__name__}: {exc}"))
+                finally:
+                    completed.release()
+
+        for _ in range(min(max_workers, len(pending))):
+            threading.Thread(target=_worker, daemon=True).start()
+
+        # One deadline for the whole set, derived from the per-station ceiling.
+        budget = _TIMESERIES_STATION_TIMEOUT_S * (
             1 + (len(pending) + max_workers - 1) // max_workers)
-        pool = ThreadPoolExecutor(max_workers=max_workers)
-        try:
-            futures = {
-                pool.submit(_fetch_one, (i, station)): station["station_id"]
-                for i, station in enumerate(pending)
-            }
-            try:
-                for future in as_completed(futures, timeout=deadline):
-                    # _fetch_one records its own failures; this re-raise guard
-                    # only catches something escaping it entirely.
-                    exc = future.exception()
-                    if exc is not None:
-                        sid = futures[future]
-                        with lock:
-                            failures.append((sid, f"unhandled {type(exc).__name__}: {exc}"))
-            except TimeoutError:
-                unfinished = [sid for f, sid in futures.items() if not f.done()]
-                logger.error(
-                    "[timeseries] batch deadline of %.0fs hit with %d station(s) unfinished: %s. "
-                    "Recording them as failed and continuing -- a bounded gap we can see beats a "
-                    "silent hang (see _TIMESERIES_STATION_TIMEOUT_S).",
-                    deadline, len(unfinished), ", ".join(unfinished[:10]),
-                )
-                with lock:
-                    failures.extend((sid, "timed out") for sid in unfinished)
-        finally:
-            # Do not block on lingering workers -- that would reintroduce the
-            # hang this guard exists to bound. Python offers no thread kill;
-            # the process exits after the caller finishes.
-            pool.shutdown(wait=False, cancel_futures=True)
+        end_by = time.monotonic() + budget
+        finished = 0
+        while finished < len(pending):
+            remaining = end_by - time.monotonic()
+            if remaining <= 0:
+                break
+            if completed.acquire(timeout=min(remaining, 5.0)):
+                finished += 1
+        if finished < len(pending):
+            # The store is the source of truth for what actually landed --
+            # a station counted unfinished here may still be mid-flight, and
+            # collect() below (which snapshots under the store's own lock)
+            # decides what this call returns.
+            logger.error(
+                "[timeseries] batch budget of %.0fs exhausted with %d of %d station-fetches "
+                "unfinished. Continuing -- a bounded gap we can see beats a silent hang "
+                "(see _TIMESERIES_STATION_TIMEOUT_S). Abandoned workers are daemon threads "
+                "and will not block process exit.",
+                budget, len(pending) - finished, len(pending),
+            )
+            with lock:
+                failures.append(
+                    (f"<{len(pending) - finished} station(s)>", "batch budget exhausted"))
 
     if failures:
         logger.error("[timeseries] %d station(s) failed:", len(failures))

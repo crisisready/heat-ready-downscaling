@@ -1774,6 +1774,64 @@ class TestFetchEra5LandForStationsViaTimeseries:
         assert cap.get("accounts") is None, "second run should fetch nothing"
         assert set(daily) == {"S1", "S2"}, "but must still return both stations' rows"
 
+    def test_no_configured_cds_account_fails_up_front(self, tmp_path):
+        """Code review finding: without an upfront guard the round-robin index
+        raises ZeroDivisionError per station. That IS caught, so every station
+        is recorded failed -- but with "integer division or modulo by zero"
+        instead of the real cause, after paying a GHCN fetch for each."""
+        with patch.object(bts.era5, "all_account_indices", return_value=[0, 1, 2]), \
+             patch.object(bts.era5, "account_configured", return_value=False), \
+             patch.object(bts, "_timezones_for_stations", return_value={"S1": "UTC"}):
+            with pytest.raises(RuntimeError, match="No CDS account is configured"):
+                bts.fetch_era5_land_for_stations_via_timeseries(
+                    self._STATIONS[:1], date(2023, 3, 11), date(2023, 3, 11),
+                    checkpoint_path=str(tmp_path / "ck.jsonl"))
+
+    def test_fully_checkpointed_resume_needs_no_cds_account(self, tmp_path):
+        """Code review finding: the no-account guard fired unconditionally, so a
+        resume where every station is already checkpointed would raise even
+        though it needs no CDS access -- breaking precisely the case the
+        checkpoint exists to make cheap."""
+        ck = str(tmp_path / "ck.jsonl")
+        with self._patched():
+            first, _, _ = bts.fetch_era5_land_for_stations_via_timeseries(
+                self._STATIONS, date(2023, 3, 11), date(2023, 3, 11), checkpoint_path=ck)
+        assert set(first) == {"S1", "S2"}
+        # now with NO configured account at all: nothing to fetch, must not raise
+        with patch.object(bts.era5, "all_account_indices", return_value=[0, 1, 2]), \
+             patch.object(bts.era5, "account_configured", return_value=False), \
+             patch.object(bts, "_timezones_for_stations",
+                          return_value={"S1": "America/New_York", "S2": "Pacific/Honolulu"}):
+            again, _, _ = bts.fetch_era5_land_for_stations_via_timeseries(
+                self._STATIONS, date(2023, 3, 11), date(2023, 3, 11), checkpoint_path=ck)
+        assert set(again) == {"S1", "S2"}, "a fully-checkpointed resume must still return the rows"
+
+    def test_workers_are_daemon_threads_so_a_hang_cannot_block_process_exit(self, tmp_path):
+        """The load-bearing property, and an earlier version of this code got it
+        wrong. concurrent.futures.thread registers an atexit hook that joins
+        every pool worker with NO timeout, so shutdown(wait=False) only stops
+        the shutdown call from blocking -- a genuinely stuck worker still hangs
+        the interpreter at exit, reproducing the exact symptom the deadline
+        exists to eliminate. Daemon threads are not joined at exit, which is
+        what makes "the process finishes and reports" actually true."""
+        seen = []
+        real_thread = bts.threading.Thread
+
+        def _spy(*args, **kwargs):
+            th = real_thread(*args, **kwargs)
+            seen.append(th)
+            return th
+
+        with self._patched():
+            with patch.object(bts.threading, "Thread", side_effect=_spy):
+                bts.fetch_era5_land_for_stations_via_timeseries(
+                    self._STATIONS, date(2023, 3, 11), date(2023, 3, 11),
+                    checkpoint_path=str(tmp_path / "ck.jsonl"))
+        assert seen, "expected worker threads to be spawned"
+        assert all(th.daemon for th in seen), (
+            "every fetch worker must be a daemon thread, or a stuck one blocks interpreter exit"
+        )
+
     def test_a_different_date_range_is_not_treated_as_already_done(self, tmp_path):
         """Date-scoped checkpoint keys, matching the openmeteo path: reusing a
         checkpoint across two ranges must not return the first range's data."""
