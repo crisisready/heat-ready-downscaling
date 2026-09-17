@@ -334,8 +334,31 @@ def _era5_download_lock(deprioritize_account_index: int | None = None):
 _TRAINING_ERA5_VARIABLES = era5._ERA5_VARIABLES + [
     era5._WIND_U_VARIABLE,
     era5._WIND_V_VARIABLE,
-    era5._SOLAR_RADIATION_VARIABLE,
 ]
+
+# era5._SOLAR_RADIATION_VARIABLE (ssrd) was in this list until 2026-09-17 and was
+# never consumed by anything. downscaling.FEATURE_ORDER has no solar term, and
+# build_rows_for_country's row dict carries only grid_tmax_c / grid_tmin_c /
+# grid_specific_humidity_kgkg / nighttime_wind_ms -- so every training request
+# paid for a variable whose value was computed, carried through
+# extract_era5_means as solar_wm2, and then dropped on the floor. era5.py's own
+# bilinear-interpolation comment already noted it "isn't in
+# downscaling.FEATURE_ORDER", and tests/test_backfill_wind.py asserts the
+# sibling backfill script deliberately excludes it; this list was the outlier.
+#
+# Requesting it also flipped heat_calcs.aggregate_hourly_to_daily onto its
+# has_thermal branch (which needs BOTH wind_ms and solar_wm2), so every run
+# additionally paid a full vectorised UTCI/WBGT pass over every hourly row for
+# output no row ever carried. Dropping ssrd turns has_thermal off, which is
+# correct here: nothing downstream reads utci/wbgt from this builder.
+#
+# This does NOT reduce the CDS request count, and it was originally proposed on
+# the belief that it would. At 6 variables a request may carry 41 day-slots and
+# at 5 it may carry 50 (era5._CDS_ERA5_LAND_FIELD_LIMIT, measured 2026-09-17 at
+# 6,000 -- half ECMWF's published 12,000); two full calendar months is 62 slots,
+# so neither 6 nor 5 variables can span two months and the per-calendar-month
+# split stays the floor either way. What this does buy is one sixth fewer bytes
+# per request and the removal of that wasted UTCI/WBGT pass.
 
 
 def _bucket_from_credentials() -> str:

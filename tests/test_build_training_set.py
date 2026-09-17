@@ -110,10 +110,17 @@ class TestFetchEra5LandForStations:
         for wind_val in nighttime_wind["USW00023183"].values():
             assert 2.0 <= wind_val <= 4.0  # sane wind range for this fixture
 
-    def test_requests_the_expanded_wind_radiation_variable_list(self):
-        """This is the one call site that must request wind/radiation, not
-        era5's 3-variable production default -- it's what makes the
-        nighttime_wind_ms covariate possible at all."""
+    def test_requests_the_expanded_wind_variable_list_but_not_ssrd(self):
+        """This is the one call site that must request wind, not era5's
+        3-variable production default -- it's what makes the nighttime_wind_ms
+        covariate possible at all.
+
+        ssrd was asserted here until 2026-09-17 and is now asserted ABSENT: it
+        was requested on every training request and never consumed
+        (FEATURE_ORDER has no solar term, and build_rows_for_country's row dict
+        carries no solar key), and requesting it also flipped
+        aggregate_hourly_to_daily onto its has_thermal branch, paying a
+        UTCI/WBGT pass per hourly row for discarded output."""
         with patch.object(bts.era5, "download_era5", return_value="/tmp/fake.nc") as mock_dl, \
              patch.object(bts.era5, "extract_era5_means", return_value=[]), \
              patch("os.unlink"):
@@ -123,7 +130,7 @@ class TestFetchEra5LandForStations:
         assert kwargs.get("variables") == bts._TRAINING_ERA5_VARIABLES
         assert "10m_u_component_of_wind" in kwargs["variables"]
         assert "10m_v_component_of_wind" in kwargs["variables"]
-        assert "surface_solar_radiation_downwards" in kwargs["variables"]
+        assert "surface_solar_radiation_downwards" not in kwargs["variables"]
         # base 3 production variables still requested too, not replaced
         assert set(bts.era5._ERA5_VARIABLES).issubset(set(kwargs["variables"]))
 

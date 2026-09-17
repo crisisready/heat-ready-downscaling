@@ -50,9 +50,10 @@ that refutes this:
 > items = variables x levels x timesteps, **which has no area/grid-point term at all: chunking
 > the bounding box or station count, tried first, could never have fixed this**
 
-[verified: ECMWF CDS documentation gives ERA5-Land hourly a **12,000 field** per-request limit,
-and a MARS "field" is one variable x level x timestep — subsetting the area does not change how
-many fields a request names.]
+[verified: a MARS "field" is one variable x level x timestep, and subsetting the area does not
+change how many fields a request names. ECMWF's documentation gives ERA5-Land hourly a 12,000-field
+per-request limit; that figure is **wrong** — the real cap is **6,000**, measured by bisection
+2026-09-17. See 5.9.]
 
 So on 2026-08-03 two mechanisms were added for one symptom: calendar-month splitting, which
 genuinely fixes the field-count overrun, and bbox/station chunking, which by that same finding
@@ -86,10 +87,10 @@ first thing the probe in 5.6 settles.
 requests per station-chunk per year.
 
 This is over-conservative against the real budget — but by less than a first pass suggests,
-and the correction matters. CDS's ERA5-Land hourly per-request limit is **~12,000 fields**
-(the codebase calls it `~12,000`; ECMWF documents 12,000, and the only *observed* data points
-are 13,392 rejected and 4,464 accepted, so treat it as approximate). A field is one
-variable x level x timestep.
+and the correction matters. CDS's ERA5-Land hourly per-request limit is **6,000 fields** - not the 12,000 ECMWF documents.
+That was established after this section was first written, by bisecting the live API (5.9). A field
+is one variable x level x timestep. Every count in the table below has been recomputed against
+6,000; the two rows that a 12,000 budget would have allowed are marked.
 
 `_build_era5_request` builds **three** independent lists — `year`, `month`, `day` — so the
 binding quantity is
@@ -104,27 +105,25 @@ boundary. A segment that does so multiplies its day-slots by 2:
 
 | segment | years x months x days | slots | 6 var | 5 var | 3 var |
 |---|---|---|---|---|---|
-| 1 calendar month (current) | 1x1x31 | 31 | 4,464 ok (37% of budget) | 3,720 ok | 2,232 ok |
-| Jan–Feb 2023 | 1x2x31 | 62 | 8,928 ok | 7,440 ok | 4,464 ok |
-| **Dec 2022 + Jan 2023** | **2x2x31** | **124** | **17,856 REJECTED** | **14,880 REJECTED** | 8,928 ok |
-| Jan–Mar 2023 | 1x3x31 | 93 | 13,392 REJECTED | 11,160 ok | 6,696 ok |
-| Jan–May 2023 | 1x5x31 | 155 | 22,320 REJECTED | 18,600 REJECTED | 11,160 ok |
+| 1 calendar month (current) | 1x1x31 | 31 | 4,464 **ok** (74% of the real budget) | 3,720 ok | 2,232 ok |
+| Jan–Feb 2023 | 1x2x31 | 62 | 8,928 **REJECTED** (live) | 7,440 **REJECTED** (live) | 4,464 ok (live) |
+| **Dec 2022 + Jan 2023** | **2x2x31** | **124** | **17,856 REJECTED** | **14,880 REJECTED** | **8,928 REJECTED** |
+| Jan–Mar 2023 | 1x3x31 | 93 | 13,392 REJECTED (live) | 11,160 REJECTED | 6,696 **REJECTED** (live) |
+| Jan–May 2023 | 1x5x31 | 155 | 22,320 REJECTED | 18,600 REJECTED | 11,160 REJECTED |
 
 So segments may be widened but **must never cross a calendar-year boundary** — naively pairing
 the 14 months into 7 would put `(Dec 2022, Jan 2023)` at 17,856 fields and earn exactly the
 `cost limits exceeded` rejection `_split_by_calendar_month` was ported forward to fix.
 
-Year-aligned minimum request counts per bbox-year, with the two padding months necessarily
-standing alone:
+At the real 6,000-field cap the maximum day-slots per request is **41 at 6 variables, 50 at 5,
+62 at 4**. Two full calendar months is 62 slots. So **no request carrying 5 or more variables can
+span two calendar months**, and our minimum useful variable set is 5 (t2m, d2m, sp, u10, v10).
 
-| variables | max months/segment | segments per padded year |
-|---|---|---|
-| 6 (today) | 2 | 6 + 2 = **8** |
-| 5 (drop unused ssrd, see 3.3) | 3 | 4 + 2 = **6** |
-
-A naive "total fields / limit" floor (`6 x 24 x 369 = 53,136` → 5 requests) is **wrong**: it
-ignores the cartesian quantization above. At 6 variables no request can exceed 2 months, so the
-achievable floor is 8, not 5.
+**Widening is therefore impossible, and the existing per-calendar-month split is already optimal.**
+14 segments per padded bbox-year is the floor, not a conservative choice. An earlier version of
+this section computed 8 segments at 6 variables and 6 at 5, against the documented 12,000; both
+figures are void. The widening was built, live-tested, refused on its first request, and
+discarded (5.9).
 
 ### 2.3 Queue latency — the one genuinely CDS-side term
 
@@ -279,9 +278,14 @@ the right instrument for a *volume* problem. Replace a 0.5-degree grid bucket wi
 a **volume budget — a few degrees, not 25**. The Af/Am targets are naturally compact (S. Florida,
 Hawaii, PR/VI), so this costs little in practice.
 
-### 5.2 Drop `ssrd` and widen segments to what the budget actually allows
+### 5.2 Drop `ssrd` (but it buys bytes, not requests)
 
-Never across a calendar-year boundary (2.2). 14 segments/bbox-year → **6**.
+`ssrd` is requested on every training request and never consumed (3.3), so dropping it removes one
+sixth of every request's bytes and a wasted UTCI/WBGT pass over every hourly row.
+
+It does **not** reduce the request count, which is what this item was originally proposed for. At
+the real 6,000-field cap, 5 variables allow 50 day-slots and two calendar months need 62, so the
+per-month split stands either way (2.2, 5.9).
 
 ### 5.3 Pass `--era5-cache-dir`
 
@@ -357,7 +361,7 @@ clustered than that guess assumed:
 |---|---|---|
 | Before: 0.5-degree grid buckets | **15 occupied cells** | 15 x 14 = **210** |
 | After: volume-bounded clustering | **2 clusters** | 2 x 14 = **28** |
-| After + segment widening (5.2) | 2 clusters | 2 x 6 = **12** |
+| ~~After + segment widening~~ | ~~2 clusters~~ | ~~2 x 6 = 12~~ **void, widening impossible (5.9)** |
 
 The two clusters are the natural geography: 268 stations in S. Florida
 (lat 25.32..27.19, lon -80.82..-80.03, 600 cells) and 121 on Hawaii's Big
@@ -372,10 +376,10 @@ that snap exactly, asserted by a test that pushes 400 random bboxes through
 `_build_era5_request` and compares against the `area` it really sends. The
 cluster count, and therefore every reduction figure above, is unchanged.)
 
-So the honest reduction is **8x from clustering alone, 18x with the segment
-widening** — not the 30-80x earlier estimated from the wrong cell count. At
-~33 min per request across 3 accounts that is ~38 hours of CDS becoming
-~2.2 hours, which still fully accounts for the observed crawl.
+So the honest reduction is **8x, from clustering alone** — the 18x figure assumed a segment
+widening that turned out to be impossible (5.9), and the earlier 30-80x came from a wrong cell
+count. At ~33 min per request across 3 accounts that is ~38 hours of CDS becoming ~2.2 hours,
+which still fully accounts for the observed crawl.
 
 Note the live lanes were doing *worse* than even the 210-request figure
 implies: they were split into `lane1`/`lane2`/`lane3` of ~5 stations and
@@ -384,13 +388,67 @@ segments by itself. Measured actual: **~52 CDS requests per station landed.**
 
 ### 5.8 What still must be measured before the fix leans on it
 
-One claim remains staged behind measurement rather than asserted:
+This has now been measured; see 5.9. The original text is kept below for the record.
 
 1. **Is the ~12,000 field limit exact?** The proposed widenings leave thin margins against an
    approximate bound (93 slots x 5 var = 11,160 is 7% headroom). The only observed points are
    13,392 rejected and 4,464 accepted; nothing in between has been tested. So widen in stages —
    verify 2 months at 6 variables first, then 3 months at 5 — rather than jumping straight to
    the computed maximum.
+
+### 5.9 MEASURED: the real field limit is 6,000, not 12,000 — and widening is impossible
+
+The widening in 5.2 was built and live-tested before shipping, as required. **Its first stage —
+2 calendar months at 6 variables, 8,928 fields, comfortably under ECMWF's documented 12,000 — was
+refused.** The model was calibrated against a limit that does not exist.
+
+The 403 body carries no number (`"Your request is too large, please reduce your selection"`), so
+the cap had to be bisected against the live API:
+
+| vars | day-slots | fields | outcome |
+|---|---|---|---|
+| 1 | 93 | 2,232 | accepted |
+| 5 | 31 | 3,720 | accepted |
+| 2 | 93 | 4,464 | accepted |
+| 3 | 62 | 4,464 | accepted |
+| 6 | 31 | 4,464 | accepted (today's production shape) |
+| 6 | 40 | 5,760 | accepted |
+| 4 | 62 | 5,952 | accepted |
+| **5** | **50** | **6,000** | **ACCEPTED — the ceiling** |
+| **6** | **42** | **6,048** | **rejected — first refusal** |
+| 6 | 44 | 6,336 | rejected |
+| 3 | 93 | 6,696 | rejected |
+| 5 | 62 | 7,440 | rejected |
+| 6 | 62 | 8,928 | rejected |
+| 6 | 93 | 13,392 | rejected (the known 2026-08-03 data point) |
+
+Two results.
+
+**The cost model is confirmed** as `fields = variables x 24 x (years x months x days)`, with no
+area term. The same field count behaves identically whether reached via more variables or more
+day-slots — 3 vars x 62 slots and 6 vars x 31 slots are both 4,464 and both accepted — which is
+also independent corroboration of 5.6.
+
+**The cap is 6,000, exactly half the published figure.** Maximum day-slots per request is therefore
+41 at 6 variables, 50 at 5, 62 at 4. Two full calendar months is 62 slots, and our minimum useful
+variable set is 5 (t2m, d2m, sp, u10, v10). **So no segment can span two calendar months, and
+`_split_by_calendar_month` is already optimal rather than conservative.** 14 segments per padded
+bbox-year is the floor.
+
+Workarounds checked and rejected: splitting the variable set across two requests yields ~13
+requests against 14; `years`-mode cartesian is far over the cap; raising `_ERA5_CHUNK_DAYS` for a
+multi-year pull saves ~12% but that 400-day bound exists to keep `_merge_era5_segments`' in-memory
+concat bounded.
+
+This is why the published number was never safe to build on, and the measured one is now encoded
+as a constant carrying this table (private repo `era5._CDS_ERA5_LAND_FIELD_LIMIT`), together with a
+pre-submission check so an oversized request fails locally instead of consuming a credential fetch,
+a round-trip, and one of three per-account concurrency slots — and instead of surfacing as a
+"rejected" that reads like CDS congestion, which is exactly how this project mis-diagnosed the
+problem twice in two days.
+
+**Net effect on the headline number: the achievable reduction is 8x, all of it from the clustering
+in 5.1, and 18x was never available.**
 
 ---
 
@@ -413,3 +471,14 @@ real O(area) ceiling), and the claim that stuck `accepted` jobs were *proven* to
 poisoning orphans (3.2 now gives the CDS-result-caching explanation that defeats the FIFO
 argument, and promotes the lock's scan order as the better-supported cause of the rejection
 asymmetry).
+
+A third correction, after the first two above:
+
+- **The field limit itself was wrong, and with it every derived request count.** This document
+  originally cited ECMWF's documented 12,000-field cap as `[verified: ...]` on the strength of the
+  documentation alone. The real cap is 6,000 (5.9), found only because the widening it licensed was
+  live-tested before shipping. The lesson is narrower and more useful than "verify claims": a
+  *published* limit is a claim about the vendor's intent, not an observation of their system, and a
+  change whose whole value depends on the exact value of such a limit must probe it first. The
+  headline reduction moved 30-80x → 18x → **8x** across these three corrections; only the last is
+  measured end to end.
