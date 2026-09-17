@@ -324,16 +324,61 @@ work and is withdrawn.** Three independent reasons:
 The supportable options remain: all-CDS with a corrected request shape, or all-Open-Meteo via
 the existing `--era5-source openmeteo` flag with its disclosed NULL humidity/wind.
 
-### 5.6 What must be measured before the fix leans on it
+### 5.6 MEASURED 2026-09-17: area does not enter CDS's cost limit
 
-Two claims are staged behind measurement rather than asserted:
+Four ERA5-Land requests, same account, field count held constant at
+5 vars x 24 h x 31 days = 3,720, varying only `area`:
 
-1. **Does enlarging the bbox cost extra queue time?** The field-limit model says no, but
-   `_ERA5_MAX_CHUNK_EXTENT_DEG`'s own recorded observation says a 2.37 x 1.33 degree padded bbox
-   was rejected for cost (2.1). A timed same-account comparison at 1 / 10 / 25 degrees settles
-   which reading is right. (Download timing only — it deliberately does not run
-   `extract_era5_means`, which 5.1 predicts would OOM at 25 degrees.)
-2. **Is the ~12,000 field limit exact?** The proposed widenings leave thin margins against an
+| bbox | padded cells | outcome |
+|---|---|---|
+| 1 degree | 100 | accepted |
+| 10 degrees | 10,000 | accepted |
+| 25 degrees | 62,500 | accepted |
+| 60 degrees | 360,000 | accepted |
+
+A 3,600x range in area, no cost-limit rejection at any size. This settles 2.1:
+the field-only cost model is right, and `_ERA5_MAX_CHUNK_EXTENT_DEG`'s recorded
+2026-08-03 rejection was mis-attributed to the bbox when the same request was
+already over the limit on the date axis (13,392 fields).
+
+Separately measured: the **smallest possible** request (120 fields — 5 vars,
+one day, 1 degree) sat queued for **782 seconds**. Queue latency is
+effectively independent of request size, which is what makes request *count*
+the whole game and rules out any timing-based bbox comparison at n=1.
+
+### 5.7 MEASURED: the real before/after on the actual US station set
+
+Computed against the real 389-station `station_ids_country_US.json` and GHCN
+station coordinates — replacing an earlier **estimate of 80-150 occupied
+0.5-degree cells, which was wrong by ~5x**. The stations are far more
+clustered than that guess assumed:
+
+| | pulls | CDS requests/year |
+|---|---|---|
+| Before: 0.5-degree grid buckets | **15 occupied cells** | 15 x 14 = **210** |
+| After: volume-bounded clustering | **2 clusters** | 2 x 14 = **28** |
+| After + segment widening (5.2) | 2 clusters | 2 x 6 = **12** |
+
+The two clusters are the natural geography: 268 stations in S. Florida
+(lat 25.32..27.19, lon -80.82..-80.03, 570 cells) and 121 on Hawaii's Big
+Island (lat 19.18..20.14, lon -155.58..-154.80, 399 cells). Both sit far under
+the 10,000-cell budget, so nothing is being pushed to a limit.
+
+So the honest reduction is **8x from clustering alone, 18x with the segment
+widening** — not the 30-80x earlier estimated from the wrong cell count. At
+~33 min per request across 3 accounts that is ~38 hours of CDS becoming
+~2.2 hours, which still fully accounts for the observed crawl.
+
+Note the live lanes were doing *worse* than even the 210-request figure
+implies: they were split into `lane1`/`lane2`/`lane3` of ~5 stations and
+`_remaining`/`_retry` lanes of 1, so a single station could pay all 14
+segments by itself. Measured actual: **~52 CDS requests per station landed.**
+
+### 5.8 What still must be measured before the fix leans on it
+
+One claim remains staged behind measurement rather than asserted:
+
+1. **Is the ~12,000 field limit exact?** The proposed widenings leave thin margins against an
    approximate bound (93 slots x 5 var = 11,160 is 7% headroom). The only observed points are
    13,392 rejected and 4,464 accepted; nothing in between has been tested. So widen in stages —
    verify 2 months at 6 variables first, then 3 months at 5 — rather than jumping straight to

@@ -1531,56 +1531,114 @@ class TestGroupStationsByZone:
         mock_zone.assert_called_once_with(33.4, -112.0)
 
 
-class TestChunkStationsByExtent:
-    def test_empty_input_returns_empty_list(self):
-        assert bts._chunk_stations_by_extent([], 0.5) == []
+class TestClusterStationsByBboxCells:
+    """Replaces TestChunkStationsByExtent (2026-09-17). The objective is
+    INVERTED: the old grid bucketing tried to keep each request's bbox small,
+    on the belief that bbox size drove CDS's per-request cost limit. Measured
+    live 2026-09-17, it does not -- 4 ERA5-Land requests at an identical field
+    count and bboxes from 100 to 360,000 cells were all accepted. Request
+    COUNT is the real cost (~33 min of CDS queue each), so the goal is now the
+    FEWEST clusters a bytes/memory budget allows."""
 
-    def test_tightly_clustered_stations_stay_in_one_chunk(self):
+    def test_empty_input_returns_empty_list(self):
+        assert bts._cluster_stations_by_bbox_cells([]) == []
+
+    def test_tightly_clustered_stations_stay_in_one_cluster(self):
         stations = [
             {"station_id": "A", "lat": 32.40, "lon": -115.10},
             {"station_id": "B", "lat": 32.41, "lon": -115.11},
         ]
-        chunks = bts._chunk_stations_by_extent(stations, 0.5)
-        assert len(chunks) == 1
-        assert {s["station_id"] for s in chunks[0]} == {"A", "B"}
+        clusters = bts._cluster_stations_by_bbox_cells(stations)
+        assert len(clusters) == 1
+        assert {s["station_id"] for s in clusters[0]} == {"A", "B"}
 
-    def test_widely_separated_stations_split_into_different_chunks(self):
-        """Regression test for the real 2026-08-03 finding: two same-zone
-        Mexicali stations ~150km apart (raw spread ~1.4deg lat) still
-        tripped CDS's cost limit once padded -- a bound tighter than their
-        actual separation must put them in separate chunks."""
+    def test_the_mexicali_pair_now_shares_ONE_request(self):
+        """Direct reversal of the old test_widely_separated_stations_split_
+        into_different_chunks. The same two real Mexicali stations (~1.4deg
+        lat apart, ~150km) were deliberately SPLIT by the 0.5deg grid, on the
+        belief that their padded 2.37 x 1.33deg bbox was what tripped CDS's
+        'cost limits exceeded' in 2026-08-03. That was a mis-attribution --
+        the same request had also cartesian-expanded 34 real days into 93
+        day-slots = 13,392 fields, over the limit on the DATE axis alone.
+        Their combined padded bbox is ~25 x 14 cells, nowhere near the budget,
+        so they must now share a single request instead of paying two."""
         stations = [
             {"station_id": "MXM00076040", "lat": 32.4, "lon": -115.1833},
             {"station_id": "MXM00076055", "lat": 31.033, "lon": -114.85},
         ]
-        chunks = bts._chunk_stations_by_extent(stations, 0.5)
-        assert len(chunks) == 2
-        all_ids = {s["station_id"] for chunk in chunks for s in chunk}
-        assert all_ids == {"MXM00076040", "MXM00076055"}  # every station kept, none dropped
+        clusters = bts._cluster_stations_by_bbox_cells(stations)
+        assert len(clusters) == 1
+        assert {s["station_id"] for s in clusters[0]} == {"MXM00076040", "MXM00076055"}
+
+    def test_stations_too_far_apart_to_share_a_budget_do_split(self):
+        """The budget is still a real bound: S. Florida and Hawaii cannot share
+        a bbox (~75deg of longitude => ~46,000 cells, over the 10,000 default),
+        so a genuinely dispersed set still splits rather than pulling a
+        Pacific-wide grid."""
+        stations = [
+            {"station_id": "USFL0001", "lat": 25.5, "lon": -80.4},
+            {"station_id": "USHI0001", "lat": 19.7, "lon": -155.1},
+        ]
+        clusters = bts._cluster_stations_by_bbox_cells(stations)
+        assert len(clusters) == 2
 
     def test_every_station_is_kept_never_dropped(self):
         """Unlike _select_geographically_stratified/_compact (which cap and
-        drop), chunking must never lose a station -- it only controls how
+        drop), clustering must never lose a station -- it only controls how
         many separate ERA5 requests they're split across."""
         stations = [{"station_id": f"S{i}", "lat": float(i), "lon": float(i)} for i in range(10)]
-        chunks = bts._chunk_stations_by_extent(stations, 0.5)
-        all_ids = {s["station_id"] for chunk in chunks for s in chunk}
+        clusters = bts._cluster_stations_by_bbox_cells(stations)
+        all_ids = {s["station_id"] for c in clusters for s in c}
         assert all_ids == {f"S{i}" for i in range(10)}
 
-    def test_each_chunk_bbox_stays_within_the_extent_bound(self):
+    def test_every_cluster_bbox_stays_within_the_cell_budget(self):
         import random
-        random.seed(20260803)
+        random.seed(20260917)
         stations = [
-            {"station_id": f"S{i}", "lat": random.uniform(0, 5), "lon": random.uniform(0, 5)}
+            {"station_id": f"S{i}", "lat": random.uniform(0, 40), "lon": random.uniform(0, 40)}
+            for i in range(200)
+        ]
+        max_cells = 10_000
+        clusters = bts._cluster_stations_by_bbox_cells(stations, max_cells=max_cells)
+        for c in clusters:
+            lats = [s["lat"] for s in c]
+            lons = [s["lon"] for s in c]
+            assert bts._bbox_cell_count(min(lons), min(lats), max(lons), max(lats)) <= max_cells
+
+    def test_uses_far_fewer_requests_than_the_old_half_degree_grid(self):
+        """The whole point of the change, asserted as a number. 50 stations
+        spread over 5x5 degrees occupied ~64 distinct 0.5deg grid cells and so
+        paid ~64 separate 14-segment ERA5 pulls; their combined padded bbox is
+        ~61x61 = 3,721 cells, comfortably inside the budget, so they now pay
+        exactly one."""
+        import random
+        random.seed(20260917)
+        stations = [
+            {"station_id": f"S{i}", "lat": random.uniform(25.0, 30.0), "lon": random.uniform(-85.0, -80.0)}
             for i in range(50)
         ]
-        max_extent = 0.5
-        chunks = bts._chunk_stations_by_extent(stations, max_extent)
-        for chunk in chunks:
-            lats = [s["lat"] for s in chunk]
-            lons = [s["lon"] for s in chunk]
-            assert max(lats) - min(lats) <= max_extent
-            assert max(lons) - min(lons) <= max_extent
+        clusters = bts._cluster_stations_by_bbox_cells(stations)
+        assert len(clusters) == 1
+
+    def test_is_deterministic(self):
+        stations = [
+            {"station_id": f"S{i}", "lat": 25.0 + 0.3 * i, "lon": -80.0 - 0.3 * i}
+            for i in range(12)
+        ]
+        first = bts._cluster_stations_by_bbox_cells(stations)
+        second = bts._cluster_stations_by_bbox_cells(list(reversed(stations)))
+        as_ids = lambda cs: [sorted(s["station_id"] for s in c) for c in cs]
+        assert as_ids(first) == as_ids(second)
+
+
+class TestBboxCellCount:
+    def test_counts_era5_land_cells_including_the_padding(self):
+        # 1deg raw extent + 0.5deg pad each side = 2deg span = 21 cells at 0.1deg
+        assert bts._bbox_cell_count(0.0, 0.0, 1.0, 1.0) == 21 * 21
+
+    def test_a_single_point_still_counts_its_padded_box(self):
+        # zero raw extent + 0.5deg pad each side = 1deg span = 11 cells
+        assert bts._bbox_cell_count(5.0, 5.0, 5.0, 5.0) == 11 * 11
 
 
 class TestCanopyResumeProjectId:
@@ -1940,16 +1998,14 @@ class TestMainStationIdsFileAndDryRun:
         batch_labels = sorted(call.args[0] for call in mock_build.call_args_list)
         assert batch_labels == ["US_BWh", "US_Csa"]
 
-    def test_widely_separated_stations_in_the_same_zone_get_separate_extent_chunks(self, monkeypatch, tmp_path):
-        """Regression test for the real 2026-08-03 finding: same-zone
-        stations that are still geographically far apart (modeled on the
-        actual Mexicali pair -- ~1.4deg lat apart, ~150km) must NOT be
-        combined into one ERA5 batch just because they share a Koppen zone
-        -- _chunk_stations_by_extent must split them, with batch labels
-        gaining a _cN suffix once a zone splits. Deliberately uses stations
-        genuinely far apart (not just incidentally on opposite sides of a
-        grid boundary) so this test's outcome doesn't depend on exact grid
-        alignment."""
+    def test_same_zone_stations_far_apart_now_share_ONE_era5_batch(self, monkeypatch, tmp_path):
+        """Inverted premise (2026-09-17). This test previously asserted that
+        the actual Mexicali pair (~1.4deg lat apart, ~150km) must be SPLIT
+        into US_BWh_c0 and US_BWh_c1 by the 0.5deg spread cap. CDS was
+        measured not to charge for bbox area, so splitting them bought nothing
+        and doubled the ~33-min-per-request queue cost. They must now land in
+        a single batch, and the label must lose its _cN suffix because the
+        zone no longer splits."""
         far_station_1 = {"station_id": "USW00090001", "lon": -115.1833, "lat": 32.4, "elevation_m": 10.0, "name": "FAR1"}
         far_station_2 = {"station_id": "USW00090002", "lon": -114.85, "lat": 31.033, "elevation_m": 10.0, "name": "FAR2"}
         f = tmp_path / "ids.json"
@@ -1957,7 +2013,6 @@ class TestMainStationIdsFileAndDryRun:
         monkeypatch.setattr(sys, "argv", [
             "build_training_set.py", "--station-ids-file", str(f),
             "--start-date", "2016-06-01", "--end-date", "2016-06-30",
-            "--era5-max-chunk-extent-deg", "0.5",
         ])
         mocks = self._patch_common(
             list_ghcn_stations_return=[far_station_1, far_station_2],
@@ -1965,14 +2020,26 @@ class TestMainStationIdsFileAndDryRun:
         )
         with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], \
              mocks[5] as mock_build, mocks[6], mocks[7]:
-            # _patch_common's mocks[7] returns "BWh" for every station regardless
-            # of coordinates -- both fixture stations land in the same zone here,
-            # so any split must come from _chunk_stations_by_extent, not zone.
             bts.main()
 
-        assert mock_build.call_count == 2
-        batch_labels = sorted(call.args[0] for call in mock_build.call_args_list)
-        assert batch_labels == ["US_BWh_c0", "US_BWh_c1"]
+        assert mock_build.call_count == 1
+        assert mock_build.call_args_list[0].args[0] == "US_BWh"
+        passed_ids = {s["station_id"] for s in mock_build.call_args_list[0].args[1]}
+        assert passed_ids == {"USW00090001", "USW00090002"}
+
+    def test_the_removed_extent_flag_errors_instead_of_being_ignored(self, monkeypatch, tmp_path):
+        """A saved command line carrying --era5-max-chunk-extent-deg would
+        otherwise run with a ~100x-different request-count profile than its
+        author intended, at ~33 min of CDS queue per wrong request."""
+        f = tmp_path / "ids.json"
+        f.write_text(json.dumps({"station_ids": ["USW00090001"]}))
+        monkeypatch.setattr(sys, "argv", [
+            "build_training_set.py", "--station-ids-file", str(f),
+            "--start-date", "2016-06-01", "--end-date", "2016-06-30",
+            "--era5-max-chunk-extent-deg", "0.5",
+        ])
+        with pytest.raises(SystemExit):
+            bts.main()
 
 
 class TestMainPerBatchIsolation:

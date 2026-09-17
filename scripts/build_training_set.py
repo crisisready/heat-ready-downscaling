@@ -54,13 +54,20 @@ Batches by country, sub-batched by Koppen climate zone (2026-08-03): one
 ERA5-Land pull and one covariate-extraction pass per zone within a country
 (bbox covering that zone's stations only), not one pull per station -- the
 same amortization era5.py/vulnerability.py already rely on for per-project
-extraction. Sub-batching by zone (not just one bbox per country) matters
-most for --station-ids-file: a curated station set can span multiple zones
-across a country, and a single country-wide bbox for a geographically
-dispersed set can exceed CDS's own per-request cost limit (confirmed live
-2026-08-03) -- zones are naturally compact by construction, so this keeps
-every request's bbox small regardless of how spread out the country's full
-station set is.
+extraction. Zone is the sub-batch unit because the model's own gates are
+per-zone and the curated station lists are assembled that way, not because
+of any CDS limit.
+
+Within a zone, stations are then clustered into as FEW ERA5-Land requests as
+a grid-cell budget allows (_cluster_stations_by_bbox_cells). This reversed a
+2026-08-03 design that instead capped station SPREAD at 0.5 degrees to stay
+under "CDS's own per-request cost limit": measured live 2026-09-17, CDS does
+not charge for bbox area at all (4 requests from 100 to 360,000 cells at an
+identical field count, all accepted), so that cap bought nothing while
+multiplying the request COUNT that actually costs ~33 minutes of queue each.
+A 5-station Florida lane was issuing 5 independent 14-segment pulls. See
+_ERA5_MAX_CHUNK_CELLS for the measurement and for the real (bytes/memory)
+ceiling that now sets the budget.
 
 Usage:
     # Small test run, one country, short window, tight geographic cluster
@@ -1643,10 +1650,12 @@ def _group_stations_by_zone(stations: list[dict]) -> dict[str, list[dict]]:
     selection"). Climate zones are naturally geographically compact by
     construction and are already the unit the curated station lists
     themselves were assembled by, so batching by zone reduces every
-    request's bbox versus one country-wide batch -- but zone alone turned
-    out NOT to be sufficient on its own (a single Koppen zone like BWh can
-    still span a wide real area): _chunk_stations_by_extent runs on top of
-    this, per zone, for the actual bbox-size guarantee. koppen_climate_zone
+    request's bbox versus one country-wide batch. Zone is not, and was never
+    really, a bbox-SIZE mechanism -- CDS does not charge for area (measured
+    2026-09-17; see _ERA5_MAX_CHUNK_CELLS). It is the model's own gating unit
+    and the unit the curated station lists were built by, which is reason
+    enough. _cluster_stations_by_bbox_cells runs on top of this, per zone,
+    and bounds download volume. koppen_climate_zone
     is a local raster lookup (no network call), so recomputing it here even
     though build_rows_for_country's own per-station loop computes it again
     per row is cheap and not worth threading through as a precomputed
@@ -1658,42 +1667,109 @@ def _group_stations_by_zone(stations: list[dict]) -> dict[str, list[dict]]:
     return result
 
 
-# Default max raw station spread (in degrees, before stations_bbox's own
-# _BBOX_PAD_DEG padding) per ERA5-Land request chunk. Deliberately smaller
-# than _BBOX_PAD_DEG*2 -- confirmed live 2026-08-03 that _group_stations_by_
-# zone alone is NOT sufficient: 2 same-zone, same-50km-cluster Mexicali
-# stations (raw spread ~1.4deg lat x 0.33deg lon) still tripped CDS's
-# "cost limits exceeded" rejection once padded to a 2.37deg x 1.33deg bbox
-# -- padding, not station spread, was doing most of that damage (0.5deg pad
-# on each side alone contributes 1.0deg of the final extent in any
-# dimension). This constant bounds the RAW station spread going into
-# stations_bbox, not the final padded bbox -- see _chunk_stations_by_extent.
-_ERA5_MAX_CHUNK_EXTENT_DEG = 0.5
+# Max ERA5-Land grid cells in one request's padded bbox. This REPLACED a
+# 0.5-degree cap on raw station spread (_ERA5_MAX_CHUNK_EXTENT_DEG, removed
+# 2026-09-17) whose stated purpose -- staying under "CDS's own per-request
+# cost limit" -- it provably never served.
+#
+# Measured live 2026-09-17, four ERA5-Land requests holding the field count
+# constant at 5 vars x 24h x 31 days = 3,720 and varying ONLY `area`:
+#
+#     1 deg bbox  ->        100 cells -> accepted
+#    10 deg bbox  ->     10,000 cells -> accepted
+#    25 deg bbox  ->     62,500 cells -> accepted
+#    60 deg bbox  ->    360,000 cells -> accepted
+#
+# A 3,600x range in area, no cost-limit rejection at any size. That matches
+# ECMWF's documented model (ERA5-Land hourly is capped at ~12,000 FIELDS, a
+# field being one variable x level x timestep, with no area term) and matches
+# era5._split_by_calendar_month's own docstring: "chunking the bounding box or
+# station count, tried first, could never have fixed this". The live
+# 2026-08-03 observation recorded in the old constant's comment -- a
+# 2.37 x 1.33 degree bbox "still tripped CDS's cost limits exceeded" -- was a
+# mis-attribution: that same request cartesian-expanded 34 real days into 93
+# day-slots = 13,392 fields, over the limit on the DATE axis alone, and the
+# calendar-month split that actually fixed it landed the same day.
+#
+# So area is free to CDS but not to us, and this constant bounds the cost that
+# is real -- bytes, memory and /tmp:
+#   - era5.extract_era5_means reads ds[var].values[:, lat_idx, lon_idx], which
+#     materialises the WHOLE variable array before indexing: peak is
+#     n_times x n_cells x 8 bytes PER VARIABLE, independent of station count.
+#   - era5._merge_era5_segments concats every segment of a year in memory
+#     (n_times ~8,856 for a padded training year).
+#   - every segment plus the merged output is a /tmp tempfile.
+# At 10,000 cells a merged padded year peaks near 8,856 x 10,000 x 8 = ~0.7 GB
+# per variable and writes a ~1.8 GB netCDF -- comfortable on the r6i.4xlarge
+# this runs on, with ~100x more area per request than the old 0.5-degree grid
+# bucket gave (which, once padded, was only ~100 cells).
+_ERA5_MAX_CHUNK_CELLS = 10_000
 
 
-def _chunk_stations_by_extent(stations: list[dict], max_extent_deg: float) -> list[list[dict]]:
-    """Partition stations into geographically-bounded groups, each spanning
-    at most ~max_extent_deg of raw lon/lat spread -- unlike
-    _select_geographically_stratified (which CAPS a station count, dropping
-    the rest), every station is kept here; this only controls how many
-    separate ERA5-Land requests they get split across. Needed alongside
-    _group_stations_by_zone: a climate zone alone is not reliably small
-    enough (confirmed live 2026-08-03 -- see _ERA5_MAX_CHUNK_EXTENT_DEG's
-    own comment), so this bounds the actual station spread directly,
-    independent of zone.
+def _bbox_cell_count(west: float, south: float, east: float, north: float,
+                     pad_deg: float = _BBOX_PAD_DEG, res: float = 0.1) -> int:
+    """ERA5-Land grid cells in the bbox stations_bbox() would produce for this
+    raw extent. res defaults to ERA5-Land's 0.1 degree spacing (era5.py's
+    _DATASET_RESOLUTION["reanalysis-era5-land"])."""
+    lat_cells = round((north - south + 2 * pad_deg) / res) + 1
+    lon_cells = round((east - west + 2 * pad_deg) / res) + 1
+    return lat_cells * lon_cells
 
-    Grid-based: stations are bucketed into max_extent_deg x max_extent_deg
-    cells -- cheap, deterministic, and every group's raw spread is bounded
-    by construction (a cell's own width), not by iteratively measuring and
-    re-splitting an oversized group."""
+
+def _cluster_stations_by_bbox_cells(
+    stations: list[dict], max_cells: int = _ERA5_MAX_CHUNK_CELLS,
+    pad_deg: float = _BBOX_PAD_DEG, res: float = 0.1,
+) -> list[list[dict]]:
+    """Partition stations into as FEW groups as a cell budget allows -- the
+    opposite objective from the grid bucketing this replaced.
+
+    Every station is kept (nothing is dropped, unlike
+    _select_geographically_stratified); this only controls how many separate
+    ERA5-Land requests they are split across, and each request is what costs
+    ~33 minutes of CDS queue regardless of how little data it moves. Fewer,
+    larger bboxes is therefore strictly better right up to the point where
+    bytes/memory bite -- see _ERA5_MAX_CHUNK_CELLS for why that point is where
+    it is, and for the live measurement showing CDS does not charge for area.
+
+    Greedy agglomerative, not grid-based: seed a cluster with the westernmost
+    remaining station, then repeatedly absorb whichever remaining station
+    grows the padded bbox's cell count least, stopping when no station can be
+    added under max_cells. Deterministic (ties broken by the sort key), and
+    O(n^2) because each cluster's bbox is tracked incrementally rather than
+    recomputed from its members.
+
+    A grid would have been cheaper to write but splits arbitrarily: two
+    stations 10 km apart across a cell boundary land in different buckets and
+    each pays a full ERA5 pull, which is exactly the defect that made a
+    5-station Florida lane issue 5 independent 14-segment pulls (~70 CDS
+    requests for 5 stations, confirmed live 2026-09-17 in
+    run_country_US_lane1.log). Clustering by actual adjacency cannot do that.
+    """
     if not stations:
         return []
-    cells: dict[tuple[int, int], list[dict]] = {}
-    for s in stations:
-        cx = int(s["lon"] // max_extent_deg)
-        cy = int(s["lat"] // max_extent_deg)
-        cells.setdefault((cx, cy), []).append(s)
-    return list(cells.values())
+    remaining = sorted(stations, key=lambda s: (s["lon"], s["lat"], s["station_id"]))
+    clusters: list[list[dict]] = []
+    while remaining:
+        seed = remaining.pop(0)
+        cluster = [seed]
+        west = east = seed["lon"]
+        south = north = seed["lat"]
+        while remaining:
+            best_i = None
+            best_cells = None
+            best_box = None
+            for i, cand in enumerate(remaining):
+                w, e = min(west, cand["lon"]), max(east, cand["lon"])
+                s_, n = min(south, cand["lat"]), max(north, cand["lat"])
+                cells = _bbox_cell_count(w, s_, e, n, pad_deg=pad_deg, res=res)
+                if cells <= max_cells and (best_cells is None or cells < best_cells):
+                    best_i, best_cells, best_box = i, cells, (w, s_, e, n)
+            if best_i is None:
+                break
+            cluster.append(remaining.pop(best_i))
+            west, south, east, north = best_box
+        clusters.append(cluster)
+    return clusters
 
 
 # Covariates most worth eyeballing before committing to a real write: the 4
@@ -1795,12 +1871,16 @@ def main() -> None:
                               "a killed process restarts only the stations not yet fetched, rather than "
                               "re-paying every NOAA round-trip. Omit for no cross-run resume (fine for a "
                               "small/test run).")
-    parser.add_argument("--era5-max-chunk-extent-deg", type=float, default=_ERA5_MAX_CHUNK_EXTENT_DEG,
-                         help="Max raw lon/lat spread (degrees, before stations_bbox's own padding) of "
-                              "stations in one ERA5-Land request -- each zone-batch is further split into "
-                              "chunks bounded by this (see _chunk_stations_by_extent). Lower this if CDS "
-                              "still rejects a request as too large; a single climate zone is not always "
-                              "small enough on its own (confirmed live 2026-08-03).")
+    parser.add_argument("--era5-max-chunk-cells", type=int, default=_ERA5_MAX_CHUNK_CELLS,
+                         help="Max ERA5-Land grid cells in one request's padded bbox. Stations are "
+                              "clustered into as FEW requests as this budget allows (see "
+                              "_cluster_stations_by_bbox_cells). Replaces --era5-max-chunk-extent-deg, "
+                              "which capped station SPREAD to stay under a CDS cost limit that was "
+                              "measured live 2026-09-17 not to depend on area at all. Lower this only "
+                              "if a run hits memory/disk pressure in era5.extract_era5_means or "
+                              "_merge_era5_segments -- not to appease CDS.")
+    parser.add_argument("--era5-max-chunk-extent-deg", type=float, default=None,
+                         help=argparse.SUPPRESS)
     parser.add_argument("--era5-source", choices=("cds", "openmeteo"), default="cds",
                          help="Where ERA5-Land daily tmax/tmin comes from. \"cds\" (default) is the "
                               "original CDS async-queue fetch, unchanged. \"openmeteo\" (2026-08-20) uses "
@@ -1849,6 +1929,17 @@ def main() -> None:
     # (build_rows_for_country's own docstring already says so, but nothing enforced or even
     # warned about it) -- passed alongside --era5-source openmeteo, it silently did nothing,
     # discoverable only by finding an empty cache dir after a killed run.
+    # Fail loudly, not silently: a saved command line carrying the removed flag
+    # would otherwise run with a 100x-different request-count profile than its
+    # author intended, and each wrong request costs ~33 min of CDS queue.
+    if args.era5_max_chunk_extent_deg is not None:
+        parser.error(
+            "--era5-max-chunk-extent-deg was removed 2026-09-17. It capped station spread to stay "
+            "under a CDS per-request cost limit that was measured live not to depend on bbox area "
+            "at all (4 requests, 100 to 360,000 cells, identical field count, all accepted), while "
+            "multiplying the request count that IS the real cost. Use --era5-max-chunk-cells "
+            f"(default {_ERA5_MAX_CHUNK_CELLS}), which bounds download volume/memory instead.")
+
     if args.era5_cache_dir and args.era5_source != "cds":
         parser.error("--era5-cache-dir only applies with --era5-source cds "
                       "(the openmeteo source has its own --ghcn-checkpoint-dir-based resume)")
@@ -1937,14 +2028,15 @@ def main() -> None:
             print(f"[{country}] no active stations found, skipping")
             continue
 
-        # Sub-batch by climate zone, then further by raw geographic spread --
-        # see _group_stations_by_zone's and _chunk_stations_by_extent's own
-        # docstrings for why both are needed (a country-wide, or even a
-        # single-zone, bbox can exceed CDS's per-request cost limit,
-        # confirmed live 2026-08-03).
+        # Sub-batch by climate zone (the model's own gating unit), then cluster
+        # each zone's stations into as few ERA5-Land requests as a grid-cell
+        # budget allows -- see _group_stations_by_zone and
+        # _cluster_stations_by_bbox_cells. Request COUNT is the cost here
+        # (~33 min of CDS queue each, measured 2026-09-17), not bbox size.
         zone_batches = _group_stations_by_zone(stations)
         for zone in sorted(zone_batches):
-            extent_chunks = _chunk_stations_by_extent(zone_batches[zone], args.era5_max_chunk_extent_deg)
+            extent_chunks = _cluster_stations_by_bbox_cells(
+                zone_batches[zone], max_cells=args.era5_max_chunk_cells)
             for chunk_i, chunk_stations in enumerate(extent_chunks):
                 batch_label = (
                     f"{country}_{zone}" if len(extent_chunks) == 1 else f"{country}_{zone}_c{chunk_i}"
