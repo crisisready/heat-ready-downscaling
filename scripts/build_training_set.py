@@ -1235,7 +1235,11 @@ def fetch_era5_land_for_stations_via_timeseries(
     )
 
     configured_accounts = [i for i in era5.all_account_indices() if era5.account_configured(i)]
-    if not configured_accounts:
+    # Guarded on `pending` (code review finding): a fully-checkpointed resume
+    # needs no CDS access at all, so raising here would break the resume path in
+    # an environment with no credentials -- exactly the case the checkpoint
+    # exists to make cheap.
+    if pending and not configured_accounts:
         # Code review finding: without this, the round-robin index below raises
         # ZeroDivisionError per station. That IS caught one level up, so every
         # station is correctly recorded as failed -- but with "unhandled
