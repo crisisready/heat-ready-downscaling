@@ -31,6 +31,14 @@ dependencies = [
   "exactextract==0.3.0",
   "xarray==2024.11.0",
   "netcdf4==1.7.2",
+  # scripts/era5_zarr_extract.py's future S3/Zarr insurance-path tile
+  # store (docs/diagnosis-2026-09-17-cds-acquisition-request-shape.md) --
+  # not wired into any CLI yet, so nothing in this repo's own CI exercises
+  # zarr/s3fs today (its test is in conftest.py's collect_ignore, same as
+  # every other private-repo-only module test). xarray.open_zarr needs
+  # both installed at runtime even though neither is imported directly.
+  "zarr",
+  "s3fs",
   "timezonefinder==5.2.0",
   "pytz",
   "kgcpy==1.1.8",
