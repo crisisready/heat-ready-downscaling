@@ -1651,6 +1651,68 @@ class TestTimeseriesLandMaskRescue:
         assert set(offsets[:4]) == {(-1, 0), (1, 0), (0, -1), (0, 1)}
         assert len(offsets) == 24  # 5x5 block minus the centre
 
+    def test_a_rejected_request_is_retried_on_a_different_account(self):
+        """The issue #648 fix, which the gridded path has had since 2026-09-16
+        and which I failed to carry into this path. Cost of the omission,
+        measured: 49 stations lost outright to a single transient rejection,
+        six of them Indonesian. A rejection is transient queue-side congestion,
+        and it is per-ACCOUNT (measured: one account rejecting 43% while
+        another succeeded 17 times in the same minutes), so the retry must move
+        accounts rather than repeat the one that just refused."""
+        calls = []
+        rejected = cads_api_client.processing.ProcessingFailedError(
+            "Unknown API state 'rejected'")
+
+        def flaky(lat, lon, s, e, variables=None, account_index=0):
+            calls.append(account_index)
+            if len(calls) == 1:
+                raise rejected
+            path = "/tmp/_rr.zip"
+            open(path, "w").close()
+            return path
+
+        with patch.object(bts.era5, "download_era5_timeseries", side_effect=flaky), \
+             patch.object(bts.time, "sleep"):
+            out = bts._download_timeseries_with_rejected_retry(
+                1.0, 2.0, date(2023, 1, 1), date(2023, 1, 2), 0, [0, 1, 2], [3])
+        assert out == "/tmp/_rr.zip"
+        assert calls == [0, 1], f"retry must move to a different account, got {calls}"
+        os.unlink("/tmp/_rr.zip")
+
+    def test_an_exhausted_retry_budget_propagates_the_rejection(self):
+        """The budget is shared across a station's whole rescue walk, so it must
+        actually stop rather than retry forever."""
+        rejected = cads_api_client.processing.ProcessingFailedError(
+            "Unknown API state 'rejected'")
+        calls = []
+
+        def always_rejected(lat, lon, s, e, variables=None, account_index=0):
+            calls.append(account_index)
+            raise rejected
+
+        with patch.object(bts.era5, "download_era5_timeseries", side_effect=always_rejected), \
+             patch.object(bts.time, "sleep"):
+            with pytest.raises(cads_api_client.processing.ProcessingFailedError):
+                bts._download_timeseries_with_rejected_retry(
+                    1.0, 2.0, date(2023, 1, 1), date(2023, 1, 2), 0, [0, 1, 2], [2])
+        assert len(calls) == 3, f"1 initial + 2 budgeted retries, got {len(calls)}"
+
+    def test_a_non_rejected_error_is_not_retried(self):
+        """Only a 'rejected' outcome is transient. A real auth/400 failure must
+        surface immediately rather than burn the budget."""
+        calls = []
+
+        def auth_error(lat, lon, s, e, variables=None, account_index=0):
+            calls.append(account_index)
+            raise RuntimeError("connection reset")
+
+        with patch.object(bts.era5, "download_era5_timeseries", side_effect=auth_error), \
+             patch.object(bts.time, "sleep"):
+            with pytest.raises(RuntimeError, match="connection reset"):
+                bts._download_timeseries_with_rejected_retry(
+                    1.0, 2.0, date(2023, 1, 1), date(2023, 1, 2), 0, [0, 1, 2], [3])
+        assert len(calls) == 1
+
     def test_station_timeout_covers_the_full_rescue_walk(self):
         """Code review finding, real: the per-station ceiling was a flat 600s
         while a masked station's worst case is its own cell PLUS every rescue
@@ -1658,11 +1720,16 @@ class TestTimeseriesLandMaskRescue:
         a genuinely open-ocean station short and turn a correct, expected
         outcome into a spurious 'batch budget exhausted' for every station
         sharing its batch."""
-        worst_case_requests = 1 + len(bts._land_rescue_offsets())
-        assert worst_case_requests == 25
+        worst_case_requests = (
+            1 + len(bts._land_rescue_offsets()) + bts._TIMESERIES_REJECTED_MAX_RETRIES)
+        assert worst_case_requests == 28
+        backoff = sum(
+            bts._TIMESERIES_REJECTED_BACKOFF_BASE_S * (2 ** a)
+            for a in range(bts._TIMESERIES_REJECTED_MAX_RETRIES))
         timeout = bts._timeseries_station_timeout_s()
-        assert timeout >= worst_case_requests * 30.0, (
-            f"{timeout}s cannot cover {worst_case_requests} requests at ~30s each"
+        assert timeout >= worst_case_requests * 30.0 + backoff, (
+            f"{timeout}s cannot cover {worst_case_requests} requests at ~30s each "
+            f"plus {backoff}s of retry backoff"
         )
 
     def test_offsets_are_deterministic(self):
