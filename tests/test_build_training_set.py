@@ -12,6 +12,7 @@ Unit tests for scripts/build_training_set.py — no network, DB, or AWS calls.""
 import contextlib
 import fcntl
 import json
+import math
 import os
 import sys
 import threading
@@ -1730,6 +1731,28 @@ class TestTimeseriesLandMaskRescue:
         assert timeout >= worst_case_requests * 30.0 + backoff, (
             f"{timeout}s cannot cover {worst_case_requests} requests at ~30s each "
             f"plus {backoff}s of retry backoff"
+        )
+
+    def test_max_substitution_distance_is_the_box_corner_not_the_axis(self):
+        """Pins the FULL distance set, because I got this wrong twice: the
+        original comment said "~22 km" (the 2-cell axis distance, understating
+        the real maximum by 40%), and my first attempt at this very test
+        asserted four distances and missed the (+/-1,+/-2) knight-move offsets
+        at 24.8 km. A 5x5 box has FIVE distinct distances, and the maximum is
+        the corner at sqrt(2^2+2^2) x 11.1 = 31.4 km.
+
+        Worth asserting rather than describing: a rescued station's
+        grid_daily_value_c -- the model's regression target -- comes from the
+        substituted cell, so anyone interpreting coastal residuals needs the
+        real bound. Computed from the offsets actually tried, so it cannot drift
+        from the implementation again."""
+        km_per_cell = bts._ERA5_LAND_GRID_DEG * 111.0
+        dists = sorted({
+            round(km_per_cell * math.hypot(*o), 1) for o in bts._land_rescue_offsets()
+        })
+        assert dists == [11.1, 15.7, 22.2, 24.8, 31.4], dists
+        assert max(dists) == pytest.approx(31.4, abs=0.1), (
+            "the documented maximum substitution distance must match the offsets actually tried"
         )
 
     def test_offsets_are_deterministic(self):
