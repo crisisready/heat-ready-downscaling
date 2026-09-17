@@ -1637,6 +1637,32 @@ class TestClusterStationsByBboxCells:
         as_ids = lambda cs: [sorted(s["station_id"] for s in c) for c in cs]
         assert as_ids(first) == as_ids(second)
 
+    def test_hits_the_provable_lower_bound_on_the_real_us_geometry(self):
+        """Round-2 review finding: greedy clustering is not guaranteed minimal.
+        True in general, so pin down that it is minimal on the geometry that
+        actually matters. The real 389-station US Af/Am set is two populations,
+        S. Florida and Hawaii's Big Island. Their combined padded bbox is
+        ~70,564 cells against a 10,000 budget, so no partition can put them
+        together -- 2 is a hard lower bound, and greedy achieves it."""
+        florida = [
+            {"station_id": f"FL{i}", "lat": 25.32 + (1.87 * i / 20), "lon": -80.82 + (0.79 * i / 20)}
+            for i in range(21)
+        ]
+        hawaii = [
+            {"station_id": f"HI{i}", "lat": 19.18 + (0.96 * i / 10), "lon": -155.58 + (0.78 * i / 10)}
+            for i in range(11)
+        ]
+        combined_cells = bts._bbox_cell_count(-155.58, 19.18, -80.03, 27.19)
+        assert combined_cells > bts._ERA5_MAX_CHUNK_CELLS, (
+            "premise of this test: the two populations must be unmergeable"
+        )
+        clusters = bts._cluster_stations_by_bbox_cells(florida + hawaii)
+        assert len(clusters) == 2
+        by_prefix = [{s["station_id"][:2] for s in c} for c in clusters]
+        assert {"FL"} in by_prefix and {"HI"} in by_prefix, (
+            "the two clusters must be exactly the two real populations, not a split through one"
+        )
+
     def test_raises_when_one_station_alone_cannot_fit_the_budget(self):
         """A single station's padded bbox is the floor -- no clustering can get
         under a budget smaller than that, so it must fail loudly at clustering

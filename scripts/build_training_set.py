@@ -1757,6 +1757,21 @@ def _cluster_stations_by_bbox_cells(
     O(n^2) because each cluster's bbox is tracked incrementally rather than
     recomputed from its members.
 
+    NOT guaranteed minimal, and deliberately so (round-2 review finding,
+    accepted rather than fixed): partitioning points into the fewest
+    axis-aligned boxes each under a cell budget is a bin-packing-flavoured
+    combinatorial problem, and a greedy pass can lose to some other valid
+    partition. Two reasons that is the right trade here. First, the cost being
+    minimised is CDS requests, and the gap between greedy and optimal is at
+    worst a small number of requests against the 8-18x the change already wins
+    -- an exact solver would be real complexity guarding a rounding error.
+    Second, on the station geometry this actually runs against, greedy hits the
+    provable lower bound: the real 389-station US Af/Am set clusters to 2, and
+    S. Florida plus Hawaii cannot share a bbox at any budget near this one
+    (their combined padded bbox is ~70,564 cells against 10,000), so 2 is not
+    merely what greedy found but the minimum any partition could achieve. See
+    test_hits_the_provable_lower_bound_on_the_real_us_geometry.
+
     A grid would have been cheaper to write but splits arbitrarily: two
     stations 10 km apart across a cell boundary land in different buckets and
     each pays a full ERA5 pull, which is exactly the defect that made a
