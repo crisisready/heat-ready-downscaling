@@ -1708,11 +1708,30 @@ _ERA5_MAX_CHUNK_CELLS = 10_000
 
 def _bbox_cell_count(west: float, south: float, east: float, north: float,
                      pad_deg: float = _BBOX_PAD_DEG, res: float = 0.1) -> int:
-    """ERA5-Land grid cells in the bbox stations_bbox() would produce for this
-    raw extent. res defaults to ERA5-Land's 0.1 degree spacing (era5.py's
-    _DATASET_RESOLUTION["reanalysis-era5-land"])."""
-    lat_cells = round((north - south + 2 * pad_deg) / res) + 1
-    lon_cells = round((east - west + 2 * pad_deg) / res) + 1
+    """ERA5-Land grid points in the request CDS will actually receive for this
+    raw station extent. res defaults to ERA5-Land's 0.1 degree spacing
+    (era5._DATASET_RESOLUTION["reanalysis-era5-land"]).
+
+    Deliberately mirrors era5._build_era5_request's own outward grid snap
+    (`math.ceil(maxy / r) * r`, `math.floor(minx / r) * r`, ...) rather than
+    approximating it as round(extent / res) + 1. Code review finding, real: the
+    approximation ignores where the raw edges fall relative to the grid and can
+    UNDERCOUNT the delivered request by several percent, which would make
+    _ERA5_MAX_CHUNK_CELLS a soft suggestion instead of the bound this function's
+    callers treat it as. Mirroring the snap exactly means the two agree by
+    construction -- see the test that asserts this against
+    _build_era5_request's real `area` output.
+
+    Padding is applied first, matching stations_bbox(), because the pad is part
+    of the raw extent CDS is asked for; the snap then widens it to grid."""
+    padded_west, padded_east = west - pad_deg, east + pad_deg
+    padded_south, padded_north = south - pad_deg, north + pad_deg
+    north_snapped = math.ceil(padded_north / res) * res
+    south_snapped = math.floor(padded_south / res) * res
+    east_snapped = math.ceil(padded_east / res) * res
+    west_snapped = math.floor(padded_west / res) * res
+    lat_cells = round((north_snapped - south_snapped) / res) + 1
+    lon_cells = round((east_snapped - west_snapped) / res) + 1
     return lat_cells * lon_cells
 
 
@@ -1768,6 +1787,25 @@ def _cluster_stations_by_bbox_cells(
                 break
             cluster.append(remaining.pop(best_i))
             west, south, east, north = best_box
+        # Code review finding, real: the loop above only ever CHECKS candidates
+        # against max_cells, so a cluster that absorbed nothing was appended
+        # without its own bbox ever being tested. Harmless at the default budget
+        # (one station's padded bbox is a fixed 11x11 = 121 cells against 10,000)
+        # but it meant the invariant every caller and test relies on could be
+        # violated silently under a small --era5-max-chunk-cells. Raise here,
+        # before any CDS call is made, rather than emitting an over-budget
+        # cluster: a single station that cannot fit means the budget is
+        # misconfigured, and that is a launch-time mistake worth failing loudly
+        # on when the alternative costs ~33 min of queue per request.
+        own_cells = _bbox_cell_count(west, south, east, north, pad_deg=pad_deg, res=res)
+        if own_cells > max_cells:
+            raise ValueError(
+                f"station {cluster[0]['station_id']} alone needs {own_cells} ERA5-Land grid "
+                f"cells once padded by {pad_deg} deg, which exceeds max_cells={max_cells}. "
+                f"A single station's padded bbox is the floor here, so no clustering can "
+                f"satisfy this budget -- raise --era5-max-chunk-cells (the default is "
+                f"{_ERA5_MAX_CHUNK_CELLS})."
+            )
         clusters.append(cluster)
     return clusters
 

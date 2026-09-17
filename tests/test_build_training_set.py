@@ -1620,7 +1620,14 @@ class TestClusterStationsByBboxCells:
         clusters = bts._cluster_stations_by_bbox_cells(stations)
         assert len(clusters) == 1
 
-    def test_is_deterministic(self):
+    def test_result_does_not_depend_on_input_order(self):
+        """Narrower claim than "deterministic", deliberately. Code review
+        finding: the function re-sorts its input on the first line by a total
+        order (lon, lat, station_id), so a reversed-input test is guaranteed to
+        pass by construction and does NOT exercise the cells < best_cells
+        tie-break. Order-independence is still the property callers need --
+        two invocations over the same stations must produce the same request
+        plan -- so it is worth asserting under an honest name."""
         stations = [
             {"station_id": f"S{i}", "lat": 25.0 + 0.3 * i, "lon": -80.0 - 0.3 * i}
             for i in range(12)
@@ -1630,8 +1637,48 @@ class TestClusterStationsByBboxCells:
         as_ids = lambda cs: [sorted(s["station_id"] for s in c) for c in cs]
         assert as_ids(first) == as_ids(second)
 
+    def test_raises_when_one_station_alone_cannot_fit_the_budget(self):
+        """A single station's padded bbox is the floor -- no clustering can get
+        under a budget smaller than that, so it must fail loudly at clustering
+        time rather than silently emitting an over-budget request."""
+        stations = [{"station_id": "USW00090001", "lat": 25.0, "lon": -80.0}]
+        with pytest.raises(ValueError, match="alone needs"):
+            bts._cluster_stations_by_bbox_cells(stations, max_cells=50)
+
 
 class TestBboxCellCount:
+    def test_matches_the_area_build_era5_request_actually_sends(self):
+        """The invariant that makes _ERA5_MAX_CHUNK_CELLS a real bound rather
+        than an estimate: our cell count must equal the grid-point count of the
+        `area` era5._build_era5_request actually puts on the wire. Code review
+        finding, real: an earlier round(extent/res)+1 approximation ignored where
+        the raw edges fell relative to the 0.1deg grid and could undercount the
+        delivered request by several percent."""
+        import random
+        from datetime import date as _date
+        random.seed(20260917)
+        res = 0.1
+        for _ in range(400):
+            west = random.uniform(-179.0, 178.0)
+            south = random.uniform(-88.0, 87.0)
+            east = west + random.uniform(0.0, 1.0)
+            north = south + random.uniform(0.0, 1.0)
+            bbox = bts.stations_bbox(
+                [{"lon": west, "lat": south}, {"lon": east, "lat": north}]
+            )
+            req = bts.era5._build_era5_request(
+                bbox, _date(2023, 3, 1), _date(2023, 3, 31),
+                dataset="reanalysis-era5-land",
+                variables=bts._TRAINING_ERA5_VARIABLES,
+            )
+            n, w, s_, e = req["area"]
+            actual = (round((n - s_) / res) + 1) * (round((e - w) / res) + 1)
+            ours = bts._bbox_cell_count(west, south, east, north)
+            assert ours == actual, (
+                f"cell count {ours} != delivered {actual} for bbox {bbox} (area {req['area']})"
+            )
+
+
     def test_counts_era5_land_cells_including_the_padding(self):
         # 1deg raw extent + 0.5deg pad each side = 2deg span = 21 cells at 0.1deg
         assert bts._bbox_cell_count(0.0, 0.0, 1.0, 1.0) == 21 * 21
