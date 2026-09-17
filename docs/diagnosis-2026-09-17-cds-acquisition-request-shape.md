@@ -59,8 +59,24 @@ genuinely fixes the field-count overrun, and bbox/station chunking, which by tha
 *cannot* affect it. The second was kept anyway. It does not reduce cost; it multiplies request
 count by the number of 0.5-degree cells the station set occupies.
 
-Size confirms volume is not the constraint: `US_Af_c0`'s bbox is one station padded 0.5 degree
-(~100 ERA5-Land cells), and the observed segment payloads are **~1.0 MB each**.
+Size confirms volume is not the *current* constraint: `US_Af_c0`'s bbox is one station padded
+0.5 degree (~100 ERA5-Land cells), and the observed segment payloads are **~1.0 MB each**. That
+does **not** mean bytes are free at any bbox size — see 5.1 for the real ceiling.
+
+**One recorded observation in this codebase contradicts the claim above, and it has to be
+addressed rather than ignored.** `_ERA5_MAX_CHUNK_EXTENT_DEG`'s own comment states:
+
+> confirmed live 2026-08-03 that `_group_stations_by_zone` alone is NOT sufficient: 2 same-zone
+> … stations (raw spread ~1.4deg lat x 0.33deg lon) still tripped CDS's "cost limits exceeded"
+> rejection once padded to a 2.37deg x 1.33deg bbox — padding, not station spread, was doing
+> most of that damage.
+
+Either the field-only cost model is incomplete, or that rejection was mis-attributed. The
+mis-attribution reading is the more likely one: the calendar-month split landed *the same day*
+against *the same symptom*, and the request it fixed had 34 real days cartesian-expanded into 93
+day-slots = 13,392 fields at 6 variables — over the limit on the date axis alone, with the bbox
+irrelevant. But "more likely" is not measured, so this is treated as an open question and is the
+first thing the probe in 5.6 settles.
 
 ### 2.2 Calendar-month fan-out
 
@@ -69,18 +85,46 @@ Size confirms volume is not the constraint: `US_Af_c0`'s bbox is one station pad
 (Dec 2022, Jan–Dec 2023, Jan 2024) — exactly what the log reports. So 14 serialized CDS
 requests per station-chunk per year.
 
-This is over-conservative against the real budget. With 6 variables, the 12,000-field limit
-allows `12000 / (6 x 24) = 83` day-slots per request, and the cartesian year/month/day schema
-means the binding quantity is `n_months x n_days_in_union`:
+This is over-conservative against the real budget — but by less than a first pass suggests,
+and the correction matters. CDS's ERA5-Land hourly per-request limit is **~12,000 fields**
+(the codebase calls it `~12,000`; ECMWF documents 12,000, and the only *observed* data points
+are 13,392 rejected and 4,464 accepted, so treat it as approximate). A field is one
+variable x level x timestep.
 
-| segment | day-slots | fields (6 var) | under 12,000? |
-|---|---|---|---|
-| 1 calendar month (current) | 31 | 4,464 | yes — uses 37% of budget |
-| 2 calendar months | 62 | 8,928 | yes |
-| 3 calendar months | 93 | 13,392 | **no** — this is the documented 2026-08-03 failure |
+`_build_era5_request` builds **three** independent lists — `year`, `month`, `day` — so the
+binding quantity is
 
-So 2-month segments are safe and halve the count (14 → 7). The floor, given 6 x 24 x 369 =
-53,136 fields total, is 5 requests per bbox-year.
+```
+fields = n_vars x 24 x (n_years x n_months x n_days_in_union)
+```
+
+**The `n_years` factor is easy to miss and it is decisive.** The padded 2023 window is
+2022-12-30..2024-01-02, so the first and last segments of every training year straddle a year
+boundary. A segment that does so multiplies its day-slots by 2:
+
+| segment | years x months x days | slots | 6 var | 5 var | 3 var |
+|---|---|---|---|---|---|
+| 1 calendar month (current) | 1x1x31 | 31 | 4,464 ok (37% of budget) | 3,720 ok | 2,232 ok |
+| Jan–Feb 2023 | 1x2x31 | 62 | 8,928 ok | 7,440 ok | 4,464 ok |
+| **Dec 2022 + Jan 2023** | **2x2x31** | **124** | **17,856 REJECTED** | **14,880 REJECTED** | 8,928 ok |
+| Jan–Mar 2023 | 1x3x31 | 93 | 13,392 REJECTED | 11,160 ok | 6,696 ok |
+| Jan–May 2023 | 1x5x31 | 155 | 22,320 REJECTED | 18,600 REJECTED | 11,160 ok |
+
+So segments may be widened but **must never cross a calendar-year boundary** — naively pairing
+the 14 months into 7 would put `(Dec 2022, Jan 2023)` at 17,856 fields and earn exactly the
+`cost limits exceeded` rejection `_split_by_calendar_month` was ported forward to fix.
+
+Year-aligned minimum request counts per bbox-year, with the two padding months necessarily
+standing alone:
+
+| variables | max months/segment | segments per padded year |
+|---|---|---|
+| 6 (today) | 2 | 6 + 2 = **8** |
+| 5 (drop unused ssrd, see 3.3) | 3 | 4 + 2 = **6** |
+
+A naive "total fields / limit" floor (`6 x 24 x 369 = 53,136` → 5 requests) is **wrong**: it
+ignores the cartesian quantization above. At 6 variables no request can exceed 2 months, so the
+achievable floor is 8, not 5.
 
 ### 2.3 Queue latency — the one genuinely CDS-side term
 
@@ -107,24 +151,41 @@ PR #42 added `--era5-cache-dir` and PR #46 gave each calendar-month segment its 
 `argparse` `default=None`]. So every `_remaining` / `_retry` relaunch re-pays every CDS
 round-trip. The lanes are named for having been relaunched repeatedly.
 
-### 3.2 Abandoned CDS jobs are never deleted, and they poison the account
+### 3.2 CDS jobs are never dismissed, and the lock's scan order load-imbalances the accounts
 
-Each account currently holds 4–6 jobs in `accepted` state, never started, up to **83 minutes**
-old — but `_era5_download_lock` should permit only one in-flight request per account.
+Two separate things here. One is certain; one was initially overclaimed and is downgraded.
 
-Proof they are orphans rather than jobs patiently waiting their turn: on every account, jobs
-created *after* the oldest still-`accepted` job have **already completed successfully** (6, 13
-and 15 of them respectively). A genuine queue does not finish later arrivals first. Nothing in
-`download_era5` ever deletes or dismisses a job, so every abandoned submission keeps consuming
-the per-user queue allowance.
+**Certain: nothing ever dismisses a CDS job.** There is no `delete`/`dismiss` call anywhere in
+`era5.py`. Every account currently holds 4–6 jobs in `accepted` state, never started, up to
+**83 minutes** old, while `_era5_download_lock` should permit only one in-flight request per
+account. That is real hygiene debt and we should dismiss jobs on exit regardless of anything
+else.
 
-The consequence is not theoretical. One of the three accounts — the one that
-`_era5_download_lock`'s free-slot-first scan reaches first, so it absorbs the most submissions —
-reports `queued: 5, running: 0` against `"The maximum number of per-user requests that access
-the CDS-MARS data is 1"`, and **86 of its last 200 jobs were rejected (43%)**. The other two
-accounts, reached less often, show 0 rejections out of 200. Issue #648's rejected-retry handler
-treats those rejections as transient congestion and backs off; they are substantially
-self-inflicted.
+**Downgraded: that these specific jobs are queue-poisoning orphans is NOT established.** The
+original version of this section argued from a FIFO violation — on every account, jobs created
+*after* the oldest still-`accepted` job had already completed (6, 13 and 15 of them) — that the
+old ones must be abandoned. That inference does not hold, and section 2.3 of this same document
+is what breaks it: CDS serves an already-materialised result in seconds (the
+`cci2-prod-cache-*` hits), and 3.1 establishes that no lane passes `--era5-cache-dir`, so a
+large fraction of submissions are *identical resubmissions* that come back as cache/dedup hits
+immediately while a genuinely novel request queues behind the global backlog. Later-finishes-
+first is then expected, with no orphaning. Two further alternatives also fit: CDS's QoS is
+cost-weighted rather than FIFO, and these accounts are shared with production's Lambda pipeline
+(`manager.cds_request_lock`), so an `accepted` job need not belong to a training lane at all.
+
+**A simpler, better-supported explanation for the rejection asymmetry.** One account — the one
+`_era5_download_lock`'s free-slot-first scan reaches first — reports `queued: 5, running: 0`
+against `"The maximum number of per-user requests that access the CDS-MARS data is 1"`, and
+**86 of its last 200 jobs were rejected (43%)**, against 0/200 on each of the other two. The
+lock scans `configured` in index order and takes the first free slot, so whenever concurrency is
+1 (the normal case for a single lane) account 0 is chosen *every time* and accounts 1 and 2 are
+never touched at all. That alone explains the asymmetry without any orphan theory, and it points
+at a different and more valuable fix: **rotate or randomise the scan start order** so the three
+accounts we actually have get used evenly.
+
+The honest conclusion: part of issue #648's "transient congestion" framing is likely
+self-inflicted, but via load-imbalance rather than via proven orphaning, and dismissing jobs is
+hygiene we should do anyway.
 
 ### 3.3 One of the six requested variables is never used
 
@@ -134,7 +195,15 @@ only `grid_tmax_c`, `grid_tmin_c`, `grid_specific_humidity_kgkg` and `nighttime_
 is downloaded on every training request and discarded** — 1/6 of every request's field cost.
 
 Dropping it raises the per-request budget from 83 to `12000 / (5 x 24) = 100` day-slots, which
-makes 3 full calendar months (93 slots) fit. That alone takes 14 segments/year to 5.
+makes 3 full calendar months (93 slots) fit — taking 14 segments/year to **6** (four triples
+plus the two year-straddling padding months standing alone; see 2.2 for why they cannot be
+merged).
+
+The waste is slightly larger than 1/6 of the field cost: requesting ssrd also flips
+`heat_calcs.aggregate_hourly_to_daily` onto its `has_thermal` branch, so every training run
+pays a full UTCI/WBGT pass over every hourly row for output no row ever carries. Note that
+`tests/test_build_training_set.py` currently *asserts* ssrd is requested, so removing it is a
+test change too.
 
 ## 4. Can a no-queue mirror replace CDS for these inputs?
 
@@ -179,22 +248,115 @@ geometry and throughput are therefore unverified — it 401s even on `.zmetadata
 
 ## 5. Implications for the fix
 
-The levers, in descending size, all independent of anything CDS decides:
+The levers, in descending size, all independent of anything CDS decides.
 
-1. **Stop splitting by 0.5-degree cell.** Cluster stations into a bounded number of compact
-   bboxes instead. CDS's field cost does not change; only bytes do, and bytes are ~free at this
-   scale. For a geographically clustered station set this is the tens-fold term.
-2. **Drop `ssrd`** (unused) and widen segments to what the field budget actually allows:
-   14 requests/bbox-year → 5.
-3. **Pass `--era5-cache-dir`** so relaunches stop re-paying.
-4. **Delete CDS jobs after use, and reap orphans** — this is what is costing one account a 43%
-   rejection rate.
-5. **Take `t2m` and `d2m` from Open-Meteo** (0.5 s, already wired, live-validated) and ask CDS
-   only for `sp`/`u10`/`v10`. At 3 variables the budget is `12000 / (3 x 24) = 166` day-slots,
-   so 5 calendar months fit per request: 14 requests/bbox-year → 3.
+### 5.1 Stop splitting by 0.5-degree cell — but bound the bbox by VOLUME, not by CDS cost
 
-One claim above is worth a direct measurement before the fix leans on it: that **enlarging the
-bbox leaves queue time flat**. The field-limit argument and ECMWF's documentation both say it
-should, and payload bytes are negligible either way, but "documented cost model" and "observed
-queue behaviour under a 7,003-deep global backlog" are not the same thing. A timed
-same-account comparison at 1 / 10 / 25 degrees settles it cheaply.
+Cluster stations into a bounded number of compact bboxes instead of one per occupied 0.5-degree
+cell. The field-limit argument says this costs nothing in CDS's cost model.
+
+**It does, however, cost bytes and memory, and there is a real ceiling that an earlier draft of
+this document wrongly waved away as "bytes are ~free at this scale".** Four separate O(area)
+costs:
+
+- `era5.extract_era5_means` reads `ds[var].values[:, lat_idx, lon_idx]` — `.values` materialises
+  the **whole** variable array before the fancy-index, so peak memory is
+  `n_times x n_lat x n_lon x 8 bytes` **per variable**, regardless of how few stations are
+  wanted. At ~1 degree that is a few MB; at 10 degrees ~0.7 GB/variable; at 25 degrees several
+  GB/variable across 5-6 variables. This script's own module docstring already cites the
+  shared-cgroup OOM this class of job has hit before.
+- This repo's own measured number: *"a full-CONUS, one-month pull is ~3.5 GB regardless of how
+  many of the 78,566 US stations are actually selected"* (2026-07-18). A 25-degree bbox is
+  therefore ~1.5 GB **per month segment**, ~20 GB per bbox-year.
+- `era5._merge_era5_segments` does an in-memory `xr.concat` across every segment — which is
+  exactly why `_ERA5_CHUNK_DAYS`' own comment says its 400-day bound exists to keep that merge
+  "from growing unboundedly".
+- Every segment plus the merged output is a `/tmp` tempfile, so peak disk is ~2x a year's volume
+  on one filesystem.
+
+So the correct framing is: bbox chunking is the wrong instrument for a *cost-limit* problem, but
+the right instrument for a *volume* problem. Replace a 0.5-degree grid bucket with clustering to
+a **volume budget — a few degrees, not 25**. The Af/Am targets are naturally compact (S. Florida,
+Hawaii, PR/VI), so this costs little in practice.
+
+### 5.2 Drop `ssrd` and widen segments to what the budget actually allows
+
+Never across a calendar-year boundary (2.2). 14 segments/bbox-year → **6**.
+
+### 5.3 Pass `--era5-cache-dir`
+
+So relaunches stop re-paying. This is actionable on the *currently running* lanes independently
+of everything else in this document.
+
+### 5.4 Rotate the lock's account-scan order, and dismiss jobs on exit
+
+The free-slot-first scan always picks account 0 at concurrency 1, which is the most direct
+explanation for one account carrying a 43% rejection rate while the other two carry 0% (3.2).
+Rotating or randomising the scan start actually uses the three accounts we have. Dismissing
+jobs on exit is separate hygiene worth doing regardless.
+
+### 5.5 REJECTED: per-variable mixing of Open-Meteo and CDS
+
+An earlier draft proposed taking `t2m`/`d2m` from Open-Meteo and asking CDS only for
+`sp`/`u10`/`v10`, on the grounds that a 3-variable request allows 166 day-slots. **This does not
+work and is withdrawn.** Three independent reasons:
+
+1. `era5.extract_era5_means` calls the *raising* `_find_var` for t2m, d2m and sp; only
+   u10/v10/ssrd use `_find_var_optional`. A CDS NetCDF lacking t2m/d2m raises `KeyError`.
+   Worse, the land-mask rescue derives its `(lat_idx, lon_idx)` from t2m, and sp/u10/v10 are
+   read against those indices. **The minimum CDS variable set is 5, not 3**, so the 166-slot
+   budget never existed.
+2. There is no join layer. The two paths are mutually exclusive whole-pipeline alternatives
+   behind `--era5-source`, each returning the same `(daily, humidity, wind)` triple.
+   `_daily_mean_specific_humidity` reads `d2m` and `sp` **from the same hourly row**. Mixing
+   would require synthesising merged hourly rows across two producers whose datetime strings do
+   not even match (`extract_era5_means` emits `"2023-06-15T00:00:00.000000000"`,
+   `open_meteo._hourly_to_rows` emits `"2023-06-15T00:00"`) — a naive join yields zero matches
+   silently.
+3. It would put an Open-Meteo-vs-CDS offset **into the regression target**. `grid_tmax_c` /
+   `grid_tmin_c` feed `delta_tmax_c = station_tmax_c - grid_tmax`, the actual label, plus the
+   `grid_daily_value_c` and `grid_diurnal_range_c` features. Production serves CDS-derived grid
+   values. The ~0.1-0.2 C OM-vs-CDS agreement is fine as *noise* and not fine as a *systematic
+   bias in the label* — it is 5-20% of a typical few-degree delta. This is the same
+   training/serving mismatch section 4 uses to disqualify the 0.25-degree mirrors, and it would
+   be inconsistent to accept it here.
+
+The supportable options remain: all-CDS with a corrected request shape, or all-Open-Meteo via
+the existing `--era5-source openmeteo` flag with its disclosed NULL humidity/wind.
+
+### 5.6 What must be measured before the fix leans on it
+
+Two claims are staged behind measurement rather than asserted:
+
+1. **Does enlarging the bbox cost extra queue time?** The field-limit model says no, but
+   `_ERA5_MAX_CHUNK_EXTENT_DEG`'s own recorded observation says a 2.37 x 1.33 degree padded bbox
+   was rejected for cost (2.1). A timed same-account comparison at 1 / 10 / 25 degrees settles
+   which reading is right. (Download timing only — it deliberately does not run
+   `extract_era5_means`, which 5.1 predicts would OOM at 25 degrees.)
+2. **Is the ~12,000 field limit exact?** The proposed widenings leave thin margins against an
+   approximate bound (93 slots x 5 var = 11,160 is 7% headroom). The only observed points are
+   13,392 rejected and 4,464 accepted; nothing in between has been tested. So widen in stages —
+   verify 2 months at 6 variables first, then 3 months at 5 — rather than jumping straight to
+   the computed maximum.
+
+---
+
+## Appendix: corrections to the first version of this document
+
+The first committed version of this diagnosis was reviewed adversarially and had two genuine
+errors, both corrected above. Recorded here rather than silently overwritten:
+
+- **The day-slot formula omitted `n_years`.** It treated the binding quantity as
+  `n_months x n_days`, so it claimed 2-month segments were universally safe and that request
+  counts could fall 14 → 7 → 5 → 3. Because the padded window straddles two year boundaries,
+  consecutive pairing would have produced 17,856-field requests and reproduced the exact
+  `cost limits exceeded` failure of 2026-08-03. Corrected counts are 8 (6 var) and 6 (5 var),
+  and the "floor is 5 requests" figure was wrong in principle, not just in value.
+- **The Open-Meteo/CDS per-variable hybrid was not implementable**, for the three reasons in
+  5.5 — most seriously that it would have put a source offset into the regression label.
+
+Two further overstatements were walked back: "bytes are ~free at this scale" (5.1 now states the
+real O(area) ceiling), and the claim that stuck `accepted` jobs were *proven* to be queue-
+poisoning orphans (3.2 now gives the CDS-result-caching explanation that defeats the FIFO
+argument, and promotes the lock's scan order as the better-supported cause of the rejection
+asymmetry).
