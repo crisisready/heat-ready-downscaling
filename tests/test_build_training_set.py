@@ -212,11 +212,20 @@ class TestFetchEra5LandForStations:
         # date-chunking mechanism itself, independent of whatever the real
         # production _ERA5_CHUNK_DAYS default is (2026-07-18: deliberately
         # raised past 365 so a single training year relies on era5.py's own
-        # calendar-month splitting instead, not this outer mechanism).
+        # calendar-month splitting instead, not this outer mechanism). Also
+        # passthroughs era5._split_by_calendar_month (2026-09-17: now called
+        # directly by _resolve_era5_range, one calendar-month sub-range at a
+        # time, instead of being hidden inside the mocked download_era5 call)
+        # so this test still isolates the outer mechanism -- without it, a
+        # 90-day outer chunk spanning a real month boundary would split
+        # again here and try to merge the same fake "/tmp/fake.nc" path
+        # with itself, which is a different behavior from what this test
+        # means to cover.
         with patch.object(bts, "_ERA5_CHUNK_DAYS", 90), \
              patch.object(bts.era5, "download_era5", return_value="/tmp/fake.nc") as mock_dl, \
              patch.object(bts.era5, "extract_era5_means", side_effect=rows_by_call), \
              patch.object(bts, "_timezones_for_stations", return_value={"USW00023183": "UTC"}), \
+             patch.object(bts.era5, "_split_by_calendar_month", side_effect=lambda s, e: [(s, e)]), \
              patch("os.unlink"):
             daily, humidity, nighttime_wind = bts.fetch_era5_land_for_stations(
                 _STATIONS[:1], date(2016, 1, 1), date(2016, 12, 31),
@@ -336,6 +345,96 @@ class TestCdsRejectedRetry:
             bts._download_era5_with_rejected_retry(
                 None, "-115,30,-110,35", date(2016, 6, 15), date(2016, 6, 16), "US_Af",
             )
+
+
+class TestResolveEra5Range:
+    """Found live, 2026-09-17, diagnosing a Nishant-flagged "our CDS request pattern must be
+    wrong" report: _resolve_era5_segment used to be called ONCE for a whole multi-month
+    padded range, so era5.download_era5's own internal calendar-month split happened inside
+    ONE _era5_download_lock acquisition and ONE _download_era5_with_rejected_retry attempt --
+    a rejection on month 12 of 14 threw away months 1-11's already-succeeded downloads and
+    re-submitted all 14 from scratch, and the lock was held (confirmed live via flock -n/
+    fuser on the bastion: 11+ hours, unreleased) for the WHOLE sequence, starving every other
+    batch waiting on the same CDS account. _resolve_era5_range fixes this by splitting the
+    range into calendar-month sub-segments itself (era5._split_by_calendar_month -- same
+    boundaries era5.download_era5 would have produced internally, so this doesn't change
+    request count/boundaries for the single-account, single-batch case) and resolving each
+    one independently."""
+
+    def test_multi_month_range_resolves_one_segment_at_a_time(self, monkeypatch):
+        """A range spanning 4 calendar months must call era5.download_era5 once per month,
+        each with that month's own exact start/end, not once for the whole range."""
+        @contextlib.contextmanager
+        def fake_lock():
+            yield 0
+
+        monkeypatch.setattr(bts, "_era5_download_lock", fake_lock)
+        with patch.object(bts.era5, "download_era5", return_value="/tmp/seg.nc") as mock_dl, \
+             patch.object(bts.era5, "_merge_era5_segments", return_value="/tmp/merged.nc"):
+            nc_path, owns = bts._resolve_era5_range(
+                "-10,40,10,50", date(2016, 1, 30), date(2016, 4, 2), "batch", cache_dir=None)
+        assert (nc_path, owns) == ("/tmp/merged.nc", True)
+        assert mock_dl.call_count == 4
+        called_ranges = [(c.args[1], c.args[2]) for c in mock_dl.call_args_list]
+        assert called_ranges == [
+            (date(2016, 1, 30), date(2016, 1, 31)),
+            (date(2016, 2, 1), date(2016, 2, 29)),  # 2016 is a leap year
+            (date(2016, 3, 1), date(2016, 3, 31)),
+            (date(2016, 4, 1), date(2016, 4, 2)),
+        ]
+
+    def test_rejection_on_a_later_segment_does_not_redownload_earlier_ones(self, monkeypatch):
+        """The core bug: a rejection used to blow up the WHOLE multi-month call, discarding
+        already-succeeded months and re-submitting them on every retry. Per-segment
+        resolution means only the failed segment retries."""
+        @contextlib.contextmanager
+        def fake_lock():
+            yield 0
+
+        monkeypatch.setattr(bts, "_era5_download_lock", fake_lock)
+        rejected = cads_api_client.processing.ProcessingFailedError("Unknown API state 'rejected'")
+        with patch.object(bts.era5, "download_era5",
+                           side_effect=["/tmp/jan.nc", rejected, "/tmp/feb.nc"]) as mock_dl, \
+             patch.object(bts.era5, "_merge_era5_segments", return_value="/tmp/merged.nc"), \
+             patch.object(bts.time, "sleep"):
+            nc_path, owns = bts._resolve_era5_range(
+                "-10,40,10,50", date(2016, 1, 30), date(2016, 2, 5), "batch", cache_dir=None)
+        assert (nc_path, owns) == ("/tmp/merged.nc", True)
+        # January (already succeeded) called exactly once; February retried exactly once
+        # after its rejection -- never re-submitted January to get there.
+        assert mock_dl.call_count == 3
+        jan_calls = [c for c in mock_dl.call_args_list if c.args[1] == date(2016, 1, 30)]
+        assert len(jan_calls) == 1
+
+    def test_lock_is_acquired_independently_per_segment_not_once_for_the_whole_range(self):
+        """The other half of the same bug: one process holding the account lock for an
+        entire multi-month sequence starves every other batch waiting on that CDS account
+        the whole time. The lock must be released between segments, not held across all of
+        them, so a waiting batch can interleave."""
+        held_during_each_call = []
+
+        @contextlib.contextmanager
+        def tracking_lock():
+            held_during_each_call.append(True)
+            try:
+                yield 0
+            finally:
+                held_during_each_call[-1] = False
+
+        def fake_download(bbox, start, end, **kwargs):
+            # lock must be held DURING this call...
+            assert held_during_each_call[-1] is True
+            return f"/tmp/{start.isoformat()}.nc"
+
+        with patch.object(bts, "_era5_download_lock", tracking_lock), \
+             patch.object(bts.era5, "download_era5", side_effect=fake_download) as mock_dl, \
+             patch.object(bts.era5, "_merge_era5_segments", return_value="/tmp/merged.nc"):
+            bts._resolve_era5_range("-10,40,10,50", date(2016, 1, 30), date(2016, 3, 2),
+                                     "batch", cache_dir=None)
+        assert mock_dl.call_count == 3
+        # ...but released again after every single call, not just after the last one --
+        # a snapshot mid-loop would find it free, unlike the old whole-range hold.
+        assert held_during_each_call == [False, False, False]
 
 
 class TestFetchEra5LandForStationsCache:

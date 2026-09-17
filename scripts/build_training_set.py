@@ -539,6 +539,90 @@ def _resolve_era5_segment(cache_path, bbox, padded_start, padded_end, batch_labe
     return nc_path, owns_nc_path
 
 
+def _resolve_era5_range(bbox, padded_start, padded_end, batch_label, cache_dir, force_fresh=False):
+    """Returns (nc_path, owns_nc_path) for the FULL padded_start..padded_end range, same
+    contract as _resolve_era5_segment, but resolves it one calendar-month sub-range at a
+    time (era5._split_by_calendar_month -- the exact same split era5.download_era5 would do
+    internally for a multi-month range, so this changes zero request boundaries/counts, not
+    the correctness-driven cartesian-date-field fix _ERA5_CHUNK_DAYS=400's own comment
+    documents) and merges the results, instead of one _resolve_era5_segment call covering
+    every month under a single lock+retry.
+
+    Real problem this fixes (found live, 2026-09-17, diagnosing a Nishant-flagged "our CDS
+    request pattern must be wrong" report): _resolve_era5_segment's single call held the
+    per-account flock (_era5_download_lock) for the ENTIRE multi-month sequence (observed:
+    11+ hours, one lock never released between any of a batch's ~14 monthly CDS round-trips),
+    and _download_era5_with_rejected_retry's rejected-retry wrapped the WHOLE
+    era5.download_era5() call -- a rejection on month 12 of 14 threw away months 1-11's
+    already-succeeded downloads and re-submitted all 14 from scratch, up to
+    _CDS_REJECTED_MAX_RETRIES times. Confirmed live via `flock -n`/`fuser` on the bastion:
+    with 7 concurrent batches running, only 3 (matching the 3 CDS accounts) could ever hold a
+    lock, and 2 of the 3 had held theirs continuously since the run started ~11 hours earlier
+    -- every other batch, including ones needing as few as 1-9 stations, sat completely idle
+    that whole time, not because CDS itself was unavailable to them but because this process's
+    own lock scope outlived any single CDS request. Per-month resolution here means the lock
+    is acquired and released independently per month (so other waiting batches can interleave
+    between this batch's own months) and a rejected month is cached/retried independently
+    (so a late-month rejection costs one month's re-request, not the whole year's).
+
+    force_fresh=True (used both by this function's own merge-corruption self-heal below and by
+    this function's caller's parse-failure retry, replacing the old single-cache_path delete-
+    and-retry): deletes each sub-segment's own cache entry before resolving it, so a retry
+    re-downloads every month fresh rather than re-hitting whichever cached segment was
+    actually corrupt -- coarser than identifying the one bad month, but corruption recovery is
+    a rare path, not the one this function optimizes for."""
+    segments = era5._split_by_calendar_month(padded_start, padded_end)
+
+    def _cache_path_for(seg_start, seg_end):
+        if not cache_dir:
+            return None
+        path = _era5_segment_cache_path(cache_dir, batch_label, seg_start, seg_end, bbox,
+                                         "reanalysis-era5-land", _TRAINING_ERA5_VARIABLES)
+        if force_fresh:
+            with contextlib.suppress(OSError):
+                os.unlink(path)
+        return path
+
+    if len(segments) == 1:
+        seg_start, seg_end = segments[0]
+        return _resolve_era5_segment(_cache_path_for(seg_start, seg_end), bbox, seg_start, seg_end,
+                                      batch_label, cache_dir)
+
+    seg_paths = []
+    try:
+        for seg_start, seg_end in segments:
+            seg_paths.append(_resolve_era5_segment(_cache_path_for(seg_start, seg_end), bbox,
+                                                     seg_start, seg_end, batch_label, cache_dir))
+        try:
+            merged_path = era5._merge_era5_segments([p for p, _ in seg_paths])
+        except Exception as exc:
+            # Merging always produces a brand-new temp file (owns_nc_path=True below), so
+            # the caller's own "owns_nc_path -> real error, don't retry" cache-corruption
+            # check never sees this failure -- it happens here, one level in. A corrupt
+            # per-month cache entry surfaces exactly like this (xarray failing to open one
+            # of the segment files), so self-heal it here rather than silently losing the
+            # single-cache-path recovery this function replaced. force_fresh=True already
+            # means this IS the retry -- propagate for real on a second failure.
+            if force_fresh:
+                raise
+            logger.warning("[%s] merging %d ERA5 segment(s) for %s..%s failed (%s) -- "
+                            "one is likely a corrupted cache entry; deleting all and "
+                            "re-downloading", batch_label, len(seg_paths), padded_start, padded_end, exc)
+            for p, owns in seg_paths:
+                if owns:
+                    with contextlib.suppress(OSError):
+                        os.unlink(p)
+            seg_paths = []
+            return _resolve_era5_range(bbox, padded_start, padded_end, batch_label, cache_dir,
+                                        force_fresh=True)
+    finally:
+        for p, owns in seg_paths:
+            if owns:
+                with contextlib.suppress(OSError):
+                    os.unlink(p)
+    return merged_path, True
+
+
 def _persist_era5_cache_entry(nc_path, cache_path, cache_dir, batch_label, padded_start, padded_end):
     """Write-to-tmp-then-rename so a process killed mid-write never leaves a partial file at
     cache_path that a relaunch would wrongly treat as a complete cache hit (os.rename is atomic
@@ -649,13 +733,7 @@ def fetch_era5_land_for_stations(
         padded_start = chunk_start - timedelta(days=2)
         padded_end = chunk_end + timedelta(days=2)
 
-        cache_path = (
-            _era5_segment_cache_path(cache_dir, batch_label, padded_start, padded_end, bbox,
-                                      "reanalysis-era5-land", _TRAINING_ERA5_VARIABLES)
-            if cache_dir else None
-        )
-        nc_path, owns_nc_path = _resolve_era5_segment(
-            cache_path, bbox, padded_start, padded_end, batch_label, cache_dir)
+        nc_path, owns_nc_path = _resolve_era5_range(bbox, padded_start, padded_end, batch_label, cache_dir)
         try:
             try:
                 hourly = era5.extract_era5_means(nc_path, geojson_obj)
@@ -668,15 +746,13 @@ def fetch_era5_land_for_stations(
                 # protection, bit rot, an out-of-band copy) permanently poisoned that segment:
                 # every future relaunch hit the same exception at the same cache_path forever,
                 # strictly worse than pre-PR behavior (always a fresh download). Delete the bad
-                # entry and retry ONCE as a genuine fresh download; a second failure is a real
-                # error (a genuinely bad CDS response, a real extract_era5_means bug), not a
-                # caching artifact, and propagates normally.
-                logger.warning("[%s] cached ERA5 segment %s failed to parse (%s) -- deleting "
-                                "and re-downloading", batch_label, cache_path, exc)
-                with contextlib.suppress(OSError):
-                    os.unlink(cache_path)
-                nc_path, owns_nc_path = _resolve_era5_segment(
-                    cache_path, bbox, padded_start, padded_end, batch_label, cache_dir)
+                # entry/entries and retry ONCE as a genuine fresh download; a second failure is
+                # a real error (a genuinely bad CDS response, a real extract_era5_means bug),
+                # not a caching artifact, and propagates normally.
+                logger.warning("[%s] cached ERA5 range %s..%s failed to parse (%s) -- deleting "
+                                "and re-downloading", batch_label, padded_start, padded_end, exc)
+                nc_path, owns_nc_path = _resolve_era5_range(
+                    bbox, padded_start, padded_end, batch_label, cache_dir, force_fresh=True)
                 hourly = era5.extract_era5_means(nc_path, geojson_obj)
         finally:
             if owns_nc_path:
