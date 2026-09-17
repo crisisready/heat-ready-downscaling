@@ -16,7 +16,7 @@ import os
 import sys
 import threading
 import time
-from datetime import date
+from datetime import date, timedelta
 from unittest.mock import MagicMock, patch
 
 import cads_api_client.processing
@@ -1631,6 +1631,163 @@ class TestEra5DownloadLockAccountRotation:
                     assert account_index in (0, 2)
 
 
+class TestFetchEra5LandForStationsViaTimeseries:
+    """The --era5-source timeseries path. Validated live 2026-09-17 against an
+    already-ingested station-year: max|diff| 0.000078 C on daily tmax and
+    exactly 0.000000 on specific humidity and nighttime wind, at ~230x the
+    gridded path's speed (30.6s vs 7,046s per station-year). These tests pin
+    the behaviours that decide whether the corpus is trustworthy: failure
+    isolation, the land-mask gap being visible rather than silent, and the
+    return shape matching the other two sources."""
+
+    _STATIONS = [
+        {"station_id": "S1", "lat": 26.685, "lon": -80.0992},
+        {"station_id": "S2", "lat": 19.3175, "lon": -155.2922},
+    ]
+
+    def _hourly(self, day, sid, n_days=5):
+        """Hourly rows shaped as era5.extract_era5_timeseries_rows emits.
+
+        Spans several days deliberately: aggregate_hourly_to_daily only emits a
+        day once it has all 24 hours of that day on its 06:00-LOCAL-shifted
+        boundary, so 24 UTC hours of a single date straddle two shifted local
+        days and complete neither. A fixture that ignores this passes the
+        plumbing while asserting nothing about real output."""
+        start = date.fromisoformat(day) - timedelta(days=n_days // 2)
+        rows = []
+        for offset in range(n_days):
+            d = (start + timedelta(days=offset)).isoformat()
+            for h in range(24):
+                rows.append({
+                    "name": sid, "datetime": f"{d}T{h:02d}:00:00",
+                    "t2m": 25.0 + h * 0.1, "d2m": 20.0, "sp": 101325.0, "wind_ms": 3.0,
+                })
+        return rows
+
+    @contextlib.contextmanager
+    def _patched(self, *, fail_for=(), rows_for=None, capture=None):
+        rows_for = rows_for or {}
+
+        def fake_download(lat, lon, s, e, variables=None, account_index=0):
+            if capture is not None:
+                capture.setdefault("accounts", []).append(account_index)
+                capture.setdefault("ranges", []).append((s, e))
+                capture.setdefault("variables", variables)
+            path = f"/tmp/_fake_ts_{lat}_{lon}.zip"
+            open(path, "w").close()
+            return path
+
+        def fake_extract(path, name):
+            if name in fail_for:
+                raise ValueError(
+                    "ERA5-Land timeseries returned no usable hours for %r -- nearest grid point" % name)
+            return rows_for.get(name, self._hourly("2023-03-11", name))
+
+        with patch.object(bts.era5, "download_era5_timeseries", side_effect=fake_download), \
+             patch.object(bts.era5, "extract_era5_timeseries_rows", side_effect=fake_extract), \
+             patch.object(bts.era5, "timeseries_grid_point", return_value=(26.7, -80.1)), \
+             patch.object(bts.era5, "all_account_indices", return_value=[0, 1, 2]), \
+             patch.object(bts.era5, "account_configured", return_value=True), \
+             patch.object(bts, "_timezones_for_stations",
+                          return_value={"S1": "America/New_York", "S2": "Pacific/Honolulu"}), \
+             patch("os.unlink"):
+            yield
+
+    def test_returns_the_same_triple_shape_as_the_other_two_sources(self, tmp_path):
+        with self._patched():
+            daily, humidity, wind = bts.fetch_era5_land_for_stations_via_timeseries(
+                self._STATIONS, date(2023, 3, 11), date(2023, 3, 11),
+                checkpoint_path=str(tmp_path / "ck.jsonl"))
+        assert set(daily) == {"S1", "S2"}
+        for sid in ("S1", "S2"):
+            assert daily[sid], "expected at least one complete day"
+            some_day = next(iter(daily[sid]))
+            assert set(daily[sid][some_day]) == {"tmax", "tmin"}
+        assert isinstance(humidity, dict) and isinstance(wind, dict)
+
+    def test_one_failing_station_does_not_lose_the_others(self, tmp_path):
+        """Per-station isolation. The gridded path's own issue #648 lesson: one
+        station's failure must not take the batch down with it."""
+        with self._patched(fail_for=("S2",)):
+            daily, _, _ = bts.fetch_era5_land_for_stations_via_timeseries(
+                self._STATIONS, date(2023, 3, 11), date(2023, 3, 11),
+                checkpoint_path=str(tmp_path / "ck.jsonl"))
+        assert "S1" in daily
+        assert "S2" not in daily, "a masked/failed station must be ABSENT, not present with nulls"
+
+    def test_masked_station_leaves_a_visible_gap_not_null_grid_values(self, tmp_path):
+        """The land-mask case. This dataset has no masked-cell rescue, so a
+        coastal station can come back unusable. It must not land in the corpus
+        carrying NULL grid values that look like real rows."""
+        with self._patched(fail_for=("S1", "S2")):
+            daily, humidity, wind = bts.fetch_era5_land_for_stations_via_timeseries(
+                self._STATIONS, date(2023, 3, 11), date(2023, 3, 11),
+                checkpoint_path=str(tmp_path / "ck.jsonl"))
+        assert daily == {} and humidity == {} and wind == {}
+
+    def test_pads_the_requested_range_by_two_days_each_side(self, tmp_path):
+        """Same padding as the gridded path, for the same reason:
+        aggregate_hourly_to_daily only emits days with all 24 local hours, and
+        align_obs_window's shifted lookups need the day beyond that complete."""
+        cap = {}
+        with self._patched(capture=cap):
+            bts.fetch_era5_land_for_stations_via_timeseries(
+                self._STATIONS[:1], date(2023, 3, 11), date(2023, 3, 11),
+                checkpoint_path=str(tmp_path / "ck.jsonl"))
+        assert cap["ranges"][0] == (date(2023, 3, 9), date(2023, 3, 13))
+
+    def test_requests_the_training_variable_set(self, tmp_path):
+        cap = {}
+        with self._patched(capture=cap):
+            bts.fetch_era5_land_for_stations_via_timeseries(
+                self._STATIONS[:1], date(2023, 3, 11), date(2023, 3, 11),
+                checkpoint_path=str(tmp_path / "ck.jsonl"))
+        assert cap["variables"] == bts._TRAINING_ERA5_VARIABLES
+        assert "surface_solar_radiation_downwards" not in cap["variables"]
+
+    def test_spreads_stations_across_every_configured_account(self, tmp_path):
+        """Not a throughput requirement on this dataset (it does not share
+        MARS's concurrency-1 slot) but the gridded path's index-order scan
+        concentrating every request on account 0 is a mistake worth not
+        repeating -- see _era5_download_lock."""
+        cap = {}
+        stations = [{"station_id": f"S{i}", "lat": 26.0 + i * 0.1, "lon": -80.0}
+                    for i in range(6)]
+        with patch.object(bts, "_timezones_for_stations",
+                          return_value={s["station_id"]: "UTC" for s in stations}):
+            with self._patched(capture=cap):
+                bts.fetch_era5_land_for_stations_via_timeseries(
+                    stations, date(2023, 3, 11), date(2023, 3, 11),
+                    checkpoint_path=str(tmp_path / "ck.jsonl"))
+        assert set(cap["accounts"]) == {0, 1, 2}
+
+    def test_resumes_from_checkpoint_instead_of_refetching(self, tmp_path):
+        """A killed relaunch must not re-pay every station's request."""
+        ck = str(tmp_path / "ck.jsonl")
+        with self._patched():
+            bts.fetch_era5_land_for_stations_via_timeseries(
+                self._STATIONS, date(2023, 3, 11), date(2023, 3, 11), checkpoint_path=ck)
+        cap = {}
+        with self._patched(capture=cap):
+            daily, _, _ = bts.fetch_era5_land_for_stations_via_timeseries(
+                self._STATIONS, date(2023, 3, 11), date(2023, 3, 11), checkpoint_path=ck)
+        assert cap.get("accounts") is None, "second run should fetch nothing"
+        assert set(daily) == {"S1", "S2"}, "but must still return both stations' rows"
+
+    def test_a_different_date_range_is_not_treated_as_already_done(self, tmp_path):
+        """Date-scoped checkpoint keys, matching the openmeteo path: reusing a
+        checkpoint across two ranges must not return the first range's data."""
+        ck = str(tmp_path / "ck.jsonl")
+        with self._patched():
+            bts.fetch_era5_land_for_stations_via_timeseries(
+                self._STATIONS[:1], date(2023, 3, 11), date(2023, 3, 11), checkpoint_path=ck)
+        cap = {}
+        with self._patched(capture=cap):
+            bts.fetch_era5_land_for_stations_via_timeseries(
+                self._STATIONS[:1], date(2023, 6, 11), date(2023, 6, 11), checkpoint_path=ck)
+        assert cap.get("accounts") == [0], "a new range must actually be fetched"
+
+
 class TestClusterStationsByBboxCells:
     """Replaces TestChunkStationsByExtent (2026-09-17). The objective is
     INVERTED: the old grid bucketing tried to keep each request's bbox small,
@@ -2199,6 +2356,34 @@ class TestMainStationIdsFileAndDryRun:
         assert mock_build.call_args_list[0].args[0] == "US_BWh"
         passed_ids = {s["station_id"] for s in mock_build.call_args_list[0].args[1]}
         assert passed_ids == {"USW00090001", "USW00090002"}
+
+    def test_timeseries_source_gets_a_batch_scoped_era5_checkpoint(self, monkeypatch, tmp_path):
+        """Code review finding, real: the checkpoint-path condition tested only
+        "openmeteo", so a --era5-source timeseries run silently fell back to the
+        module-level shared /tmp default -- no batch-scoped resume, and every
+        batch in a run contending on one file."""
+        f = tmp_path / "ids.json"
+        f.write_text(json.dumps({"station_ids": ["USW00090001"]}))
+        ckdir = tmp_path / "ck"
+        ckdir.mkdir()
+        monkeypatch.setattr(sys, "argv", [
+            "build_training_set.py", "--station-ids-file", str(f),
+            "--start-date", "2016-06-01", "--end-date", "2016-06-30",
+            "--era5-source", "timeseries", "--ghcn-checkpoint-dir", str(ckdir),
+        ])
+        mocks = self._patch_common(
+            list_ghcn_stations_return=[
+                {"station_id": "USW00090001", "lon": -80.0, "lat": 26.0,
+                 "elevation_m": 10.0, "name": "FL1"}],
+            active_ids={"USW00090001"},
+        )
+        with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], \
+             mocks[5] as mock_build, mocks[6], mocks[7]:
+            bts.main()
+        assert mock_build.call_count == 1
+        passed = mock_build.call_args_list[0].kwargs["era5_checkpoint_path"]
+        assert passed is not None, "timeseries must get a batch-scoped checkpoint, not the shared default"
+        assert "timeseries" in passed and str(ckdir) in passed
 
     def test_the_removed_extent_flag_errors_instead_of_being_ignored(self, monkeypatch, tmp_path):
         """A saved command line carrying --era5-max-chunk-extent-deg would
