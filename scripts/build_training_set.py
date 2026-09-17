@@ -127,6 +127,7 @@ import random
 import re
 import shutil
 import sys
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -1137,6 +1138,223 @@ def fetch_era5_land_for_stations_via_openmeteo(
     return daily_by_station, humidity_by_station, nighttime_wind_by_station
 
 
+# Concurrent per-station ERA5-Land timeseries fetches. Measured 2026-09-17: 6
+# station-years submitted at once on ONE CDS account all succeeded, 57.5s wall
+# clock against 189s summed -- ~3.3x parallel, because this dataset is served
+# from CDS's ARCO back end and does NOT share the MARS per-user
+# concurrency-1 slot that the gridded path is bottlenecked on. 6 is the level
+# actually measured; raising it further is unvalidated, and CDS is a shared
+# public resource, so this does not guess upward.
+_TIMESERIES_MAX_WORKERS = 6
+
+# Wall-clock ceiling for one station's fetch, enforced by the ORCHESTRATOR
+# rather than trusted to the client. era5.download_era5_timeseries already
+# bounds cads_api_client's transport retry (whose default is 500 tries at 120s
+# apart, ~16 hours inside one blocking call), but a hang can still originate
+# below that -- a socket that never closes, a read that never returns. Four
+# gridded corpus lanes stalled 70+ minutes on 2026-09-17 in exactly that shape:
+# alive processes, CLOSE-WAIT sockets piled up against CDS, no log line, no
+# crash, nothing ever firing again.
+#
+# A normal station fetch is ~30s, so 10 minutes is ~20x headroom. On expiry the
+# station is recorded as failed and the batch continues. The worker thread is
+# NOT killable in Python and may linger -- that is accepted deliberately: a
+# leaked thread on a process that finishes and reports is strictly better than
+# a batch that hangs forever and reports nothing.
+_TIMESERIES_STATION_TIMEOUT_S = 600.0
+
+
+def fetch_era5_land_for_stations_via_timeseries(
+    stations: list[dict], start_date: date, end_date: date,
+    max_workers: int | None = None, checkpoint_path: str | None = None,
+) -> tuple[dict[str, dict[str, dict]], dict[str, dict[str, float]], dict[str, dict[str, float]]]:
+    """Same return shape as fetch_era5_land_for_stations and
+    fetch_era5_land_for_stations_via_openmeteo -- (daily, humidity,
+    nighttime_wind) keyed by station_id -- but sourced per-station from
+    era5.TIMESERIES_ERA5_LAND_DATASET instead of a gridded bbox pull.
+
+    Why this exists, measured rather than assumed (2026-09-17):
+      - One request covers a whole padded station-year (369 days, 5 variables,
+        8,856 hourly rows) in ~30s. The gridded MARS path took 7,046s for the
+        identical station-year across 14 calendar-month segments. ~230x.
+      - Re-pulling an already-ingested station-year and diffing against the
+        rows in ghcn_training gave max|diff| 0.000078 C on daily tmax,
+        0.000111 C on daily tmin, and exactly 0.000000 on specific humidity
+        and nighttime wind. Float32 round-trip noise, not a source offset --
+        so unlike the rejected Open-Meteo hybrid this introduces no
+        training/serving divergence.
+      - No bbox means _cluster_stations_by_bbox_cells, era5.
+        _split_by_calendar_month and the 6,000-field pre-check are all
+        irrelevant on this path; there is nothing to segment or budget.
+
+    Every station gets its OWN request, so unlike the gridded path there is no
+    amortisation across stations and no reason to cluster them -- but also no
+    per-station penalty, which is what made the gridded path's 0.5-degree
+    fan-out so expensive.
+
+    Deliberately NOT routed through api_call_manager.fetch_all (which the
+    openmeteo path uses): that is built around a throttled HTTP session issuing
+    one GET, whereas this is a submit/poll/download job cycle against a queue.
+    Reusing its JsonlCheckpointStore gives the same crash-resume property
+    without pretending the two access patterns are the same thing.
+
+    Per-station failures are isolated and reported, never fatal to the batch.
+    The land-mask case is the one that matters: this dataset serves the nearest
+    grid point ONLY, with no masked-cell rescue, so a coastal or small-island
+    station can come back with no usable hours. era5.
+    extract_era5_timeseries_rows raises on that, this function records it as a
+    failed station, and the caller is left with a real gap it can see rather
+    than NULL grid values that look like data.
+    """
+    if max_workers is None:
+        max_workers = _TIMESERIES_MAX_WORKERS
+
+    tz_map = _timezones_for_stations(stations)
+    # +/-2 day padding, same as the gridded path and for the identical reason:
+    # aggregate_hourly_to_daily only emits days with all 24 local hours, and
+    # align_obs_window's +/-1-day shifted lookups need the day beyond that to
+    # be complete too.
+    padded_start = start_date - timedelta(days=2)
+    padded_end = end_date + timedelta(days=2)
+
+    store = api_call_manager.JsonlCheckpointStore(
+        checkpoint_path or "/tmp/build_training_set_timeseries_checkpoint.jsonl"
+    )
+
+    def _key(station):
+        # Date-scoped, matching the openmeteo path's own key_fn: a checkpoint
+        # reused across two different date ranges for the same station must not
+        # mark it done and silently return the first range's data.
+        return f"{station['station_id']}_{padded_start.isoformat()}_{padded_end.isoformat()}"
+
+    already = set(store.done_keys())
+    pending = [s for s in stations if _key(s) not in already]
+    logger.info(
+        "ERA5-Land timeseries fetch: %d station(s), %d already checkpointed, %d to fetch "
+        "(max_workers=%d)", len(stations), len(stations) - len(pending), len(pending), max_workers,
+    )
+
+    configured_accounts = [i for i in era5.all_account_indices() if era5.account_configured(i)]
+    failures: list[tuple[str, str]] = []
+    lock = threading.Lock()
+
+    def _fetch_one(index_and_station):
+        index, station = index_and_station
+        sid = station["station_id"]
+        # Round-robin the accounts. This dataset does not appear to share
+        # MARS's per-account concurrency slot, so this is prudence rather than
+        # a bottleneck -- but spreading is free, and the gridded path's
+        # index-order scan concentrating every request on account 0 is a
+        # mistake worth not repeating (see _era5_download_lock).
+        account_index = configured_accounts[index % len(configured_accounts)]
+        nc_path = None
+        try:
+            nc_path = era5.download_era5_timeseries(
+                station["lat"], station["lon"], padded_start, padded_end,
+                variables=_TRAINING_ERA5_VARIABLES, account_index=account_index,
+            )
+            rows = era5.extract_era5_timeseries_rows(nc_path, sid)
+            grid_point = era5.timeseries_grid_point(nc_path)
+            one_tz = {sid: tz_map.get(sid, "UTC")}
+            daily = heat_calcs.aggregate_hourly_to_daily(rows, one_tz)
+            wind_by_date = heat_calcs.daily_mean_nighttime_wind(rows, one_tz).get(sid, {})
+            sh_by_date = heat_calcs.daily_mean_specific_humidity(rows, one_tz).get(sid, {})
+            payload = {
+                "station_id": sid,
+                "grid_point": list(grid_point) if grid_point else None,
+                "daily": {
+                    d["date"]: {
+                        "tmax": d["day_t2m_max"], "tmin": d["day_t2m_min"],
+                        "nighttime_wind_ms": wind_by_date.get(d["date"]),
+                        "grid_specific_humidity_kgkg": sh_by_date.get(d["date"]),
+                    }
+                    for d in daily
+                },
+            }
+            # persist() is documented thread-safe and updates the in-memory
+            # cache done_keys() populated, so the collect() below sees these
+            # new entries rather than a stale snapshot (verified in
+            # api_call_manager.JsonlCheckpointStore.persist).
+            store.persist(_key(station), payload)
+            logger.info("[timeseries] %s: %d complete day(s) from grid point %s (account %d)",
+                        sid, len(payload["daily"]), grid_point, account_index)
+        except Exception as exc:  # noqa: BLE001 -- per-station isolation is the point
+            with lock:
+                failures.append((sid, f"{type(exc).__name__}: {exc}"))
+            logger.error("[timeseries] %s FAILED (account %d): %s", sid, account_index, exc)
+        finally:
+            if nc_path:
+                with contextlib.suppress(OSError):
+                    os.unlink(nc_path)
+
+    if pending:
+        # as_completed(timeout=...) rather than pool.map: map() blocks
+        # indefinitely on the slowest worker, which is precisely the failure
+        # mode _TIMESERIES_STATION_TIMEOUT_S exists to prevent. A deadline on
+        # the whole set, derived from the per-station ceiling, bounds the batch
+        # even if several stations hang at once.
+        from concurrent.futures import as_completed
+        deadline = _TIMESERIES_STATION_TIMEOUT_S * (
+            1 + (len(pending) + max_workers - 1) // max_workers)
+        pool = ThreadPoolExecutor(max_workers=max_workers)
+        try:
+            futures = {
+                pool.submit(_fetch_one, (i, station)): station["station_id"]
+                for i, station in enumerate(pending)
+            }
+            try:
+                for future in as_completed(futures, timeout=deadline):
+                    # _fetch_one records its own failures; this re-raise guard
+                    # only catches something escaping it entirely.
+                    exc = future.exception()
+                    if exc is not None:
+                        sid = futures[future]
+                        with lock:
+                            failures.append((sid, f"unhandled {type(exc).__name__}: {exc}"))
+            except TimeoutError:
+                unfinished = [sid for f, sid in futures.items() if not f.done()]
+                logger.error(
+                    "[timeseries] batch deadline of %.0fs hit with %d station(s) unfinished: %s. "
+                    "Recording them as failed and continuing -- a bounded gap we can see beats a "
+                    "silent hang (see _TIMESERIES_STATION_TIMEOUT_S).",
+                    deadline, len(unfinished), ", ".join(unfinished[:10]),
+                )
+                with lock:
+                    failures.extend((sid, "timed out") for sid in unfinished)
+        finally:
+            # Do not block on lingering workers -- that would reintroduce the
+            # hang this guard exists to bound. Python offers no thread kill;
+            # the process exits after the caller finishes.
+            pool.shutdown(wait=False, cancel_futures=True)
+
+    if failures:
+        logger.error("[timeseries] %d station(s) failed:", len(failures))
+        for sid, err in failures:
+            logger.error("    %s: %s", sid, err)
+
+    wanted = {_key(s) for s in stations}
+    daily_by_station: dict[str, dict[str, dict]] = {}
+    humidity_by_station: dict[str, dict[str, float]] = {}
+    nighttime_wind_by_station: dict[str, dict[str, float]] = {}
+    for key, payload in store.collect():
+        if key not in wanted:
+            continue
+        sid = payload["station_id"]
+        by_date = payload["daily"]
+        daily_by_station[sid] = {d: {"tmax": v["tmax"], "tmin": v["tmin"]} for d, v in by_date.items()}
+        humidity_by_station[sid] = {
+            d: v["grid_specific_humidity_kgkg"] for d, v in by_date.items()
+            if v["grid_specific_humidity_kgkg"] is not None
+        }
+        nighttime_wind_by_station[sid] = {
+            d: v["nighttime_wind_ms"] for d, v in by_date.items()
+            if v["nighttime_wind_ms"] is not None
+        }
+    logger.info("ERA5-Land timeseries fetch done: %d/%d station(s) have rows",
+                len(daily_by_station), len(stations))
+    return daily_by_station, humidity_by_station, nighttime_wind_by_station
+
+
 def _daily_mean_specific_humidity(hourly_rows: list[dict], tz_map: dict[str, str]) -> dict[str, dict[str, float]]:
     """Daily-mean specific humidity per station, computed from hourly d2m/sp
     via the existing heat_calcs.calc_sh -- the plan's feature 13
@@ -1521,7 +1739,10 @@ def build_rows_for_country(
     def _timed_era5():
         t0 = time.monotonic()
         logger.info("[%s] ERA5 fetch starting (source=%s)", country, era5_source)
-        if era5_source == "openmeteo":
+        if era5_source == "timeseries":
+            result = fetch_era5_land_for_stations_via_timeseries(
+                stations, start_date, end_date, checkpoint_path=era5_checkpoint_path)
+        elif era5_source == "openmeteo":
             result = fetch_era5_land_for_stations_via_openmeteo(
                 stations, start_date, end_date, checkpoint_path=era5_checkpoint_path,
             )
@@ -2016,7 +2237,7 @@ def main() -> None:
                               "_merge_era5_segments -- not to appease CDS.")
     parser.add_argument("--era5-max-chunk-extent-deg", type=float, default=None,
                          help=argparse.SUPPRESS)
-    parser.add_argument("--era5-source", choices=("cds", "openmeteo"), default="cds",
+    parser.add_argument("--era5-source", choices=("cds", "openmeteo", "timeseries"), default="cds",
                          help="Where ERA5-Land daily tmax/tmin comes from. \"cds\" (default) is the "
                               "original CDS async-queue fetch, unchanged. \"openmeteo\" (2026-08-20) uses "
                               "Open-Meteo's archive API (models=era5_land) instead -- confirmed live to "
