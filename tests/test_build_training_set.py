@@ -1651,6 +1651,20 @@ class TestTimeseriesLandMaskRescue:
         assert set(offsets[:4]) == {(-1, 0), (1, 0), (0, -1), (0, 1)}
         assert len(offsets) == 24  # 5x5 block minus the centre
 
+    def test_station_timeout_covers_the_full_rescue_walk(self):
+        """Code review finding, real: the per-station ceiling was a flat 600s
+        while a masked station's worst case is its own cell PLUS every rescue
+        candidate -- 25 requests, ~750s at a ~30s fetch. A flat 600s would cut
+        a genuinely open-ocean station short and turn a correct, expected
+        outcome into a spurious 'batch budget exhausted' for every station
+        sharing its batch."""
+        worst_case_requests = 1 + len(bts._land_rescue_offsets())
+        assert worst_case_requests == 25
+        timeout = bts._timeseries_station_timeout_s()
+        assert timeout >= worst_case_requests * 30.0, (
+            f"{timeout}s cannot cover {worst_case_requests} requests at ~30s each"
+        )
+
     def test_offsets_are_deterministic(self):
         """A re-run must pick the SAME rescue cell, or a station's provenance
         changes silently between runs."""

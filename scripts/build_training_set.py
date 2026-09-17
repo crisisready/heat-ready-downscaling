@@ -1156,12 +1156,21 @@ _TIMESERIES_MAX_WORKERS = 6
 # alive processes, CLOSE-WAIT sockets piled up against CDS, no log line, no
 # crash, nothing ever firing again.
 #
-# A normal station fetch is ~30s, so 10 minutes is ~20x headroom. On expiry the
-# station is recorded as failed and the batch continues. The worker thread is
-# NOT killable in Python and may linger -- that is accepted deliberately: a
-# leaked thread on a process that finishes and reports is strictly better than
-# a batch that hangs forever and reports nothing.
-_TIMESERIES_STATION_TIMEOUT_S = 600.0
+# DERIVED from the rescue's probe count, not a round number (code review
+# finding, real): a station whose own cell is masked walks outward through every
+# candidate offset before it correctly gives up, so its worst case is
+# 1 + len(_land_rescue_offsets()) = 25 requests, not one. At a ~30s normal fetch
+# that is ~750s, which a flat 600s ceiling would have cut short -- turning a
+# genuinely open-ocean station (a correct, expected outcome) into a spurious
+# "batch budget exhausted" for every station sharing its batch. Deriving it
+# keeps the two in step if the radius ever changes.
+_TIMESERIES_SECONDS_PER_REQUEST_BUDGET = 60.0  # 2x a ~30s observed fetch
+
+
+def _timeseries_station_timeout_s() -> float:
+    """Per-station wall-clock ceiling, sized for the worst case: the station's
+    own cell plus every rescue candidate."""
+    return _TIMESERIES_SECONDS_PER_REQUEST_BUDGET * (1 + len(_land_rescue_offsets()))
 
 # ERA5-Land grid spacing, and how far to search for an unmasked cell when a
 # station's OWN nearest cell is masked (ocean/lake).
@@ -1297,12 +1306,18 @@ def fetch_era5_land_for_stations_via_timeseries(
     without pretending the two access patterns are the same thing.
 
     Per-station failures are isolated and reported, never fatal to the batch.
-    The land-mask case is the one that matters: this dataset serves the nearest
-    grid point ONLY, with no masked-cell rescue, so a coastal or small-island
-    station can come back with no usable hours. era5.
-    extract_era5_timeseries_rows raises on that, this function records it as a
-    failed station, and the caller is left with a real gap it can see rather
-    than NULL grid values that look like data.
+
+    The land-mask case is the one that matters. This dataset serves the nearest
+    grid point ONLY, so a coastal or small-island station's own cell is often
+    ocean -- ~18% of the Af/Am corpus, measured 2026-09-17.
+    _fetch_station_rows_with_land_rescue handles that by re-requesting at the
+    nearest UNMASKED neighbouring cell, the same substitution
+    era5.extract_era5_means performs for the gridded path, and logs the
+    substituted cell at WARNING because it is real provenance.
+
+    A station with no land anywhere inside the rescue radius still fails, and
+    is then ABSENT from the returned dicts -- a gap the caller can see -- rather
+    than present with NULL grid values that look like data.
     """
     if max_workers is None:
         max_workers = _TIMESERIES_MAX_WORKERS
@@ -1450,7 +1465,7 @@ def fetch_era5_land_for_stations_via_timeseries(
             threading.Thread(target=_worker, daemon=True).start()
 
         # One deadline for the whole set, derived from the per-station ceiling.
-        budget = _TIMESERIES_STATION_TIMEOUT_S * (
+        budget = _timeseries_station_timeout_s() * (
             1 + (len(pending) + max_workers - 1) // max_workers)
         end_by = time.monotonic() + budget
         finished = 0
@@ -1468,7 +1483,7 @@ def fetch_era5_land_for_stations_via_timeseries(
             logger.error(
                 "[timeseries] batch budget of %.0fs exhausted with %d of %d station-fetches "
                 "unfinished. Continuing -- a bounded gap we can see beats a silent hang "
-                "(see _TIMESERIES_STATION_TIMEOUT_S). Abandoned workers are daemon threads "
+                "(see _timeseries_station_timeout_s). Abandoned workers are daemon threads "
                 "and will not block process exit.",
                 budget, len(pending) - finished, len(pending),
             )
