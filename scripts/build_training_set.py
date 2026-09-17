@@ -2401,9 +2401,20 @@ def main() -> None:
                     os.path.join(args.ghcn_checkpoint_dir, f"ghcn_daily_{batch_label}.jsonl")
                     if args.ghcn_checkpoint_dir else None
                 )
+                # Both non-CDS sources checkpoint per batch. Code review finding,
+                # real: this condition tested only "openmeteo", so a
+                # --era5-source timeseries run silently got era5_checkpoint_path
+                # =None and fell back to the module-level shared /tmp default --
+                # no batch-scoped resume, and every batch in the run contending
+                # on one file. The cds source is excluded because it resumes via
+                # --era5-cache-dir's netCDF segment cache instead.
                 era5_checkpoint_path = (
-                    os.path.join(args.ghcn_checkpoint_dir, f"era5_openmeteo_{batch_label}.jsonl")
-                    if args.ghcn_checkpoint_dir and args.era5_source == "openmeteo" else None
+                    os.path.join(
+                        args.ghcn_checkpoint_dir,
+                        f"era5_{args.era5_source}_{batch_label}.jsonl",
+                    )
+                    if args.ghcn_checkpoint_dir and args.era5_source in ("openmeteo", "timeseries")
+                    else None
                 )
                 print(f"[{batch_label}] building training rows for {len(chunk_stations)} station(s)...")
                 try:

@@ -2357,6 +2357,34 @@ class TestMainStationIdsFileAndDryRun:
         passed_ids = {s["station_id"] for s in mock_build.call_args_list[0].args[1]}
         assert passed_ids == {"USW00090001", "USW00090002"}
 
+    def test_timeseries_source_gets_a_batch_scoped_era5_checkpoint(self, monkeypatch, tmp_path):
+        """Code review finding, real: the checkpoint-path condition tested only
+        "openmeteo", so a --era5-source timeseries run silently fell back to the
+        module-level shared /tmp default -- no batch-scoped resume, and every
+        batch in a run contending on one file."""
+        f = tmp_path / "ids.json"
+        f.write_text(json.dumps({"station_ids": ["USW00090001"]}))
+        ckdir = tmp_path / "ck"
+        ckdir.mkdir()
+        monkeypatch.setattr(sys, "argv", [
+            "build_training_set.py", "--station-ids-file", str(f),
+            "--start-date", "2016-06-01", "--end-date", "2016-06-30",
+            "--era5-source", "timeseries", "--ghcn-checkpoint-dir", str(ckdir),
+        ])
+        mocks = self._patch_common(
+            list_ghcn_stations_return=[
+                {"station_id": "USW00090001", "lon": -80.0, "lat": 26.0,
+                 "elevation_m": 10.0, "name": "FL1"}],
+            active_ids={"USW00090001"},
+        )
+        with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], \
+             mocks[5] as mock_build, mocks[6], mocks[7]:
+            bts.main()
+        assert mock_build.call_count == 1
+        passed = mock_build.call_args_list[0].kwargs["era5_checkpoint_path"]
+        assert passed is not None, "timeseries must get a batch-scoped checkpoint, not the shared default"
+        assert "timeseries" in passed and str(ckdir) in passed
+
     def test_the_removed_extent_flag_errors_instead_of_being_ignored(self, monkeypatch, tmp_path):
         """A saved command line carrying --era5-max-chunk-extent-deg would
         otherwise run with a ~100x-different request-count profile than its
