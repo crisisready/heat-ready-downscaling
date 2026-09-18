@@ -181,3 +181,22 @@ class TestBuildPairedRowsCheckpointing:
                                max_workers=1, checkpoint_path=checkpoint_path)
 
         assert fake_session.calls == calls_after_first_run  # resumed run made no new HTTP calls
+
+
+class TestServiceConfigRetriableStatuses:
+    """2026-09-18, #710: same evidence/reasoning as validate_lagfill_
+    downscaling.py's own TestServiceConfigRetriableStatuses -- see that
+    file for the full incident writeup."""
+
+    def test_keyed_config_retries_400(self):
+        cfg = vfd._service_config(api_key="fake-key", lead_days=1)
+        assert 400 in cfg.retriable_statuses
+        assert {429, 500, 502, 503, 504} <= cfg.retriable_statuses
+
+    def test_anon_config_does_not_retry_400(self):
+        cfg = vfd._service_config(api_key=None, lead_days=1)
+        assert 400 not in cfg.retriable_statuses
+
+    def test_config_name_includes_lead_days(self):
+        cfg = vfd._service_config(api_key="fake-key", lead_days=3)
+        assert cfg.name == "forecast_lead3"
