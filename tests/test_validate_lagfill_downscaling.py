@@ -308,3 +308,24 @@ class TestLoadValidationRowsZonesFilter:
         assert "climate_zone IN (%s,%s)" in captured["query"]
         assert captured["query"].index("climate_zone IN") < captured["query"].index("LIMIT %s")
         assert captured["params"] == ("Cfb", "Cwa", 500)
+
+
+class TestServiceConfigRetriableStatuses:
+    """2026-09-18, #710: a real full-table run against the keyed endpoint
+    got HTTP 400 on 100% of ~2210 stations, but independent diagnosis
+    (hand-built requests with the identical URL/params) showed the same
+    request succeeding most of the time and failing as a ReadTimeout the
+    rest -- an intermittent, load-sensitive failure this service's own
+    retry/backoff path should absorb rather than fail closed on."""
+
+    def test_keyed_config_retries_400(self):
+        cfg = vld._service_config(api_key="fake-key")
+        assert 400 in cfg.retriable_statuses
+        # the original retriable set must still be present, not replaced
+        assert {429, 500, 502, 503, 504} <= cfg.retriable_statuses
+
+    def test_anon_config_does_not_retry_400(self):
+        """No equivalent evidence exists yet for the anonymous endpoint --
+        this stays a genuinely non-retriable client error there."""
+        cfg = vld._service_config(api_key=None)
+        assert 400 not in cfg.retriable_statuses

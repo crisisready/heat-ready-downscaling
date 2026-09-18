@@ -210,11 +210,28 @@ def _service_config(api_key: str | None) -> ServiceConfig:
     """Keyed (paid tier, tuned) when a key is available, anonymous
     (untuned, historically throttle-prone) otherwise. See the module
     docstring's endpoint comment for the sustained-load test that
-    validated these specific numbers."""
+    validated these specific numbers.
+
+    retriable_statuses adds 400 for the keyed endpoint specifically
+    (2026-09-18, #710's rf6 gate regen): a real full-table run against this
+    endpoint got HTTP 400 on 100% of ~2210 stations, immediately and
+    non-retriably by ServiceConfig's own default -- but independent
+    diagnosis (hand-built requests with the byte-identical URL/params,
+    including concurrent and connection-fresh variants) showed the SAME
+    key/request shape succeeding most of the time, with the rest failing as
+    ReadTimeouts rather than 400s. That pattern -- an intermittent, load-
+    sensitive failure that surfaces as different symptoms (400 here, a
+    timeout there) depending on server-side conditions -- is exactly what
+    the retry/backoff path already exists to absorb; 400 was excluded only
+    because it's normally a permanent client error, which this evidence
+    says it isn't for this specific endpoint under load. Confined to the
+    keyed config -- no equivalent evidence exists yet for the anonymous
+    endpoint."""
     if api_key:
         return ServiceConfig(
             name="lagfill_hfa_keyed", api_key=api_key, api_key_param="apikey",
             timeout_s=90.0, retry_max=4, backoff_base_s=2.0,
+            retriable_statuses=frozenset({400, 429, 500, 502, 503, 504}),
         )
     return ServiceConfig(name="lagfill_hfa_anon", timeout_s=30.0, retry_max=4, backoff_base_s=2.0)
 

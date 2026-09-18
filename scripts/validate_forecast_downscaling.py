@@ -328,6 +328,27 @@ def _process_one_station_lead(station: dict, session: HttpSession) -> dict:
     return {"lead_rows": lead_rows, "fidelity_rows": fidelity_rows}
 
 
+def _service_config(api_key: str | None, lead_days: int) -> ServiceConfig:
+    """Extracted for symmetry/testability with validate_lagfill_downscaling.
+    _service_config -- previously built inline inside build_paired_rows.
+
+    retriable_statuses adds 400 for the keyed path only (2026-09-18, #710):
+    same reasoning as validate_lagfill_downscaling.py's own _service_config
+    -- real evidence that this class of paid Open-Meteo endpoint can return
+    400 under load for what a fresh, identical request proves is a valid
+    request, indistinguishable in practice from the timeouts/5xx the retry
+    path already absorbs. No standalone evidence yet for THIS specific host
+    (previous-runs-api.open-meteo.com, not lag_fill's customer-historical-
+    forecast-api.open-meteo.com) -- applied defensively since it shares the
+    same paid tier/key and architecture; revisit if evidence contradicts
+    this."""
+    return ServiceConfig(
+        name=f"forecast_lead{lead_days}", api_key=api_key, api_key_param="apikey",
+        timeout_s=60.0, retry_max=4, backoff_base_s=2.0,
+        retriable_statuses=frozenset({400, 429, 500, 502, 503, 504}) if api_key else frozenset({429, 500, 502, 503, 504}),
+    )
+
+
 def build_paired_rows(
     rows: list[dict], tz_by_station: dict[str, str], lead_days: int, api_key: str | None,
     max_workers: int = 4, checkpoint_path: str | None = None, disable_elevation_correction: bool = False,
@@ -356,10 +377,7 @@ def build_paired_rows(
         for sid, station_rows in by_station.items()
     ]
 
-    cfg = ServiceConfig(
-        name=f"forecast_lead{lead_days}", api_key=api_key, api_key_param="apikey",
-        timeout_s=60.0, retry_max=4, backoff_base_s=2.0,
-    )
+    cfg = _service_config(api_key, lead_days)
     throttle = AdaptiveThrottle(max_workers=max_workers)
     session = HttpSession(cfg, throttle)
     store = JsonlCheckpointStore(checkpoint_path or f"/tmp/forecast_lead{lead_days}_fetch_checkpoint.jsonl")
