@@ -474,7 +474,15 @@ def build_paired_rows(
     ]
 
     cfg = _service_config(api_key)
-    throttle = AdaptiveThrottle(max_workers=max_workers)
+    # min_workers/max_backoff_mult (2026-09-19, #710): live evidence
+    # tonight showed the keyed endpoint's failures are per-request cold-
+    # read/streaming timeouts, not load-correlated -- the default AIMD
+    # floor (1) cut concurrency 4->1 with no improvement in failure rate,
+    # collapsing throughput 390 stations/h -> ~20/h. Floored at 3 (a
+    # genuine 429 can still push below this -- see AdaptiveThrottle's own
+    # is_hard_rate_limit docstring). Anonymous endpoint keeps the default
+    # (no equivalent evidence there).
+    throttle = AdaptiveThrottle(max_workers=max_workers, min_workers=3 if api_key else 1, max_backoff_mult=2.0 if api_key else 8.0)
     session = HttpSession(cfg, throttle)
     store = JsonlCheckpointStore(checkpoint_path or "/tmp/lagfill_fetch_checkpoint.jsonl")
 

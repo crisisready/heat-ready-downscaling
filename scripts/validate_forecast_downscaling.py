@@ -389,7 +389,9 @@ def build_paired_rows(
     ]
 
     cfg = _service_config(api_key, lead_days)
-    throttle = AdaptiveThrottle(max_workers=max_workers)
+    # min_workers/max_backoff_mult -- same reasoning as validate_lagfill_
+    # downscaling.build_paired_rows's identical change (#710, 2026-09-19).
+    throttle = AdaptiveThrottle(max_workers=max_workers, min_workers=3 if api_key else 1, max_backoff_mult=2.0 if api_key else 8.0)
     session = HttpSession(cfg, throttle)
     store = JsonlCheckpointStore(checkpoint_path or f"/tmp/forecast_lead{lead_days}_fetch_checkpoint.jsonl")
 
