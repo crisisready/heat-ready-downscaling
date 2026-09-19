@@ -69,6 +69,7 @@ import logging
 import math
 import os
 import sys
+import time
 from datetime import date, timedelta
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
@@ -85,6 +86,9 @@ from heatready_downscaling.score import MIN_ZONE_N, fidelity_report, score_band
 
 from validate_lagfill_downscaling import (  # noqa: E402 -- shared plumbing, see module docstring
     _CHUNK_DAYS,
+    _MIN_SUBDIVIDE_CHUNK_DAYS,
+    _REQUEUE_DELAY_S,
+    _REQUEUE_MAX_ATTEMPTS,
     _chunk_dates_by_span,
     _merge_daily_chunk,
     _open_meteo_api_key,
@@ -146,7 +150,7 @@ _SNAPSHOT_VERSION = "ghcn_training-live"
 
 def fetch_lead_daily_for_station(
     station_id: str, lat: float, lon: float, dates: list[date], lead_days: int, session: HttpSession, tz: str,
-    url: str, disable_elevation_correction: bool = False,
+    url: str, disable_elevation_correction: bool = False, _allow_subdivision: bool = True,
 ) -> dict[str, dict]:
     """Same shape as validate_lagfill_downscaling._fetch_nrt_daily_for_station_tz,
     but reconstructs the `lead_days`-ahead forecast value instead of the NRT
@@ -164,7 +168,15 @@ def fetch_lead_daily_for_station(
     the real serving-time change, not the resolution axis, since the model
     itself already differs from what production serves. Real, pre-existing,
     not introduced by this change -- see this repo's own roadmap for the
-    full caveat."""
+    full caveat.
+
+    _allow_subdivision (2026-09-19, #710): same one-level recursion guard as
+    validate_lagfill_downscaling._fetch_nrt_daily_for_station_tz -- this
+    endpoint hasn't independently shown the streaming-timeout failure mode
+    (module docstring's "NOT sustained-load tested" note), but it shares the
+    same server/architecture risk class, so the same subdivide-once fallback
+    applies here defensively. Never pass this explicitly from outside this
+    function."""
     dates = [d for d in dates if d >= _COVERAGE_START]
     if not dates:
         return {}
@@ -185,6 +197,25 @@ def fetch_lead_daily_for_station(
 
     resp = session.get_json(url, params)
     if resp is NO_RESULT or "hourly" not in resp:
+        if _allow_subdivision and len(dates) > _MIN_SUBDIVIDE_CHUNK_DAYS:
+            sorted_dates = sorted(set(dates))
+            mid = len(sorted_dates) // 2
+            first_half, second_half = sorted_dates[:mid], sorted_dates[mid:]
+            logger.warning(
+                "%s: %d-day lead=%d chunk failed after exhausting retries -- subdividing into "
+                "2 smaller chunks (%d/%d days) as a one-time fallback",
+                station_id, len(sorted_dates), lead_days, len(first_half), len(second_half),
+            )
+            result: dict[str, dict] = {}
+            result.update(fetch_lead_daily_for_station(
+                station_id, lat, lon, first_half, lead_days, session, tz, url,
+                disable_elevation_correction=disable_elevation_correction, _allow_subdivision=False,
+            ))
+            result.update(fetch_lead_daily_for_station(
+                station_id, lat, lon, second_half, lead_days, session, tz, url,
+                disable_elevation_correction=disable_elevation_correction, _allow_subdivision=False,
+            ))
+            return result
         return {}
 
     suffix = f"_previous_day{lead_days}"
@@ -254,6 +285,62 @@ def _bucket_temperature_only(times: list[str], t2m_vals: list, tz: str) -> dict[
     }
 
 
+def _fetch_lead_chunks_with_delayed_requeue(
+    station_id: str, lat: float, lon: float, date_chunks: list[list[date]], lead_days: int, session: HttpSession,
+    tz: str, url: str, disable_elevation_correction: bool,
+) -> dict[str, dict]:
+    """Lead-days-aware sibling of validate_lagfill_downscaling.
+    _fetch_chunks_with_delayed_requeue -- same replace-in-place-retry-with-
+    requeue logic (see that function's own docstring for the live proof and
+    reasoning), just threading lead_days through to fetch_lead_daily_for_
+    station instead of calling _fetch_nrt_daily_for_station_tz. Not extracted
+    into a single shared helper because the two fetch functions' signatures
+    differ (lead_days) and _process_one_station/_process_one_station_lead
+    are already each other's documented siblings, not merged."""
+    daily_by_date: dict[str, dict] = {}
+    pending: list[tuple[float, int, list[date]]] = []
+
+    for chunk in date_chunks:
+        result = fetch_lead_daily_for_station(
+            station_id, lat, lon, chunk, lead_days, session, tz, url,
+            disable_elevation_correction=disable_elevation_correction, _allow_subdivision=False,
+        )
+        if result:
+            _merge_daily_chunk(daily_by_date, result, station_id)
+        else:
+            pending.append((time.monotonic() + _REQUEUE_DELAY_S, 1, chunk))
+
+    while pending:
+        pending.sort(key=lambda p: p[0])
+        not_before, attempts, chunk = pending.pop(0)
+        wait_s = not_before - time.monotonic()
+        if wait_s > 0:
+            time.sleep(wait_s)
+        if attempts >= _REQUEUE_MAX_ATTEMPTS:
+            logger.warning(
+                "%s: lead=%d chunk (%s..%s) still failing after %d requeued attempts -- "
+                "one last subdivided attempt, then giving up on this range",
+                station_id, lead_days, chunk[0].isoformat(), chunk[-1].isoformat(), attempts,
+            )
+            result = fetch_lead_daily_for_station(
+                station_id, lat, lon, chunk, lead_days, session, tz, url,
+                disable_elevation_correction=disable_elevation_correction, _allow_subdivision=True,
+            )
+            if result:
+                _merge_daily_chunk(daily_by_date, result, station_id)
+            continue
+        result = fetch_lead_daily_for_station(
+            station_id, lat, lon, chunk, lead_days, session, tz, url,
+            disable_elevation_correction=disable_elevation_correction, _allow_subdivision=False,
+        )
+        if result:
+            _merge_daily_chunk(daily_by_date, result, station_id)
+        else:
+            pending.append((time.monotonic() + _REQUEUE_DELAY_S, attempts + 1, chunk))
+
+    return daily_by_date
+
+
 def _process_one_station_lead(station: dict, session: HttpSession) -> dict:
     """fetch_all's fetch_fn for one station at one lead -- see
     validate_lagfill_downscaling._process_one_station for the identical
@@ -292,15 +379,18 @@ def _process_one_station_lead(station: dict, session: HttpSession) -> dict:
     # captured against lag_fill's own endpoint (customer-historical-
     # forecast-api), not this one (previous-runs-api, models=gfs_seamless).
     # Same shared infrastructure/architecture, same risk class; no reason
-    # to wait for a separate incident here to apply the same fix.
-    daily_by_date: dict[str, dict] = {}
-    for year, year_dates in by_year.items():
-        for date_chunk in _chunk_dates_by_span(year_dates, _CHUNK_DAYS):
-            chunk = fetch_lead_daily_for_station(
-                station_id, lat, lon, date_chunk, lead_days, session, tz, url,
-                disable_elevation_correction=disable_elevation_correction,
-            )
-            _merge_daily_chunk(daily_by_date, chunk, station_id)
+    # to wait for a separate incident here to apply the same fix. Also
+    # routes through the same delayed-requeue-on-failure logic as lag_fill
+    # (_fetch_lead_chunks_with_delayed_requeue) rather than an in-place
+    # retry-and-merge loop, for the identical reason (see that function's
+    # docstring).
+    date_chunks = [
+        chunk for year, year_dates in by_year.items()
+        for chunk in _chunk_dates_by_span(year_dates, _CHUNK_DAYS)
+    ]
+    daily_by_date = _fetch_lead_chunks_with_delayed_requeue(
+        station_id, lat, lon, date_chunks, lead_days, session, tz, url, disable_elevation_correction,
+    )
 
     lead_rows: list[dict] = []
     fidelity_rows: list[dict] = []

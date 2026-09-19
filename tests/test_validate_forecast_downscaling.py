@@ -10,12 +10,29 @@ environment to run, same as the script it tests."""
 
 import os
 import sys
+from datetime import date, timedelta
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 from api_call_manager import NO_RESULT, AdaptiveThrottle
 
 import validate_forecast_downscaling as vfd
+
+
+class _ScriptedSession:
+    """Same purpose as test_validate_lagfill_downscaling.py's identical
+    fixture -- returns a different scripted outcome on each successive
+    get_json call, for testing _fetch_lead_chunks_with_delayed_requeue's
+    retry-after-a-real-delay behavior."""
+
+    def __init__(self, outcomes: list):
+        self._outcomes = list(outcomes)
+        self.calls = 0
+        self.throttle = AdaptiveThrottle(max_workers=4)
+
+    def get_json(self, url, params, **kwargs):
+        self.calls += 1
+        return self._outcomes.pop(0)
 
 
 def _fake_lead_response(base_temp_c: float, lead_days: int):
@@ -87,7 +104,17 @@ class TestProcessOneStationLead:
         # Before _COVERAGE_START (2021-03-01) -- no dates survive to fetch, so no rows.
         assert payload is NO_RESULT
 
-    def test_no_successful_rows_returns_no_result(self):
+    def test_no_successful_rows_returns_no_result(self, monkeypatch):
+        # Same fake-clock requirement as
+        # test_validate_lagfill_downscaling.py's identical test -- a
+        # persistently-failing chunk now goes through
+        # _fetch_lead_chunks_with_delayed_requeue's real requeue-with-delay
+        # loop (#710, 2026-09-19), which would otherwise take ~24 real
+        # minutes to exhaust _REQUEUE_MAX_ATTEMPTS.
+        fake_now = [0.0]
+        monkeypatch.setattr(vfd.time, "monotonic", lambda: fake_now[0])
+        monkeypatch.setattr(vfd.time, "sleep", lambda s: fake_now.__setitem__(0, fake_now[0] + s))
+
         station = {
             "station_id": "TEST002",
             "rows": [{
@@ -103,6 +130,79 @@ class TestProcessOneStationLead:
         payload = vfd._process_one_station_lead(station, session)
 
         assert payload is NO_RESULT
+
+
+class TestDelayedRequeue:
+    """#710, 2026-09-19: mirrors test_validate_lagfill_downscaling.py's
+    identical test class for _fetch_lead_chunks_with_delayed_requeue --
+    same requeue-with-delay mechanism, threaded through lead_days, exercised
+    directly against a fake clock, never a real sleep."""
+
+    def test_chunk_failing_once_then_succeeding_is_merged_after_one_real_wait(self, monkeypatch):
+        fake_now = [0.0]
+        slept = []
+        monkeypatch.setattr(vfd.time, "monotonic", lambda: fake_now[0])
+
+        def fake_sleep(s):
+            slept.append(s)
+            fake_now[0] += s
+
+        monkeypatch.setattr(vfd.time, "sleep", fake_sleep)
+
+        session = _ScriptedSession([NO_RESULT, _fake_lead_response(base_temp_c=20.0, lead_days=2)])
+        result = vfd._fetch_lead_chunks_with_delayed_requeue(
+            "ST1", 40.0, -75.0, [[date(2023, 6, 15)]], 2, session, "UTC",
+            "https://customer-previous-runs-api.open-meteo.com/v1/forecast", False,
+        )
+
+        assert session.calls == 2  # first attempt failed, requeued attempt succeeded
+        assert slept == [vfd._REQUEUE_DELAY_S]  # waited the real delay, not a quick retry
+        assert "2023-06-15" in result
+
+    def test_chunk_failing_past_the_cap_gets_one_subdivided_last_attempt(self, monkeypatch):
+        fake_now = [0.0]
+        monkeypatch.setattr(vfd.time, "monotonic", lambda: fake_now[0])
+        monkeypatch.setattr(vfd.time, "sleep", lambda s: fake_now.__setitem__(0, fake_now[0] + s))
+
+        # A 60-day chunk (> _MIN_SUBDIVIDE_CHUNK_DAYS=46) fails every one of
+        # the _REQUEUE_MAX_ATTEMPTS requeued attempts, AND the final full-
+        # span last-resort attempt -- only then does the one-level
+        # subdivision (2x ~30-day halves) kick in, and both halves succeed.
+        dates = [date(2023, 1, 1) + timedelta(days=i) for i in range(60)]
+        outcomes = [NO_RESULT] * (vfd._REQUEUE_MAX_ATTEMPTS + 1) + [
+            _fake_lead_response(base_temp_c=20.0, lead_days=2), _fake_lead_response(base_temp_c=21.0, lead_days=2),
+        ]
+        session = _ScriptedSession(outcomes)
+
+        result = vfd._fetch_lead_chunks_with_delayed_requeue(
+            "ST1", 40.0, -75.0, [dates], 2, session, "UTC",
+            "https://customer-previous-runs-api.open-meteo.com/v1/forecast", False,
+        )
+
+        # 6 requeued attempts + 1 last-resort full-span attempt + 2 subdivided halves.
+        assert session.calls == vfd._REQUEUE_MAX_ATTEMPTS + 3
+        assert len(result) > 0  # the subdivided last resort did recover some dates
+
+    def test_multiple_chunks_progress_independently(self, monkeypatch):
+        """A failing chunk being requeued must not block an already-
+        succeeding chunk from being merged -- same intent as lag_fill's
+        identical test."""
+        fake_now = [0.0]
+        monkeypatch.setattr(vfd.time, "monotonic", lambda: fake_now[0])
+        monkeypatch.setattr(vfd.time, "sleep", lambda s: fake_now.__setitem__(0, fake_now[0] + s))
+
+        session = _ScriptedSession([
+            _fake_lead_response(base_temp_c=20.0, lead_days=2),  # chunk 1 succeeds immediately
+            NO_RESULT,                                            # chunk 2 fails once
+            _fake_lead_response(base_temp_c=22.0, lead_days=2),  # chunk 2 succeeds on requeue
+        ])
+        result = vfd._fetch_lead_chunks_with_delayed_requeue(
+            "ST1", 40.0, -75.0, [[date(2023, 6, 15)], [date(2023, 8, 1)]], 2, session, "UTC",
+            "https://customer-previous-runs-api.open-meteo.com/v1/forecast", False,
+        )
+
+        assert session.calls == 3
+        assert "2023-06-15" in result
 
 
 class TestElevationNanThreading:
