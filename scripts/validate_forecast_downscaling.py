@@ -84,6 +84,9 @@ from heatready_downscaling.report import build_report
 from heatready_downscaling.score import MIN_ZONE_N, fidelity_report, score_band
 
 from validate_lagfill_downscaling import (  # noqa: E402 -- shared plumbing, see module docstring
+    _CHUNK_DAYS,
+    _chunk_dates_by_span,
+    _merge_daily_chunk,
     _open_meteo_api_key,
     _station_timezones,
     load_validation_rows,
@@ -283,13 +286,21 @@ def _process_one_station_lead(station: dict, session: HttpSession) -> dict:
             station_id, dropped_pre_coverage, _COVERAGE_START,
         )
 
+    # 2026-09-19 (#710): same _CHUNK_DAYS sub-chunking as validate_lagfill_
+    # downscaling._process_one_station -- applied here defensively too,
+    # even though the live evidence for server-side streaming timeouts was
+    # captured against lag_fill's own endpoint (customer-historical-
+    # forecast-api), not this one (previous-runs-api, models=gfs_seamless).
+    # Same shared infrastructure/architecture, same risk class; no reason
+    # to wait for a separate incident here to apply the same fix.
     daily_by_date: dict[str, dict] = {}
     for year, year_dates in by_year.items():
-        chunk = fetch_lead_daily_for_station(
-            station_id, lat, lon, year_dates, lead_days, session, tz, url,
-            disable_elevation_correction=disable_elevation_correction,
-        )
-        daily_by_date.update(chunk)
+        for date_chunk in _chunk_dates_by_span(year_dates, _CHUNK_DAYS):
+            chunk = fetch_lead_daily_for_station(
+                station_id, lat, lon, date_chunk, lead_days, session, tz, url,
+                disable_elevation_correction=disable_elevation_correction,
+            )
+            _merge_daily_chunk(daily_by_date, chunk, station_id)
 
     lead_rows: list[dict] = []
     fidelity_rows: list[dict] = []
