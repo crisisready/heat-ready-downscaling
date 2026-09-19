@@ -1,10 +1,11 @@
 """
 tests/test_backfill_wind.py, tests/test_build_training_set.py,
-tests/test_validate_lagfill_downscaling.py and tests/
-test_validate_forecast_downscaling.py cannot be collected in this repo:
-they import scripts/backfill_wind.py, scripts/build_training_set.py,
-scripts/validate_lagfill_downscaling.py and scripts/
-validate_forecast_downscaling.py, all of which import one or more of
+tests/test_validate_lagfill_downscaling.py, tests/
+test_validate_forecast_downscaling.py, and tests/
+test_prewarm_lagfill_chunks.py cannot be collected in this repo: they import
+scripts/backfill_wind.py, scripts/build_training_set.py, scripts/
+validate_lagfill_downscaling.py, scripts/validate_forecast_downscaling.py,
+and scripts/prewarm_lagfill_chunks.py, all of which import one or more of
 dem/era5/db/ghcn/heat_calcs/landscan/lst/vulnerability/open_meteo/
 api_call_manager -- private-repo-only modules for live Aurora/CDS/S3/
 Open-Meteo access this repo has no path to (see each script's own module
@@ -21,4 +22,5 @@ collect_ignore = [
     "tests/test_build_training_set.py",
     "tests/test_validate_lagfill_downscaling.py",
     "tests/test_validate_forecast_downscaling.py",
+    "tests/test_prewarm_lagfill_chunks.py",
 ]
