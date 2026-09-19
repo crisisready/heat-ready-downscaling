@@ -129,6 +129,19 @@ _BAND_KEY = "lag_fill"  # this script only ever validates the lag-fill band; sta
                         # build_report's envelope so publish_band_gate.py can catch a
                         # report generated here being published under the wrong --band-key
 _FETCH_PAD_DAYS = 1  # each side, so a local day's 24h window never runs off the fetched range
+_CHUNK_DAYS = 92  # 2026-09-19 (#710): a real, per-station year-long request (the previous
+                  # chunking granularity -- see _process_one_station's own by_year split)
+                  # measured near-total failure live against the keyed customer-historical-
+                  # forecast-api endpoint -- confirmed via a captured server-side response
+                  # body ("Unexpected error while streaming data: timeoutReached", HTTP 200
+                  # with a non-JSON body) that this is Open-Meteo's OWN backend timing out
+                  # generating a large response, not a client-side bug. A live 10-station
+                  # feasibility test measured 92-day chunks at 97.5% success (39/40, p50=0.49s,
+                  # p95=9.5s) vs 31-day chunks at 95% (114/120, p95=30.8s) -- 92 chosen for the
+                  # better p95. Sub-chunks WITHIN _process_one_station's existing by-year split
+                  # (never touches _fetch_nrt_daily_for_station_tz itself, which already pads
+                  # +-1 day around whatever date list it's given -- that pad naturally applies
+                  # per sub-chunk too, no separate change needed there).
 # Sentinel, not a real Phase-2 snapshot version: this script scores directly
 # against the live ghcn_training table, which has no snapshot_version of its
 # own. See score_band's fold_salt usage below for the same reasoning.
@@ -291,11 +304,63 @@ def _fetch_nrt_daily_for_station_tz(
     return out
 
 
+def _chunk_dates_by_span(dates: list[date], chunk_days: int) -> list[list[date]]:
+    """Splits a (possibly unsorted, possibly non-contiguous) list of dates
+    into calendar-contiguous groups spanning at most chunk_days days each,
+    anchored to each group's own first date -- NOT a positional slice of
+    the input list, since callers don't guarantee sorted input and a
+    positional slice would split a group based on row order rather than
+    actual calendar distance."""
+    if not dates:
+        return []
+    sorted_dates = sorted(set(dates))
+    groups: list[list[date]] = []
+    current = [sorted_dates[0]]
+    anchor = sorted_dates[0]
+    for d in sorted_dates[1:]:
+        if (d - anchor).days < chunk_days:
+            current.append(d)
+        else:
+            groups.append(current)
+            current = [d]
+            anchor = d
+    groups.append(current)
+    return groups
+
+
+def _merge_daily_chunk(daily_by_date: dict[str, dict], chunk: dict[str, dict], station_id: str) -> None:
+    """daily_by_date.update(chunk), but first checks any date already
+    present against the new chunk's own value for it (2026-09-19, #710
+    chunking review -- adjacent chunks' own +-1-day pad can independently
+    re-fetch the same boundary date). If the two chunks' independently
+    fetched/aggregated values for the same date disagree beyond float
+    noise, that's a real sign the two chunks' windowing isn't equivalent
+    to a single-span fetch at that boundary -- logged loudly rather than
+    silently overwritten, since a wrong gate number from a silent stitching
+    bug is worse than a slow validation run."""
+    for iso_date, new_val in chunk.items():
+        old_val = daily_by_date.get(iso_date)
+        if old_val is not None:
+            for field in ("tmax", "tmin"):
+                old_v, new_v = old_val.get(field), new_val.get(field)
+                if old_v is not None and new_v is not None and abs(old_v - new_v) > 0.01:
+                    logger.warning(
+                        "%s: chunk boundary mismatch at %s %s: %.4f (earlier chunk) vs %.4f "
+                        "(later chunk) -- keeping the later chunk's value, but this means "
+                        "the two chunks' windowing at this date is NOT equivalent to a "
+                        "single-span fetch",
+                        station_id, iso_date, field, old_v, new_v,
+                    )
+    daily_by_date.update(chunk)
+
+
 def _process_one_station(station: dict, session: HttpSession) -> dict:
     """fetch_all's fetch_fn -- one station's worth of build_paired_rows'
-    work (may issue >1 HTTP call internally, one per distinct year in its
-    date range, all routed through the same shared/throttled session).
-    Returns a single combined payload ({nrt_rows, fidelity_rows}) since
+    work (may issue >1 HTTP call internally: one per distinct year in its
+    date range, further split into _CHUNK_DAYS-sized sub-chunks within
+    each year -- see _CHUNK_DAYS's own docstring for why -- all routed
+    through the same shared/throttled session). Returns a single combined
+    payload ({nrt_rows, fidelity_rows}) since
     fetch_all/CheckpointStore only support one payload per item -- the two
     output streams this station produces are bundled together and split
     back apart by the caller after collect()."""
@@ -316,11 +381,12 @@ def _process_one_station(station: dict, session: HttpSession) -> dict:
 
     daily_by_date: dict[str, dict] = {}
     for year, year_dates in by_year.items():
-        chunk = _fetch_nrt_daily_for_station_tz(
-            station_id, lat, lon, year_dates, session, tz, url,
-            disable_elevation_correction=disable_elevation_correction,
-        )
-        daily_by_date.update(chunk)
+        for date_chunk in _chunk_dates_by_span(year_dates, _CHUNK_DAYS):
+            chunk = _fetch_nrt_daily_for_station_tz(
+                station_id, lat, lon, date_chunk, session, tz, url,
+                disable_elevation_correction=disable_elevation_correction,
+            )
+            _merge_daily_chunk(daily_by_date, chunk, station_id)
 
     nrt_rows: list[dict] = []
     fidelity_rows: list[dict] = []

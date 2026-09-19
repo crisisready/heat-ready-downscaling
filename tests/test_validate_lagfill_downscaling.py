@@ -7,6 +7,7 @@ from heatready_downscaling.score rather than defining its own copy."""
 
 import os
 import sys
+from datetime import date, timedelta
 
 import pytest
 
@@ -98,6 +99,90 @@ class TestProcessOneStation:
         payload = vld._process_one_station(station, session)
 
         assert payload is NO_RESULT
+
+
+class TestChunkDatesBySpan:
+    def test_single_short_span_is_one_group(self):
+        dates = [date(2023, 1, 1), date(2023, 1, 5), date(2023, 1, 10)]
+        groups = vld._chunk_dates_by_span(dates, chunk_days=92)
+        assert len(groups) == 1
+        assert groups[0] == sorted(dates)
+
+    def test_long_span_splits_into_multiple_groups(self):
+        # A full year of daily dates, 92-day chunks -> ceil(365/92) = 4 groups.
+        dates = [date(2023, 1, 1) + timedelta(days=i) for i in range(365)]
+        groups = vld._chunk_dates_by_span(dates, chunk_days=92)
+        assert len(groups) == 4
+        # Every group spans strictly less than chunk_days from its own anchor.
+        for g in groups:
+            assert (g[-1] - g[0]).days < 92
+        # Every input date appears in exactly one group -- no gaps, no duplicates.
+        flattened = sorted(d for g in groups for d in g)
+        assert flattened == sorted(dates)
+
+    def test_unsorted_and_duplicate_input_handled(self):
+        dates = [date(2023, 3, 1), date(2023, 1, 1), date(2023, 1, 1), date(2023, 2, 1)]
+        groups = vld._chunk_dates_by_span(dates, chunk_days=92)
+        flattened = sorted(d for g in groups for d in g)
+        assert flattened == [date(2023, 1, 1), date(2023, 2, 1), date(2023, 3, 1)]
+
+    def test_empty_input_returns_empty(self):
+        assert vld._chunk_dates_by_span([], chunk_days=92) == []
+
+
+class TestMergeDailyChunk:
+    def test_no_overlap_just_combines(self):
+        daily_by_date: dict = {}
+        vld._merge_daily_chunk(daily_by_date, {"2023-01-01": {"tmax": 20.0, "tmin": 10.0}}, "ST1")
+        vld._merge_daily_chunk(daily_by_date, {"2023-04-01": {"tmax": 22.0, "tmin": 12.0}}, "ST1")
+        assert daily_by_date == {
+            "2023-01-01": {"tmax": 20.0, "tmin": 10.0},
+            "2023-04-01": {"tmax": 22.0, "tmin": 12.0},
+        }
+
+    def test_agreeing_overlap_is_silent(self, caplog):
+        daily_by_date = {"2023-01-01": {"tmax": 20.0, "tmin": 10.0}}
+        with caplog.at_level("WARNING"):
+            vld._merge_daily_chunk(daily_by_date, {"2023-01-01": {"tmax": 20.001, "tmin": 10.0}}, "ST1")
+        assert "mismatch" not in caplog.text
+        assert daily_by_date["2023-01-01"]["tmax"] == 20.001  # later chunk wins
+
+    def test_disagreeing_overlap_logs_a_warning_and_keeps_later_value(self, caplog):
+        daily_by_date = {"2023-01-01": {"tmax": 20.0, "tmin": 10.0}}
+        with caplog.at_level("WARNING"):
+            vld._merge_daily_chunk(daily_by_date, {"2023-01-01": {"tmax": 25.0, "tmin": 10.0}}, "ST1")
+        assert "chunk boundary mismatch" in caplog.text
+        assert "ST1" in caplog.text
+        assert daily_by_date["2023-01-01"]["tmax"] == 25.0  # later chunk's value still wins
+
+
+class TestProcessOneStationChunking:
+    def test_year_spanning_station_issues_multiple_chunked_calls(self):
+        """A station with a full year of dates must be fetched in
+        _CHUNK_DAYS-sized pieces, not one 365-day call -- the real fix for
+        #710's Open-Meteo streaming-timeout finding."""
+        rows = [
+            {
+                "station_id": "TEST_CHUNK", "date": (date(2023, 1, 1) + timedelta(days=i)).isoformat(),
+                "lat": 40.0, "lon": -75.0, "climate_zone": "Cfa",
+                "station_tmax_c": 30.0, "station_tmin_c": 20.0,
+            }
+            for i in range(365)
+        ]
+        station = {
+            "station_id": "TEST_CHUNK", "rows": rows, "tz": "UTC",
+            "url": "https://historical-forecast-api.open-meteo.com/v1/forecast",
+        }
+        session = FakeSession(_fake_hourly_response(base_temp_c=25.0))
+
+        payload = vld._process_one_station(station, session)
+
+        assert payload is not NO_RESULT
+        assert session.calls == 4  # ceil(365 / 92)
+        # Every call's own span is well under a year -- the whole point of chunking.
+        for params in session.calls_params:
+            span_days = (date.fromisoformat(params["end_date"]) - date.fromisoformat(params["start_date"])).days
+            assert span_days < vld._CHUNK_DAYS + 2 * vld._FETCH_PAD_DAYS + 1
 
 
 class TestElevationNanThreading:
