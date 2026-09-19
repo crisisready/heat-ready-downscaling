@@ -300,3 +300,16 @@ class TestServiceConfigRetriableStatuses:
     def test_config_name_includes_lead_days(self):
         cfg = vfd._service_config(api_key="fake-key", lead_days=3)
         assert cfg.name == "forecast_lead3"
+
+    def test_keyed_config_retry_max_is_one(self):
+        # 2026-09-19, #710: caught live -- this was missed when the delayed-
+        # requeue pattern was ported from validate_lagfill_downscaling.py in
+        # PR #60, and forecast_lead1 was observed doing quick in-place
+        # retries immediately after launch as a result. Must match
+        # validate_lagfill_downscaling._service_config's own keyed retry_max.
+        cfg = vfd._service_config(api_key="fake-key", lead_days=1)
+        assert cfg.retry_max == 1
+
+    def test_anon_config_retry_max_stays_four(self):
+        cfg = vfd._service_config(api_key=None, lead_days=1)
+        assert cfg.retry_max == 4

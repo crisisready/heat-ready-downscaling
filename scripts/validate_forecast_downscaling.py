@@ -442,11 +442,27 @@ def _service_config(api_key: str | None, lead_days: int) -> ServiceConfig:
     (previous-runs-api.open-meteo.com, not lag_fill's customer-historical-
     forecast-api.open-meteo.com) -- applied defensively since it shares the
     same paid tier/key and architecture; revisit if evidence contradicts
-    this."""
+    this.
+
+    retry_max=1 for the keyed config specifically (2026-09-19, #710): this
+    was missed when the delayed-requeue chunking pattern was ported over from
+    validate_lagfill_downscaling.py in PR #60 -- caught live, forecast_lead1
+    was observed still doing "attempt 1/4 failed ... retrying in Ns" QUICK
+    in-place retries immediately after launch, exactly the anti-pattern
+    _fetch_lead_chunks_with_delayed_requeue exists to replace (see
+    validate_lagfill_downscaling._service_config's own docstring for the
+    live-tested proof this endpoint FAMILY's real failure mode needs a real
+    multi-minute gap, not a fast retry, to recover). Anonymous keeps 4 --
+    no equivalent evidence for that path."""
+    if api_key:
+        return ServiceConfig(
+            name=f"forecast_lead{lead_days}", api_key=api_key, api_key_param="apikey",
+            timeout_s=60.0, retry_max=1, backoff_base_s=2.0,
+            retriable_statuses=frozenset({400, 429, 500, 502, 503, 504}),
+        )
     return ServiceConfig(
-        name=f"forecast_lead{lead_days}", api_key=api_key, api_key_param="apikey",
-        timeout_s=60.0, retry_max=4, backoff_base_s=2.0,
-        retriable_statuses=frozenset({400, 429, 500, 502, 503, 504}) if api_key else frozenset({429, 500, 502, 503, 504}),
+        name=f"forecast_lead{lead_days}", timeout_s=60.0, retry_max=4, backoff_base_s=2.0,
+        retriable_statuses=frozenset({429, 500, 502, 503, 504}),
     )
 
 
