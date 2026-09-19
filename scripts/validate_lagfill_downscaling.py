@@ -93,6 +93,7 @@ import logging
 import math
 import os
 import sys
+import time
 from datetime import date, timedelta
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
@@ -239,11 +240,20 @@ def _service_config(api_key: str | None) -> ServiceConfig:
     because it's normally a permanent client error, which this evidence
     says it isn't for this specific endpoint under load. Confined to the
     keyed config -- no equivalent evidence exists yet for the anonymous
-    endpoint."""
+    endpoint.
+
+    retry_max=1 for the keyed config specifically (2026-09-19, #710,
+    superseding the retry_max=4 above): live-tested proof that a QUICK
+    in-place retry never helps this endpoint's real failure mode -- a
+    cold location/date-range needs the first hit to warm server-side, and
+    exhausting several fast retries just burns them all before that
+    warm-up completes. One attempt here, then the caller
+    (_fetch_chunks_with_delayed_requeue) decides whether/when to retry
+    with a REAL few-minutes gap instead."""
     if api_key:
         return ServiceConfig(
             name="lagfill_hfa_keyed", api_key=api_key, api_key_param="apikey",
-            timeout_s=90.0, retry_max=4, backoff_base_s=2.0,
+            timeout_s=90.0, retry_max=1, backoff_base_s=2.0,
             retriable_statuses=frozenset({400, 429, 500, 502, 503, 504}),
         )
     return ServiceConfig(name="lagfill_hfa_anon", timeout_s=30.0, retry_max=4, backoff_base_s=2.0)
@@ -253,9 +263,19 @@ def _endpoint_url(api_key: str | None) -> str:
     return _KEYED_URL if api_key else _ANON_URL
 
 
+_MIN_SUBDIVIDE_CHUNK_DAYS = 46  # 2026-09-19, #710: manager's own stated contingency --
+                                 # if the real failure rate stays >30% at concurrency 3 (a
+                                 # live incident measured 75%), a chunk that still fails
+                                 # after exhausting retries gets split into two smaller
+                                 # (~46-day) sub-chunks, ONE level only (see
+                                 # _allow_subdivision below) -- targeted at whichever
+                                 # specific stations/date-ranges are actually failing,
+                                 # not a global chunk-size change.
+
+
 def _fetch_nrt_daily_for_station_tz(
     station_id: str, lat: float, lon: float, dates: list[date], session: HttpSession, tz: str, url: str,
-    disable_elevation_correction: bool = False,
+    disable_elevation_correction: bool = False, _allow_subdivision: bool = True,
 ) -> dict[str, dict]:
     """One HTTP call (one calendar year of hourly data) via the shared,
     throttled HttpSession -- threads the station's real timezone through to
@@ -265,7 +285,12 @@ def _fetch_nrt_daily_for_station_tz(
     (unlike production's batched multi-point requests -- see
     heat-risk-data-api's own open_meteo.py fix for why a batch needs one
     "nan" per point) a bare "nan" scalar is correct here without any
-    per-point expansion."""
+    per-point expansion.
+
+    _allow_subdivision (2026-09-19, #710): internal recursion guard -- True
+    only on the top-level call for a given chunk, so a sub-chunk retry can
+    itself fail without recursing again (one level of subdivision, not
+    unbounded). Never pass this explicitly from outside this function."""
     start = min(dates) - timedelta(days=_FETCH_PAD_DAYS)
     end = max(dates) + timedelta(days=_FETCH_PAD_DAYS)
     params = {
@@ -285,6 +310,25 @@ def _fetch_nrt_daily_for_station_tz(
 
     hourly_data = session.get_json(url, params)
     if hourly_data is NO_RESULT or "hourly" not in hourly_data:
+        if _allow_subdivision and len(dates) > _MIN_SUBDIVIDE_CHUNK_DAYS:
+            sorted_dates = sorted(set(dates))
+            mid = len(sorted_dates) // 2
+            first_half, second_half = sorted_dates[:mid], sorted_dates[mid:]
+            logger.warning(
+                "%s: %d-day chunk failed after exhausting retries -- subdividing into "
+                "2 smaller chunks (%d/%d days) as a one-time fallback",
+                station_id, len(sorted_dates), len(first_half), len(second_half),
+            )
+            result: dict[str, dict] = {}
+            result.update(_fetch_nrt_daily_for_station_tz(
+                station_id, lat, lon, first_half, session, tz, url,
+                disable_elevation_correction=disable_elevation_correction, _allow_subdivision=False,
+            ))
+            result.update(_fetch_nrt_daily_for_station_tz(
+                station_id, lat, lon, second_half, session, tz, url,
+                disable_elevation_correction=disable_elevation_correction, _allow_subdivision=False,
+            ))
+            return result
         return {}
 
     tz_map = {station_id: tz}
@@ -354,6 +398,83 @@ def _merge_daily_chunk(daily_by_date: dict[str, dict], chunk: dict[str, dict], s
     daily_by_date.update(chunk)
 
 
+_REQUEUE_DELAY_S = 240  # 2026-09-19, #710: live-tested proof (5/5 previously-failed
+                         # chunks succeeded fast, 0.6-8.6s, on a single fresh retry) that
+                         # this endpoint's real failure mode is "first request to a cold
+                         # location/date-range warms it server-side, but exhausting a
+                         # handful of QUICK in-place retries burns all of them before the
+                         # cache is actually warm." A quick retry never helps; a few
+                         # minutes' wait reliably does. ~4 min, mid the manager's own
+                         # stated 3-5 min range.
+_REQUEUE_MAX_ATTEMPTS = 6  # per-chunk cap, matching the manager's own stated number.
+
+
+def _fetch_chunks_with_delayed_requeue(
+    station_id: str, lat: float, lon: float, date_chunks: list[list[date]], session: HttpSession,
+    tz: str, url: str, disable_elevation_correction: bool,
+) -> dict[str, dict]:
+    """Replaces "retry in place" with "requeue after a real delay" (#710,
+    2026-09-19 -- see _REQUEUE_DELAY_S's own docstring for the live proof).
+    Tries every chunk once; any that fail go to the back of a pending
+    queue with a not-before time _REQUEUE_DELAY_S out. Retries the
+    earliest-due pending chunk, sleeping only as long as needed to reach
+    its not-before (never a fixed sleep regardless of how much time has
+    already passed doing other chunks). A chunk still failing after
+    _REQUEUE_MAX_ATTEMPTS gets ONE last attempt at half the date span
+    (_fetch_nrt_daily_for_station_tz's own one-level subdivision) before
+    being given up on for good -- this only blocks the ONE worker thread
+    handling this station; with AdaptiveThrottle's own concurrency
+    (typically 3+), the other workers keep making real progress on other
+    stations the whole time, which is the actual point of requeuing
+    instead of retrying in place."""
+    daily_by_date: dict[str, dict] = {}
+    # Each pending entry: (not_before_monotonic, attempts_so_far, chunk_dates)
+    pending: list[tuple[float, int, list[date]]] = []
+
+    for chunk in date_chunks:
+        result = _fetch_nrt_daily_for_station_tz(
+            station_id, lat, lon, chunk, session, tz, url,
+            disable_elevation_correction=disable_elevation_correction, _allow_subdivision=False,
+        )
+        if result:
+            _merge_daily_chunk(daily_by_date, result, station_id)
+        else:
+            pending.append((time.monotonic() + _REQUEUE_DELAY_S, 1, chunk))
+
+    while pending:
+        pending.sort(key=lambda p: p[0])
+        not_before, attempts, chunk = pending.pop(0)
+        wait_s = not_before - time.monotonic()
+        if wait_s > 0:
+            time.sleep(wait_s)
+        if attempts >= _REQUEUE_MAX_ATTEMPTS:
+            # Last resort: one subdivided attempt, then give up on this
+            # chunk's dates for good (_process_one_station's own row loop
+            # already treats a missing date as "no NRT data," not an error).
+            logger.warning(
+                "%s: chunk (%s..%s) still failing after %d requeued attempts -- "
+                "one last subdivided attempt, then giving up on this range",
+                station_id, chunk[0].isoformat(), chunk[-1].isoformat(), attempts,
+            )
+            result = _fetch_nrt_daily_for_station_tz(
+                station_id, lat, lon, chunk, session, tz, url,
+                disable_elevation_correction=disable_elevation_correction, _allow_subdivision=True,
+            )
+            if result:
+                _merge_daily_chunk(daily_by_date, result, station_id)
+            continue
+        result = _fetch_nrt_daily_for_station_tz(
+            station_id, lat, lon, chunk, session, tz, url,
+            disable_elevation_correction=disable_elevation_correction, _allow_subdivision=False,
+        )
+        if result:
+            _merge_daily_chunk(daily_by_date, result, station_id)
+        else:
+            pending.append((time.monotonic() + _REQUEUE_DELAY_S, attempts + 1, chunk))
+
+    return daily_by_date
+
+
 def _process_one_station(station: dict, session: HttpSession) -> dict:
     """fetch_all's fetch_fn -- one station's worth of build_paired_rows'
     work (may issue >1 HTTP call internally: one per distinct year in its
@@ -379,14 +500,13 @@ def _process_one_station(station: dict, session: HttpSession) -> dict:
     for d in dates:
         by_year.setdefault(d.year, []).append(d)
 
-    daily_by_date: dict[str, dict] = {}
-    for year, year_dates in by_year.items():
-        for date_chunk in _chunk_dates_by_span(year_dates, _CHUNK_DAYS):
-            chunk = _fetch_nrt_daily_for_station_tz(
-                station_id, lat, lon, date_chunk, session, tz, url,
-                disable_elevation_correction=disable_elevation_correction,
-            )
-            _merge_daily_chunk(daily_by_date, chunk, station_id)
+    date_chunks = [
+        chunk for year, year_dates in by_year.items()
+        for chunk in _chunk_dates_by_span(year_dates, _CHUNK_DAYS)
+    ]
+    daily_by_date = _fetch_chunks_with_delayed_requeue(
+        station_id, lat, lon, date_chunks, session, tz, url, disable_elevation_correction,
+    )
 
     nrt_rows: list[dict] = []
     fidelity_rows: list[dict] = []

@@ -84,7 +84,15 @@ class TestProcessOneStation:
         assert len(payload["fidelity_rows"]) == 1
         assert payload["fidelity_rows"][0]["era5_tmax"] == 29.0
 
-    def test_no_successful_rows_returns_no_result(self):
+    def test_no_successful_rows_returns_no_result(self, monkeypatch):
+        # A persistently-failing chunk now goes through
+        # _fetch_chunks_with_delayed_requeue's real requeue-with-delay loop
+        # (#710, 2026-09-19) -- fake the clock so _REQUEUE_MAX_ATTEMPTS
+        # requeues resolve instantly instead of taking ~24 real minutes.
+        fake_now = [0.0]
+        monkeypatch.setattr(vld.time, "monotonic", lambda: fake_now[0])
+        monkeypatch.setattr(vld.time, "sleep", lambda s: fake_now.__setitem__(0, fake_now[0] + s))
+
         station = {
             "station_id": "TEST002",
             "rows": [{
@@ -183,6 +191,100 @@ class TestProcessOneStationChunking:
         for params in session.calls_params:
             span_days = (date.fromisoformat(params["end_date"]) - date.fromisoformat(params["start_date"])).days
             assert span_days < vld._CHUNK_DAYS + 2 * vld._FETCH_PAD_DAYS + 1
+
+
+class _ScriptedSession:
+    """Returns a different scripted outcome on each successive get_json call
+    -- for testing _fetch_chunks_with_delayed_requeue's retry-after-a-real-
+    delay behavior, where a chunk must fail some N times before succeeding."""
+
+    def __init__(self, outcomes: list):
+        self._outcomes = list(outcomes)
+        self.calls = 0
+        self.throttle = AdaptiveThrottle(max_workers=4)
+
+    def get_json(self, url, params, **kwargs):
+        self.calls += 1
+        outcome = self._outcomes.pop(0)
+        return outcome
+
+
+class TestDelayedRequeue:
+    """#710, 2026-09-19: live-tested proof that a QUICK in-place retry never
+    helps this endpoint's real failure mode, but a real delay (~4 min)
+    reliably does -- these tests exercise the requeue-with-delay mechanism
+    directly against a fake clock, never a real sleep."""
+
+    def test_chunk_failing_once_then_succeeding_is_merged_after_one_real_wait(self, monkeypatch):
+        fake_now = [0.0]
+        slept = []
+        monkeypatch.setattr(vld.time, "monotonic", lambda: fake_now[0])
+
+        def fake_sleep(s):
+            slept.append(s)
+            fake_now[0] += s
+
+        monkeypatch.setattr(vld.time, "sleep", fake_sleep)
+
+        session = _ScriptedSession([NO_RESULT, _fake_hourly_response(base_temp_c=20.0)])
+        result = vld._fetch_chunks_with_delayed_requeue(
+            "ST1", 40.0, -75.0, [[date(2023, 6, 15)]], session, "UTC",
+            "https://historical-forecast-api.open-meteo.com/v1/forecast", False,
+        )
+
+        assert session.calls == 2  # first attempt failed, requeued attempt succeeded
+        assert slept == [vld._REQUEUE_DELAY_S]  # waited the real delay, not a quick retry
+        assert "2023-06-15" in result
+
+    def test_chunk_failing_past_the_cap_gets_one_subdivided_last_attempt(self, monkeypatch):
+        fake_now = [0.0]
+        monkeypatch.setattr(vld.time, "monotonic", lambda: fake_now[0])
+        monkeypatch.setattr(vld.time, "sleep", lambda s: fake_now.__setitem__(0, fake_now[0] + s))
+
+        # A 60-day chunk (> _MIN_SUBDIVIDE_CHUNK_DAYS=46) fails every one of
+        # the _REQUEUE_MAX_ATTEMPTS requeued attempts, AND the final full-
+        # span last-resort attempt -- only then does the one-level
+        # subdivision (2x ~30-day halves) kick in, and both halves succeed.
+        dates = [date(2023, 1, 1) + timedelta(days=i) for i in range(60)]
+        outcomes = [NO_RESULT] * (vld._REQUEUE_MAX_ATTEMPTS + 1) + [
+            _fake_hourly_response(base_temp_c=20.0), _fake_hourly_response(base_temp_c=21.0),
+        ]
+        session = _ScriptedSession(outcomes)
+
+        result = vld._fetch_chunks_with_delayed_requeue(
+            "ST1", 40.0, -75.0, [dates], session, "UTC",
+            "https://historical-forecast-api.open-meteo.com/v1/forecast", False,
+        )
+
+        # 6 requeued attempts + 1 last-resort full-span attempt + 2 subdivided halves.
+        assert session.calls == vld._REQUEUE_MAX_ATTEMPTS + 3
+        assert len(result) > 0  # the subdivided last resort did recover some dates
+
+    def test_multiple_chunks_progress_independently(self, monkeypatch):
+        """A failing chunk being requeued must not block an already-
+        succeeding chunk from being merged -- the whole point of requeuing
+        instead of retrying in place is that OTHER work keeps moving."""
+        fake_now = [0.0]
+        monkeypatch.setattr(vld.time, "monotonic", lambda: fake_now[0])
+        monkeypatch.setattr(vld.time, "sleep", lambda s: fake_now.__setitem__(0, fake_now[0] + s))
+
+        session = _ScriptedSession([
+            _fake_hourly_response(base_temp_c=20.0),  # chunk 1 succeeds immediately
+            NO_RESULT,                                 # chunk 2 fails once
+            _fake_hourly_response(base_temp_c=22.0),  # chunk 2 succeeds on requeue
+        ])
+        result = vld._fetch_chunks_with_delayed_requeue(
+            "ST1", 40.0, -75.0, [[date(2023, 6, 15)], [date(2023, 8, 1)]], session, "UTC",
+            "https://historical-forecast-api.open-meteo.com/v1/forecast", False,
+        )
+
+        # Both chunks' own real HTTP calls happened (1 + 2 = 3), and the
+        # fixture's fixed "2023-06-15" daily result made it through from
+        # BOTH chunk 1 (immediate) and chunk 2 (after its own requeue) --
+        # the point being chunk 1's success was never blocked by chunk 2
+        # needing a delayed retry.
+        assert session.calls == 3
+        assert "2023-06-15" in result
 
 
 class TestElevationNanThreading:
