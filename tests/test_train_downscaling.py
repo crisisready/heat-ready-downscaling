@@ -438,3 +438,18 @@ class TestMain:
 
         mock_save.assert_called_once()
         assert mock_save.call_args.kwargs["candidate_only"] is True
+
+
+def test_merge_extra_rows_db_row_wins_and_null_rows_dropped():
+    base = {"region": "IN", "climate_zone": "BSh", "grid_tmax_c": 40.0, "grid_tmin_c": 27.0,
+            "delta_tmax_c": 1.0, "delta_tmin_c": 0.5}
+    db_rows = [{**base, "station_id": "IN005010600", "date": date(2023, 5, 1)}]
+    extra = [
+        {**base, "station_id": "IN005010600", "date": "2023-05-01", "delta_tmax_c": 9.9},  # dup of DB row
+        {**base, "station_id": "IN005010600", "date": "2023-05-02"},
+        {**base, "station_id": "IN005010600", "date": "2023-05-02"},  # dup within the file
+        {**base, "station_id": "ING427480", "date": "2023-05-02", "grid_tmax_c": None},
+    ]
+    merged, counts = td.merge_extra_rows(db_rows, extra)
+    assert counts == {"added": 1, "duplicate_of_db_row": 2, "dropped_null": 1}
+    assert len(merged) == 2 and merged[0]["delta_tmax_c"] == 1.0

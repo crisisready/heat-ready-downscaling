@@ -118,6 +118,32 @@ def load_training_rows() -> list[dict]:
     )
 
 
+_REQUIRED_NON_NULL = ("region", "climate_zone", "grid_tmax_c", "grid_tmin_c", "delta_tmax_c", "delta_tmin_c")
+
+
+def merge_extra_rows(rows: list[dict], extra_rows: list[dict]) -> tuple[list[dict], dict]:
+    """Add rows from a builder's JSON output (e.g. build_gsod_bsh_rows.py) to the ghcn_training
+    rows, without writing them to the database first -- so a candidate model can be trained on
+    a corpus extension before anyone decides whether to upsert it.
+
+    Applies load_training_rows' own non-null filter to the extra rows. On a (station_id, date)
+    key that already exists in ghcn_training, the database row wins: the extension adds days,
+    it never silently replaces an ingested one. Returns (merged rows, counts)."""
+    existing = {(r["station_id"], str(r["date"])) for r in rows}
+    added, duplicate, dropped = [], 0, 0
+    for r in extra_rows:
+        if any(r.get(k) is None for k in _REQUIRED_NON_NULL):
+            dropped += 1
+            continue
+        key = (r["station_id"], str(r["date"]))
+        if key in existing:
+            duplicate += 1
+            continue
+        existing.add(key)
+        added.append(r)
+    return rows + added, {"added": len(added), "duplicate_of_db_row": duplicate, "dropped_null": dropped}
+
+
 def build_training_feature_matrix(
     rows: list[dict], target: str,
 ) -> tuple[np.ndarray, np.ndarray, list[str], list[str], np.ndarray, np.ndarray]:
@@ -572,6 +598,10 @@ def main() -> None:
                          help="Write model.joblib/metadata.json to research/candidate-models/{version}/ "
                               "instead of the live-serving downscaling/models/{version}/ prefix. Use this "
                               "for every retrain until a human has explicitly approved publishing it.")
+    parser.add_argument("--extra-rows-json", action="append", default=[],
+                         help="Train on ghcn_training PLUS the rows in this builder JSON output "
+                              "({\"rows\": [...]}, e.g. build_gsod_bsh_rows.py). Repeatable. The DB row "
+                              "wins on a duplicate (station_id, date). Recorded in metadata.json.")
     args = parser.parse_args()
 
     if args.profile:
@@ -583,6 +613,13 @@ def main() -> None:
     if not rows:
         print("No training rows available -- nothing to train. Run scripts/build_training_set.py first.")
         return
+    extra_sources = []
+    for path in args.extra_rows_json:
+        with open(path) as f:
+            extra = json.load(f)["rows"]
+        rows, counts = merge_extra_rows(rows, extra)
+        extra_sources.append({"path": os.path.basename(path), "rows_in_file": len(extra), **counts})
+        print(f"Extra rows from {path}: {counts}")
 
     artifact_bundle: dict = {}
     metadata_cv: dict = {}
@@ -641,6 +678,8 @@ def main() -> None:
         "conformal_q95_by_zone_tmin": metadata_conformal.get("tmin", {}),
         "ood_aoa_threshold": (sum(ood_thresholds) / len(ood_thresholds)) if ood_thresholds else None,
         "cv": {"leave_region_out": metadata_cv},
+        "training_rows": len(rows),
+        "extra_rows_sources": extra_sources,
     }
 
     save_model_artifacts(bucket, args.model_version, artifact_bundle, metadata, candidate_only=args.candidate_only)
