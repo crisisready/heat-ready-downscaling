@@ -371,31 +371,36 @@ class TestBuildAoaIndex:
 
 
 class TestSaveModelArtifacts:
-    def test_writes_model_and_metadata_to_expected_keys(self):
+    def _keys(self, mock_s3):
+        put = [c.kwargs["Key"] for c in mock_s3.put_object.call_args_list]
+        up = [c.args[2] for c in mock_s3.upload_file.call_args_list]
+        return put, up
+
+    def test_writes_model_and_metadata_to_expected_keys(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MODEL_ARTIFACT_DIR", str(tmp_path))
         mock_s3 = MagicMock()
         with patch("boto3.client", return_value=mock_s3):
             td.save_model_artifacts("test-bucket", "ds-2026.07-rf1", {"model_tmax": "X"}, {"model_version": "ds-2026.07-rf1"})
-        assert mock_s3.put_object.call_count == 2
-        keys = [c.kwargs["Key"] for c in mock_s3.put_object.call_args_list]
-        assert "downscaling/models/ds-2026.07-rf1/model.joblib" in keys
-        assert "downscaling/models/ds-2026.07-rf1/metadata.json" in keys
-        for c in mock_s3.put_object.call_args_list:
-            assert c.kwargs["Bucket"] == "test-bucket"
+        put, up = self._keys(mock_s3)
+        assert put == ["downscaling/models/ds-2026.07-rf1/metadata.json"]
+        assert up == ["downscaling/models/ds-2026.07-rf1/model.joblib"]
+        assert mock_s3.put_object.call_args.kwargs["Bucket"] == "test-bucket"
+        assert mock_s3.upload_file.call_args.args[1] == "test-bucket"
+        # The model (multipart upload, not a 5 GB-capped put_object) and metadata stay on disk.
+        assert (tmp_path / "model.joblib").exists() and (tmp_path / "metadata.json").exists()
 
-    def test_candidate_only_writes_outside_the_serving_prefix(self):
+    def test_candidate_only_writes_outside_the_serving_prefix(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MODEL_ARTIFACT_DIR", str(tmp_path))
         mock_s3 = MagicMock()
         with patch("boto3.client", return_value=mock_s3):
             td.save_model_artifacts(
                 "test-bucket", "ds-2026.07-rf1", {"model_tmax": "X"},
                 {"model_version": "ds-2026.07-rf1"}, candidate_only=True,
             )
-        assert mock_s3.put_object.call_count == 2
-        keys = [c.kwargs["Key"] for c in mock_s3.put_object.call_args_list]
-        assert "research/candidate-models/ds-2026.07-rf1/model.joblib" in keys
-        assert "research/candidate-models/ds-2026.07-rf1/metadata.json" in keys
-        assert not any(k.startswith("downscaling/") for k in keys)
-        for c in mock_s3.put_object.call_args_list:
-            assert c.kwargs["Bucket"] == "test-bucket"
+        put, up = self._keys(mock_s3)
+        assert put == ["research/candidate-models/ds-2026.07-rf1/metadata.json"]
+        assert up == ["research/candidate-models/ds-2026.07-rf1/model.joblib"]
+        assert not any(k.startswith("downscaling/") for k in put + up)
 
 
 class TestMain:

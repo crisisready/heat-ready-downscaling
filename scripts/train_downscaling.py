@@ -580,21 +580,36 @@ def save_model_artifacts(
     later publish, without ever touching the tree any serving code reads -- see
     docs/pipeline-fable-consult-2026-07-19-downscaling-diagnosis.md's own publish-gate
     discussion for why a retrain and a publish are deliberately two separate actions."""
+    import tempfile
+
     import boto3
     import joblib
+    from boto3.s3.transfer import TransferConfig
 
-    buf = io.BytesIO()
-    joblib.dump(artifact_bundle, buf)
     client = boto3.client("s3")
     prefix = (
         f"research/candidate-models/{model_version}/" if candidate_only
         else f"downscaling/models/{model_version}/"
     )
-    client.put_object(Bucket=bucket, Key=f"{prefix}model.joblib", Body=buf.getvalue())
+    # Dump to disk and upload multipart. A single put_object caps at 5 GB, and rf6's bundle
+    # was already 4.84 GB: the 2026-09-29 rf7 control (685k rows) failed there after the
+    # whole fit, with the model only in memory. The local copy is kept (path printed) so an
+    # upload failure never costs the fit; metadata goes first since it is small and the CV
+    # record is the part most worth keeping.
+    local_dir = os.environ.get("MODEL_ARTIFACT_DIR") or tempfile.mkdtemp(prefix=f"{model_version}-")
+    os.makedirs(local_dir, exist_ok=True)
+    model_path = os.path.join(local_dir, "model.joblib")
+    with open(os.path.join(local_dir, "metadata.json"), "w") as f:
+        json.dump(metadata, f, indent=2)
+    joblib.dump(artifact_bundle, model_path)
+    print(f"Wrote local artifacts to {local_dir}")
     client.put_object(
         Bucket=bucket, Key=f"{prefix}metadata.json",
         Body=json.dumps(metadata, indent=2).encode(), ContentType="application/json",
     )
+    client.upload_file(model_path, bucket, f"{prefix}model.joblib",
+                       Config=TransferConfig(multipart_threshold=256 * 1024 ** 2,
+                                             multipart_chunksize=256 * 1024 ** 2))
     if candidate_only:
         print(f"CANDIDATE ONLY -- not published. Wrote to s3://{bucket}/{prefix} "
               f"(outside downscaling/, nothing live reads this). Re-run without "
