@@ -454,3 +454,17 @@ def test_merge_extra_rows_db_row_wins_and_null_rows_dropped():
     assert counts == {"added": 1, "duplicate_of_db_row": 1, "duplicate_within_extra": 1, "dropped_null": 1}
     assert len(merged) == 2 and merged[0]["delta_tmax_c"] == 1.0
     assert merged[1]["_extra"] is True and "_extra" not in merged[0]
+
+
+def test_subset_cv_restricts_per_row_arrays_only():
+    cv = {"valid": np.array([True, False, True]), "oof_median": np.array([1.0, 2.0, 3.0]), "folds": ["a"]}
+    sub = td._subset_cv(cv, np.array([True, False, True]))
+    assert sub["oof_median"].tolist() == [1.0, 3.0] and sub["folds"] == ["a"]
+
+
+def test_merge_extra_rows_second_file_overlap_counts_as_within_extra():
+    base = {"region": "IN", "climate_zone": "BSh", "grid_tmax_c": 40.0, "grid_tmin_c": 27.0,
+            "delta_tmax_c": 1.0, "delta_tmin_c": 0.5, "station_id": "X", "date": "2023-05-02"}
+    rows, _ = td.merge_extra_rows([], [base])
+    _, counts = td.merge_extra_rows(rows, [base])
+    assert counts["duplicate_of_db_row"] == 0 and counts["duplicate_within_extra"] == 1

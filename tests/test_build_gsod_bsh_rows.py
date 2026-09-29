@@ -122,3 +122,15 @@ def test_drop_colocated_keeps_the_longer_record():
 
 def test_select_stations_never_keeps_a_station_with_no_days():
     assert g.select_stations([{"usaf": "A"}], {"A": []}, min_days_per_year=300, min_good_years=0) == []
+
+
+def test_position_match_only_to_temperature_stations():
+    inv = ("IN005090601  22.4800   69.1200 TMAX 1901 2025\n"
+           "IN005090601  22.4800   69.1200 TMIN 1901 2025\n"
+           "IN005090699  22.4830   69.1170 PRCP 1901 2025\n")
+    temp = g.parse_ghcnd_temperature_ids(inv, {"IN"})
+    assert temp == {"IN005090601"}
+    wmo, meta = g.parse_ghcnd_stations(OKHA_LINE + "\nIN005090699  22.4830   69.1170    3.0    OKHA RAIN", {"IN"})
+    okha = {"usaf": "427300", "fips": "IN", "lat": 22.483, "lon": 69.117}
+    assert g.ghcn_match(okha, wmo, meta) == "IN005090699"  # nearest, unfiltered: the rain gauge
+    assert g.ghcn_match(okha, wmo, meta, temperature_ids=temp) == "IN005090601"

@@ -119,6 +119,11 @@ def load_training_rows() -> list[dict]:
 
 
 EXTRA_ROWS_ZONE = "_extra_rows"
+
+
+def _subset_cv(cv: dict, mask: np.ndarray) -> dict:
+    """leave_region_out_cv's per-row arrays restricted to `mask` (non-array entries kept)."""
+    return {k: (v[mask] if isinstance(v, np.ndarray) and v.shape[:1] == mask.shape else v) for k, v in cv.items()}
 _REQUIRED_NON_NULL = ("region", "climate_zone", "grid_tmax_c", "grid_tmin_c", "delta_tmax_c", "delta_tmin_c")
 
 
@@ -130,8 +135,9 @@ def merge_extra_rows(rows: list[dict], extra_rows: list[dict]) -> tuple[list[dic
     Applies load_training_rows' own non-null filter to the extra rows. On a (station_id, date)
     key that already exists in ghcn_training, the database row wins: the extension adds days,
     it never silently replaces an ingested one. Returns (merged rows, counts)."""
-    existing = {(r["station_id"], str(r["date"])) for r in rows}
-    seen = set()
+    existing = {(r["station_id"], str(r["date"])) for r in rows if not r.get("_extra")}
+    seen_extra = {(r["station_id"], str(r["date"])) for r in rows if r.get("_extra")}
+    seen = seen_extra
     added, dup_db, dup_extra, dropped = [], 0, 0, 0
     for r in extra_rows:
         if any(r.get(k) is None for k in _REQUIRED_NON_NULL):
@@ -658,7 +664,15 @@ def main() -> None:
             # pooled under EXTRA_ROWS_ZONE), so each zone's numbers compare like for like with a
             # model trained on ghcn_training alone.
             zones_db = [EXTRA_ROWS_ZONE if rows[i].get("_extra") else z for i, z in zip(keep, zones)]
-            metadata_cv_db_rows[target] = cv_metrics_by_zone(y, zones_db, cv, kriging_oof_median=kriging_oof_median)
+            db_only = cv_metrics_by_zone(y, zones_db, cv, kriging_oof_median=kriging_oof_median)
+            # cv_metrics_by_zone's "overall" pools every row regardless of zone label; recompute
+            # it over the database rows alone.
+            db_mask = np.array([not rows[i].get("_extra") for i in keep])
+            db_only["overall"] = cv_metrics_by_zone(
+                y[db_mask], [z for z, m in zip(zones, db_mask) if m], _subset_cv(cv, db_mask),
+                kriging_oof_median=None if kriging_oof_median is None else kriging_oof_median[db_mask],
+            ).get("overall")
+            metadata_cv_db_rows[target] = db_only
         q95_by_zone = conformal_q95_by_zone(y, zones, cv)
         coverage = conformal_empirical_coverage(y, zones, cv, q95_by_zone)
 

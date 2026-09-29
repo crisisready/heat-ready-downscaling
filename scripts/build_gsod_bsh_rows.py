@@ -78,6 +78,7 @@ sys.path.insert(0, os.path.join(_REPO_ROOT, "scripts"))
 
 ISD_HISTORY_URL = "https://www.ncei.noaa.gov/pub/data/noaa/isd-history.csv"
 GHCND_STATIONS_URL = "https://www.ncei.noaa.gov/pub/data/ghcn/daily/ghcnd-stations.txt"
+GHCND_INVENTORY_URL = "https://www.ncei.noaa.gov/pub/data/ghcn/daily/ghcnd-inventory.txt"
 GSOD_URL = "https://www.ncei.noaa.gov/data/global-summary-of-the-day/access/{year}/{usaf}{wban}.csv"
 GSOD_MISSING = 9999.9
 PLAUSIBLE_C = (-40.0, 60.0)
@@ -110,7 +111,8 @@ def _cached(out_dir, name, url, cache=True):
     """Fetch through an on-disk cache. cache=False (the current year's still-growing GSOD file)
     always refetches. A 404 is never cached, so a year published later is picked up on rerun."""
     path = os.path.join(out_dir, "cache", name)
-    if cache and os.path.exists(path):
+    # A zero-byte file is an older run's cached 404, not data: treat it as a miss.
+    if cache and os.path.exists(path) and os.path.getsize(path) > 0:
         with open(path, "rb") as f:
             return f.read()
     body = _get(url)
@@ -192,16 +194,28 @@ def parse_ghcnd_stations(text, countries):
     return wmo_map, meta
 
 
-def ghcn_match(station, wmo_map, ghcn_meta, km=None):
+def parse_ghcnd_temperature_ids(text, countries):
+    """GHCN IDs in `countries` with both TMAX and TMIN in ghcnd-inventory.txt (ID 1-11,
+    ELEMENT 32-35). Most Indian GHCN IDs are precipitation-only gauges."""
+    elements = {}
+    for line in text.splitlines():
+        if line[:2] in countries and len(line) >= 35:
+            elements.setdefault(line[:11].strip(), set()).add(line[31:35])
+    return {sid for sid, els in elements.items() if {"TMAX", "TMIN"} <= els}
+
+
+def ghcn_match(station, wmo_map, ghcn_meta, km=None, temperature_ids=None):
     """The GHCN ID for this GSOD station, or None: by WMO number (USAF = WMO number + a trailing
-    0), else the nearest same-country GHCN station within `km` (default COLOCATED_KM)."""
+    0), else the nearest same-country GHCN station within `km` (default COLOCATED_KM) that has
+    TMAX/TMIN (temperature_ids; a position match to a rain gauge would move the station's
+    covariates to the gauge for no gain)."""
     km = COLOCATED_KM if km is None else km
     usaf = station["usaf"]
     if usaf.endswith("0") and usaf[:5] in wmo_map:
         return wmo_map[usaf[:5]]
     best, best_km = None, km
     for sid, m in ghcn_meta.items():
-        if sid[:2] != station["fips"]:
+        if sid[:2] != station["fips"] or (temperature_ids is not None and sid not in temperature_ids):
             continue
         d = _km(station, m)
         if d < best_km:
@@ -209,11 +223,11 @@ def ghcn_match(station, wmo_map, ghcn_meta, km=None):
     return best
 
 
-def assign_station_ids(stations, wmo_map, ghcn_meta):
+def assign_station_ids(stations, wmo_map, ghcn_meta, temperature_ids=None):
     """Set station_id (GHCN ID when matched, else the synthetic FIPS-prefixed one) and, for a
     matched station, GHCN's lat/lon/elevation (the ISD values are kept as isd_lat/isd_lon)."""
     for s in stations:
-        match = ghcn_match(s, wmo_map, ghcn_meta)
+        match = ghcn_match(s, wmo_map, ghcn_meta, temperature_ids=temperature_ids)
         s["ghcn_matched"] = match is not None
         if match is None:
             s["station_id"] = f"{s['fips']}G{s['usaf']}"
@@ -340,6 +354,7 @@ def main(argv=None):
     logger.info("%d of them classify as %s", len(candidates), TARGET_ZONE)
 
     series_by_usaf = {}
+    failed_fetches = []
     this_year = date.today().year
     for s in candidates:
         series = []
@@ -350,6 +365,7 @@ def main(argv=None):
                                cache=year < this_year)
             except Exception as exc:  # noqa: BLE001 -- one station-year must not end the run
                 logger.warning("GSOD %s%s %d: fetch failed, year left out: %r", s["usaf"], s["wban"], year, exc)
+                failed_fetches.append(f"{s['usaf']}{s['wban']}/{year}")
                 continue
             if body:
                 series.extend(parse_gsod_csv(body.decode("latin-1")))
@@ -359,7 +375,9 @@ def main(argv=None):
     stations = select_stations(candidates, series_by_usaf, args.min_days_per_year, args.min_good_years)
     wmo_map, ghcn_meta = parse_ghcnd_stations(
         _cached(args.out_dir, "ghcnd-stations.txt", GHCND_STATIONS_URL).decode("latin-1"), countries)
-    assign_station_ids(stations, wmo_map, ghcn_meta)
+    temperature_ids = parse_ghcnd_temperature_ids(
+        _cached(args.out_dir, "ghcnd-inventory.txt", GHCND_INVENTORY_URL).decode("latin-1"), countries)
+    assign_station_ids(stations, wmo_map, ghcn_meta, temperature_ids)
     stations, colocated = drop_colocated(stations, series_by_usaf)
     for usaf, twin in colocated:
         logger.info("dropped %s: same site as %s (within %.0f km)", usaf, twin, COLOCATED_KM)
@@ -430,7 +448,10 @@ def main(argv=None):
         json.dump({"rows": rows, "row_count": len(rows), "rows_by_station": dict(by_station),
                    "obs_window_shift_days": shifts, "missing_era5": missing,
                    "start_date": args.start_date.isoformat(), "end_date": args.end_date.isoformat(),
-                   "complete": True}, f)
+                   "failed_gsod_fetches": failed_fetches,
+                   # A station-year that couldn't be fetched means the file is short of data it
+                   # should have, so it isn't complete; train_downscaling refuses it.
+                   "complete": not failed_fetches}, f)
     logger.info("wrote %s", os.path.join(args.out_dir, "gsod_bsh_rows.json"))
 
 
