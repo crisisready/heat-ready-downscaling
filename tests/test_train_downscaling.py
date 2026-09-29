@@ -453,3 +453,4 @@ def test_merge_extra_rows_db_row_wins_and_null_rows_dropped():
     merged, counts = td.merge_extra_rows(db_rows, extra)
     assert counts == {"added": 1, "duplicate_of_db_row": 1, "duplicate_within_extra": 1, "dropped_null": 1}
     assert len(merged) == 2 and merged[0]["delta_tmax_c"] == 1.0
+    assert merged[1]["_extra"] is True and "_extra" not in merged[0]

@@ -118,6 +118,7 @@ def load_training_rows() -> list[dict]:
     )
 
 
+EXTRA_ROWS_ZONE = "_extra_rows"
 _REQUIRED_NON_NULL = ("region", "climate_zone", "grid_tmax_c", "grid_tmin_c", "delta_tmax_c", "delta_tmin_c")
 
 
@@ -144,14 +145,14 @@ def merge_extra_rows(rows: list[dict], extra_rows: list[dict]) -> tuple[list[dic
             dup_extra += 1
             continue
         seen.add(key)
-        added.append(r)
+        added.append({**r, "_extra": True})
     return rows + added, {"added": len(added), "duplicate_of_db_row": dup_db,
                           "duplicate_within_extra": dup_extra, "dropped_null": dropped}
 
 
 def build_training_feature_matrix(
-    rows: list[dict], target: str,
-) -> tuple[np.ndarray, np.ndarray, list[str], list[str], np.ndarray, np.ndarray]:
+    rows: list[dict], target: str, return_keep: bool = False,
+) -> tuple:
     """
     Build (X, y, regions, zones, lons, lats) for `target` in {"tmax", "tmin"}
     from ghcn_training rows, reusing build_feature_matrix's
@@ -208,6 +209,8 @@ def build_training_feature_matrix(
     zones = [rows[i]["climate_zone"] for i in keep]
     lons = np.array([rows[i]["lon"] for i in keep], dtype=float)
     lats = np.array([rows[i]["lat"] for i in keep], dtype=float)
+    if return_keep:
+        return X, y, regions, zones, lons, lats, keep
     return X, y, regions, zones, lons, lats
 
 
@@ -637,18 +640,25 @@ def main() -> None:
 
     artifact_bundle: dict = {}
     metadata_cv: dict = {}
+    metadata_cv_db_rows: dict = {}
     metadata_conformal: dict = {}
     ood_thresholds: list[float] = []
 
     for target in ("tmax", "tmin"):
         print(f"\n=== target: delta_{target}_c ===")
-        X, y, regions, zones, lons, lats = build_training_feature_matrix(rows, target)
+        X, y, regions, zones, lons, lats, keep = build_training_feature_matrix(rows, target, return_keep=True)
         print(f"[{target}] {len(y)} usable row(s) across {len(set(regions))} region(s), {len(set(zones))} climate zone(s)")
 
         cv = leave_region_out_cv(X, y, regions)
         print(f"[{target}] running regression-kriging comparison baseline...")
         kriging_oof_median = regression_kriging_cv(X, y, regions, lons, lats)
         zone_metrics = cv_metrics_by_zone(y, zones, cv, kriging_oof_median=kriging_oof_median)
+        if extra_sources:
+            # The same out-of-fold predictions, scored on ghcn_training's own rows only (extra rows
+            # pooled under EXTRA_ROWS_ZONE), so each zone's numbers compare like for like with a
+            # model trained on ghcn_training alone.
+            zones_db = [EXTRA_ROWS_ZONE if rows[i].get("_extra") else z for i, z in zip(keep, zones)]
+            metadata_cv_db_rows[target] = cv_metrics_by_zone(y, zones_db, cv, kriging_oof_median=kriging_oof_median)
         q95_by_zone = conformal_q95_by_zone(y, zones, cv)
         coverage = conformal_empirical_coverage(y, zones, cv, q95_by_zone)
 
@@ -694,6 +704,7 @@ def main() -> None:
         "cv": {"leave_region_out": metadata_cv},
         "training_rows": len(rows),
         "extra_rows_sources": extra_sources,
+        "cv_ghcn_training_rows_only": {"leave_region_out": metadata_cv_db_rows} if extra_sources else None,
     }
 
     save_model_artifacts(bucket, args.model_version, artifact_bundle, metadata, candidate_only=args.candidate_only)
