@@ -627,6 +627,11 @@ def main() -> None:
                          help="Write model.joblib/metadata.json to research/candidate-models/{version}/ "
                               "instead of the live-serving downscaling/models/{version}/ prefix. Use this "
                               "for every retrain until a human has explicitly approved publishing it.")
+    parser.add_argument("--cv-n-jobs", type=int, default=-1,
+                         help="worker processes for the leave-region-out QRF and kriging CV (default -1 = one "
+                              "per core). Each worker holds its own copy of the feature matrix, so this, not "
+                              "the final fit, sets peak memory: at ~670k rows 16 workers need ~150 GB. Results "
+                              "don't depend on it (every fold fit is seeded).")
     parser.add_argument("--extra-rows-json", action="append", default=[],
                          help="Train on ghcn_training PLUS the rows in this builder JSON output "
                               "({\"rows\": [...]}, e.g. build_gsod_bsh_rows.py). Repeatable. The DB row "
@@ -670,9 +675,9 @@ def main() -> None:
         X, y, regions, zones, lons, lats, keep = build_training_feature_matrix(rows, target, return_keep=True)
         print(f"[{target}] {len(y)} usable row(s) across {len(set(regions))} region(s), {len(set(zones))} climate zone(s)")
 
-        cv = leave_region_out_cv(X, y, regions)
+        cv = leave_region_out_cv(X, y, regions, n_jobs=args.cv_n_jobs)
         print(f"[{target}] running regression-kriging comparison baseline...")
-        kriging_oof_median = regression_kriging_cv(X, y, regions, lons, lats)
+        kriging_oof_median = regression_kriging_cv(X, y, regions, lons, lats, n_jobs=args.cv_n_jobs)
         zone_metrics = cv_metrics_by_zone(y, zones, cv, kriging_oof_median=kriging_oof_median)
         if extra_sources:
             # The same out-of-fold predictions, scored on ghcn_training's own rows only (extra rows
