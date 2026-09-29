@@ -451,5 +451,5 @@ def test_merge_extra_rows_db_row_wins_and_null_rows_dropped():
         {**base, "station_id": "ING427480", "date": "2023-05-02", "grid_tmax_c": None},
     ]
     merged, counts = td.merge_extra_rows(db_rows, extra)
-    assert counts == {"added": 1, "duplicate_of_db_row": 2, "dropped_null": 1}
+    assert counts == {"added": 1, "duplicate_of_db_row": 1, "duplicate_within_extra": 1, "dropped_null": 1}
     assert len(merged) == 2 and merged[0]["delta_tmax_c"] == 1.0

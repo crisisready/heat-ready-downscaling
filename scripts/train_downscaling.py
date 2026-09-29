@@ -130,18 +130,23 @@ def merge_extra_rows(rows: list[dict], extra_rows: list[dict]) -> tuple[list[dic
     key that already exists in ghcn_training, the database row wins: the extension adds days,
     it never silently replaces an ingested one. Returns (merged rows, counts)."""
     existing = {(r["station_id"], str(r["date"])) for r in rows}
-    added, duplicate, dropped = [], 0, 0
+    seen = set()
+    added, dup_db, dup_extra, dropped = [], 0, 0, 0
     for r in extra_rows:
         if any(r.get(k) is None for k in _REQUIRED_NON_NULL):
             dropped += 1
             continue
         key = (r["station_id"], str(r["date"]))
         if key in existing:
-            duplicate += 1
+            dup_db += 1
             continue
-        existing.add(key)
+        if key in seen:
+            dup_extra += 1
+            continue
+        seen.add(key)
         added.append(r)
-    return rows + added, {"added": len(added), "duplicate_of_db_row": duplicate, "dropped_null": dropped}
+    return rows + added, {"added": len(added), "duplicate_of_db_row": dup_db,
+                          "duplicate_within_extra": dup_extra, "dropped_null": dropped}
 
 
 def build_training_feature_matrix(
@@ -601,7 +606,7 @@ def main() -> None:
     parser.add_argument("--extra-rows-json", action="append", default=[],
                          help="Train on ghcn_training PLUS the rows in this builder JSON output "
                               "({\"rows\": [...]}, e.g. build_gsod_bsh_rows.py). Repeatable. The DB row "
-                              "wins on a duplicate (station_id, date). Recorded in metadata.json.")
+                              "wins on a duplicate (station_id, date); across files, the first file wins. Only with --candidate-only. Path + sha256 recorded in metadata.json.")
     args = parser.parse_args()
 
     if args.profile:
@@ -613,12 +618,21 @@ def main() -> None:
     if not rows:
         print("No training rows available -- nothing to train. Run scripts/build_training_set.py first.")
         return
+    if args.extra_rows_json and not args.candidate_only:
+        raise SystemExit("--extra-rows-json trains on rows that aren't in ghcn_training; it is only allowed "
+                         "with --candidate-only")
     extra_sources = []
     for path in args.extra_rows_json:
-        with open(path) as f:
-            extra = json.load(f)["rows"]
+        import hashlib
+        with open(path, "rb") as f:
+            raw = f.read()
+        payload = json.loads(raw)
+        if payload.get("complete") is not True:
+            raise SystemExit(f"{path} is not marked complete (a partial builder checkpoint?) -- refusing to train on it")
+        extra = payload["rows"]
         rows, counts = merge_extra_rows(rows, extra)
-        extra_sources.append({"path": os.path.basename(path), "rows_in_file": len(extra), **counts})
+        extra_sources.append({"path": os.path.basename(path), "sha256": hashlib.sha256(raw).hexdigest(),
+                              "rows_in_file": len(extra), **counts})
         print(f"Extra rows from {path}: {counts}")
 
     artifact_bundle: dict = {}

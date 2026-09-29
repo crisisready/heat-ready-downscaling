@@ -46,14 +46,33 @@ def test_parse_isd_history_filters_country_year_and_null_island():
     assert got[0]["elevation_m"] == 55.0 and got[0]["fips"] == "IN"
 
 
-def test_wmo_map_and_station_id():
-    line = "IN005010600  23.0670   72.6330   55.0    AHMADABAD                      GSN     42647"
-    wmo = g.parse_ghcnd_wmo_map(line + "\nUSW00012345  0 0 0 X" + " " * 70 + "99999", {"IN"})
-    assert wmo == {"42647": "IN005010600"}
-    assert g.station_id_for({"usaf": "426470", "fips": "IN"}, wmo) == "IN005010600"
-    assert g.station_id_for({"usaf": "427480", "fips": "IN"}, wmo) == "ING427480"
-    # A non-WMO USAF (doesn't end in 0) never maps, even if its first 5 digits collide.
-    assert g.station_id_for({"usaf": "426471", "fips": "IN"}, wmo) == "ING426471"
+AHMEDABAD_LINE = "IN005010600  23.0670   72.6330   55.0    AHMADABAD                      GSN     42647"
+OKHA_LINE = "IN005090601  22.4800   69.1200    3.0    OKHA                                          "
+
+
+def test_ghcn_match_by_wmo_then_position():
+    wmo, meta = g.parse_ghcnd_stations(AHMEDABAD_LINE + "\n" + OKHA_LINE, {"IN"})
+    assert wmo == {"42647": "IN005010600"} and meta["IN005090601"]["lat"] == 22.48
+    assert g.ghcn_match({"usaf": "426470", "fips": "IN", "lat": 23.08, "lon": 72.64}, wmo, meta) == "IN005010600"
+    # Okha: blank WMO column in GHCN, matched by position (~0.5 km).
+    assert g.ghcn_match({"usaf": "427300", "fips": "IN", "lat": 22.483, "lon": 69.117}, wmo, meta) == "IN005090601"
+    # Nothing within 3 km -> no match.
+    assert g.ghcn_match({"usaf": "427480", "fips": "IN", "lat": 22.3, "lon": 73.2}, wmo, meta) is None
+
+
+def test_assign_station_ids_takes_ghcn_position_for_matched_stations():
+    wmo, meta = g.parse_ghcnd_stations(AHMEDABAD_LINE, {"IN"})
+    a = {"usaf": "426470", "fips": "IN", "lat": 23.077, "lon": 72.635, "elevation_m": 57.6}
+    b = {"usaf": "427480", "fips": "IN", "lat": 22.3, "lon": 73.2, "elevation_m": 40.0}
+    g.assign_station_ids([a, b], wmo, meta)
+    assert (a["station_id"], a["lat"], a["lon"], a["elevation_m"], a["isd_lat"]) == ("IN005010600", 23.067, 72.633, 55.0, 23.077)
+    assert (b["station_id"], b["lat"], b["ghcn_matched"]) == ("ING427480", 22.3, False)
+
+
+def test_isd_elevation_sentinel_with_leading_zero():
+    text = ('"USAF","WBAN","STATION NAME","CTRY","STATE","ICAO","LAT","LON","ELEV(M)","BEGIN","END"\n'
+            '"420750","99999","JULLUNDUR","IN","","","+31.333","+075.583","-0999.9","19730101","20260920"\n')
+    assert g.parse_isd_history(text, {"IN"}, 2016)[0]["elevation_m"] is None
 
 
 def test_select_stations_counts_good_years():
@@ -95,6 +114,10 @@ def test_drop_colocated_keeps_the_longer_record():
     kept, dropped = g.drop_colocated([a, b, c], series)
     assert [s["usaf"] for s in kept] == ["428380", "427300"]
     assert dropped == [("420801", "428380")]
+    # A GHCN-matched twin wins even with fewer days.
+    a["ghcn_matched"] = True
+    kept, dropped = g.drop_colocated([a, b, c], series)
+    assert [s["usaf"] for s in kept] == ["420801", "427300"] and dropped == [("428380", "420801")]
 
 
 def test_select_stations_never_keeps_a_station_with_no_days():

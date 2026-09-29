@@ -22,9 +22,13 @@ GSOD specifics handled here (checked against real downloads):
   - The per-year "access" CSV can 404 for a station isd-history.csv lists as active; a 404 is
     a missing year, not an error.
 
-Station IDs: a GSOD station whose WMO number maps to a GHCN-Daily station (ghcnd-stations.txt's
-WMO column) reuses that GHCN ID, so its rows extend the existing station's history under one
-(station_id, date) key instead of duplicating it. An unmapped station gets
+Station IDs: a GSOD station that maps to a GHCN-Daily station reuses that GHCN ID, so its rows
+extend the existing station's history under one (station_id, date) key instead of duplicating
+it. The match is by WMO number (ghcnd-stations.txt's WMO column), else by position (a GHCN
+station in the same country within COLOCATED_KM, since many Indian GHCN stations have a blank
+WMO column). A mapped station also takes GHCN's coordinates and elevation, so its site
+covariates are looked up at the same point as its existing rows (ISD and GHCN positions for one
+site can differ by several km). An unmapped station gets
 f"{fips}G{usaf}" -- the real FIPS prefix, so ghcn.region_from_station_id() still puts it in its
 own country's leave-region-out CV fold, and a 9-character ID that can't collide with an
 11-character GHCN ID.
@@ -34,6 +38,12 @@ Grid values come from the CDS reanalysis-era5-land-timeseries dataset
 gridded path produces (max |diff| 0.0001 C, measured 2026-09-17), one request per station for
 the whole date range. Covariates come from build_training_set.snapshot_covariates_for_stations,
 unchanged.
+
+Known, accepted difference: lst_warm_season_anomaly_c is relative to the other stations in the
+same build batch (within 75 km, else the whole batch table), as in build_training_set.py. The
+batch here is these GSOD stations, not the GHCN batch a mapped station's existing rows came
+from, so for a mapped station the new rows' anomaly baseline can differ from its old rows'. The
+same is already true across the corpus's separate build runs.
 
 Output: a JSON file of ghcn_training-shaped rows (not a DB write), for train_downscaling.py's
 --extra-rows-json or a maintainer upsert via ghcn.upsert_ghcn_training_rows.
@@ -96,15 +106,18 @@ def _get(url, retries=4):
     raise last_exc
 
 
-def _cached(out_dir, name, url):
+def _cached(out_dir, name, url, cache=True):
+    """Fetch through an on-disk cache. cache=False (the current year's still-growing GSOD file)
+    always refetches. A 404 is never cached, so a year published later is picked up on rerun."""
     path = os.path.join(out_dir, "cache", name)
-    if os.path.exists(path):
+    if cache and os.path.exists(path):
         with open(path, "rb") as f:
             return f.read()
     body = _get(url)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "wb") as f:
-        f.write(body if body is not None else b"")
+    if body is not None:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(body)
     return body
 
 
@@ -148,36 +161,70 @@ def parse_isd_history(text, countries, start_year):
             continue
         if end_year < start_year or (lat == 0.0 and lon == 0.0) or row["USAF"] == "999999":
             continue
-        elev = row.get("ELEV(M)")
         try:
-            elev = float(elev) if elev not in (None, "", "-999.0", "-999.9") else None
+            elev = float(row.get("ELEV(M)") or "nan")
         except ValueError:
-            elev = None
+            elev = float("nan")
+        # isd-history writes its missing-elevation marker as -0999.0/-0999.9.
+        elev = None if (elev != elev or elev <= -999) else elev
         stations.append({"usaf": row["USAF"], "wban": row["WBAN"], "fips": row["CTRY"],
                          "name": row["STATION NAME"], "lat": lat, "lon": lon, "elevation_m": elev})
     return stations
 
 
-def parse_ghcnd_wmo_map(text, countries):
-    """WMO station number -> GHCN-Daily ID, from ghcnd-stations.txt's fixed-width WMO column
-    (cols 81-85), restricted to `countries`."""
-    wmo_map = {}
+def parse_ghcnd_stations(text, countries):
+    """(WMO number -> GHCN ID, GHCN ID -> {lat, lon, elevation_m}) from ghcnd-stations.txt's
+    fixed-width layout (ID 1-11, LAT 13-20, LON 22-30, ELEV 32-37, WMO 81-85), restricted to
+    `countries`."""
+    wmo_map, meta = {}, {}
     for line in text.splitlines():
-        if len(line) < 85 or line[:2] not in countries:
+        if len(line) < 37 or line[:2] not in countries:
             continue
-        wmo = line[80:85].strip()
+        sid = line[:11].strip()
+        try:
+            lat, lon, elev = float(line[12:20]), float(line[21:30]), float(line[31:37])
+        except ValueError:
+            continue
+        meta[sid] = {"lat": lat, "lon": lon, "elevation_m": None if elev <= -999 else elev}
+        wmo = line[80:85].strip() if len(line) >= 85 else ""
         if wmo:
-            wmo_map.setdefault(wmo, line[:11].strip())
-    return wmo_map
+            wmo_map.setdefault(wmo, sid)
+    return wmo_map, meta
 
 
-def station_id_for(station, wmo_map):
-    """Reuse the GHCN ID for a WMO-numbered station (USAF = WMO number + a trailing 0), else a
-    FIPS-prefixed synthetic ID (see the module docstring)."""
+def ghcn_match(station, wmo_map, ghcn_meta, km=None):
+    """The GHCN ID for this GSOD station, or None: by WMO number (USAF = WMO number + a trailing
+    0), else the nearest same-country GHCN station within `km` (default COLOCATED_KM)."""
+    km = COLOCATED_KM if km is None else km
     usaf = station["usaf"]
     if usaf.endswith("0") and usaf[:5] in wmo_map:
         return wmo_map[usaf[:5]]
-    return f"{station['fips']}G{usaf}"
+    best, best_km = None, km
+    for sid, m in ghcn_meta.items():
+        if sid[:2] != station["fips"]:
+            continue
+        d = _km(station, m)
+        if d < best_km:
+            best, best_km = sid, d
+    return best
+
+
+def assign_station_ids(stations, wmo_map, ghcn_meta):
+    """Set station_id (GHCN ID when matched, else the synthetic FIPS-prefixed one) and, for a
+    matched station, GHCN's lat/lon/elevation (the ISD values are kept as isd_lat/isd_lon)."""
+    for s in stations:
+        match = ghcn_match(s, wmo_map, ghcn_meta)
+        s["ghcn_matched"] = match is not None
+        if match is None:
+            s["station_id"] = f"{s['fips']}G{s['usaf']}"
+            continue
+        s["station_id"] = match
+        s["isd_lat"], s["isd_lon"] = s["lat"], s["lon"]
+        m = ghcn_meta[match]
+        s["lat"], s["lon"] = m["lat"], m["lon"]
+        if m["elevation_m"] is not None:
+            s["elevation_m"] = m["elevation_m"]
+    return stations
 
 
 def coverage_by_year(series):
@@ -209,9 +256,11 @@ def _km(a, b):
 
 
 def drop_colocated(stations, series_by_usaf, km=COLOCATED_KM):
-    """Keep one station per physical site: of any stations within `km` of each other, the one
-    with the most valid days. Returns (kept, dropped), dropped as (usaf, kept-instead usaf)."""
-    ranked = sorted(stations, key=lambda s: -len(series_by_usaf.get(s["usaf"], [])))
+    """Keep one station per physical site: of any stations within `km` of each other, prefer
+    one that matched a GHCN ID (so the site keeps extending its existing history), then the
+    one with the most valid days. Returns (kept, dropped), dropped as (usaf, kept-instead usaf)."""
+    ranked = sorted(stations, key=lambda s: (not s.get("ghcn_matched", False),
+                                             -len(series_by_usaf.get(s["usaf"], []))))
     kept, dropped = [], []
     for s in ranked:
         twin = next((k for k in kept if _km(s, k) < km), None)
@@ -291,24 +340,30 @@ def main(argv=None):
     logger.info("%d of them classify as %s", len(candidates), TARGET_ZONE)
 
     series_by_usaf = {}
+    this_year = date.today().year
     for s in candidates:
         series = []
         for year in range(args.start_date.year, args.end_date.year + 1):
-            body = _cached(args.out_dir, f"gsod/{year}/{s['usaf']}{s['wban']}.csv",
-                           GSOD_URL.format(year=year, usaf=s["usaf"], wban=s["wban"]))
+            try:
+                body = _cached(args.out_dir, f"gsod/{year}/{s['usaf']}{s['wban']}.csv",
+                               GSOD_URL.format(year=year, usaf=s["usaf"], wban=s["wban"]),
+                               cache=year < this_year)
+            except Exception as exc:  # noqa: BLE001 -- one station-year must not end the run
+                logger.warning("GSOD %s%s %d: fetch failed, year left out: %r", s["usaf"], s["wban"], year, exc)
+                continue
             if body:
                 series.extend(parse_gsod_csv(body.decode("latin-1")))
         series_by_usaf[s["usaf"]] = [o for o in series
                                      if args.start_date.isoformat() <= o["date"] <= args.end_date.isoformat()]
 
     stations = select_stations(candidates, series_by_usaf, args.min_days_per_year, args.min_good_years)
+    wmo_map, ghcn_meta = parse_ghcnd_stations(
+        _cached(args.out_dir, "ghcnd-stations.txt", GHCND_STATIONS_URL).decode("latin-1"), countries)
+    assign_station_ids(stations, wmo_map, ghcn_meta)
     stations, colocated = drop_colocated(stations, series_by_usaf)
     for usaf, twin in colocated:
         logger.info("dropped %s: same site as %s (within %.0f km)", usaf, twin, COLOCATED_KM)
-    wmo_map = parse_ghcnd_wmo_map(_cached(args.out_dir, "ghcnd-stations.txt", GHCND_STATIONS_URL)
-                                  .decode("latin-1"), countries)
     for s in stations:
-        s["station_id"] = station_id_for(s, wmo_map)
         series = series_by_usaf[s["usaf"]]
         s["share_max_derived"] = round(sum(o["max_derived"] for o in series) / len(series), 3)
     if args.station_ids:
