@@ -184,7 +184,9 @@ def attach_regime_features(rows: list[dict], csv_paths: list[str]) -> dict:
                 vals = {}
                 for src, dst in REGIME_CSV_COLUMNS.items():
                     v = rec.get(src)
-                    vals[dst] = float(v) if v not in (None, "") else None
+                    x = float(v) if v not in (None, "") else None
+                    # a literal "nan"/"inf" must count as missing, or it passes the completeness mask
+                    vals[dst] = x if x is not None and math.isfinite(x) else None
                 table[(rec["station_id"], rec.get("date") or rec.get("time"))] = vals
     matched = 0
     for r in rows:
@@ -718,8 +720,13 @@ def main() -> None:
         import hashlib
         counts = attach_regime_features(rows, args.regime_features_csv)
         print(f"Regime features attached: {counts}")
-        regime_sources = [{"path": os.path.basename(p), "sha256": hashlib.sha256(open(p, "rb").read()).hexdigest()}
-                          for p in args.regime_features_csv]
+        def _sha256(path):
+            h = hashlib.sha256()
+            with open(path, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    h.update(chunk)
+            return h.hexdigest()
+        regime_sources = [{"path": os.path.basename(p), "sha256": _sha256(p)} for p in args.regime_features_csv]
 
     artifact_bundle: dict = {}
     metadata_cv: dict = {}

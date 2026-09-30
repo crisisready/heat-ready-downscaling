@@ -65,7 +65,10 @@ def test_trainer_attach_regime_features(tmp_path):
         w.writerow(["station_id", "date", "precipitation_sum", "shortwave_radiation_sum",
                     "wind_speed_10m_max", "relative_humidity_2m_mean"])
         w.writerow(["S1", "2025-07-01", "3.0", "18.0", "12.0", "80.0"])
-    rows = [{"station_id": "S1", "date": "2025-07-01"}, {"station_id": "S2", "date": "2025-07-01"}]
+        w.writerow(["S3", "2025-07-01", "nan", "18.0", "12.0", "80.0"])
+    rows = [{"station_id": "S1", "date": "2025-07-01"}, {"station_id": "S2", "date": "2025-07-01"},
+            {"station_id": "S3", "date": "2025-07-01"}]
     c = td.attach_regime_features(rows, [str(p)])
-    assert c["matched"] == 1
+    assert c["matched"] == 2
     assert rows[0]["era5_precip_sum_mm"] == 3.0 and rows[1]["era5_precip_sum_mm"] is None
+    assert rows[2]["era5_precip_sum_mm"] is None  # literal nan -> missing, never a NaN feature
