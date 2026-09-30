@@ -77,25 +77,28 @@ class ModelAdapter(Protocol):
         ...
 
 
-def validate_feature_order(feature_order) -> None:
+def validate_feature_order(feature_order) -> tuple:
     """Raise if `feature_order` (as read from a model's own metadata.json)
-    does not match features.FEATURE_ORDER exactly. build_feature_matrix's X
-    columns are positional, so a model trained against a different column
-    order would silently score every feature against the wrong column -- no
-    shape mismatch, no exception, just quietly wrong predictions. This is
+    is not exactly one of features.SUPPORTED_FEATURE_ORDERS; return the matching tuple.
+    build_feature_matrix's X columns are positional, so a model trained against a
+    different column order would silently score every feature against the wrong column --
+    no shape mismatch, no exception, just quietly wrong predictions. This is
     the stated precondition for Rung C: a contributor's model must be
     provably trained against the exact feature contract this module scores
-    against, or it must not load at all."""
-    from heatready_downscaling.features import FEATURE_ORDER
+    against, or it must not load at all. Callers pass the returned order to
+    build_feature_matrix(feature_order=...)."""
+    from heatready_downscaling.features import SUPPORTED_FEATURE_ORDERS
 
     live_feature_order = tuple(feature_order)
-    if live_feature_order != FEATURE_ORDER:
+    if live_feature_order not in SUPPORTED_FEATURE_ORDERS.values():
         raise ValueError(
-            "model metadata.json feature_order does not match "
-            "heatready_downscaling.features.FEATURE_ORDER -- refusing to load a model "
-            "whose training-time column order does not match this package's current "
-            f"build_feature_matrix. metadata: {live_feature_order!r} != code: {FEATURE_ORDER!r}",
+            "model metadata.json feature_order is not one of "
+            "heatready_downscaling.features.SUPPORTED_FEATURE_ORDERS -- refusing to load a model "
+            "whose training-time column order does not match this package's "
+            f"build_feature_matrix. metadata: {live_feature_order!r}; supported: "
+            f"{list(SUPPORTED_FEATURE_ORDERS.values())!r}",
         )
+    return live_feature_order
 
 
 def feature_importance_weights(model) -> "np.ndarray":
@@ -316,7 +319,8 @@ class QRFModelAdapter:
         q95_by_zone = metadata.get(q95_key, {})
         ood_threshold = metadata.get("ood_aoa_threshold")
 
-        X, complete_mask, missing_by_row = build_feature_matrix(rows, target)
+        X, complete_mask, missing_by_row = build_feature_matrix(
+            rows, target, feature_order=tuple(metadata["feature_order"]))
         results: list[dict] = []
 
         gate_for_target = model_bundle.get("zones_passing_cv_gate", {}).get(target, {})
