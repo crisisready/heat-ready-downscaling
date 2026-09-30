@@ -61,3 +61,22 @@ def test_mc_pvalue_is_small_for_large_statistic_and_large_for_zero():
 def test_recent_mode_keeps_only_recent_years():
     rows = [{"station_id": "A", "date": "2022-05-01"}, {"station_id": "A", "date": "2023-05-01"}]
     assert [r["date"] for r in h.apply_mode(rows, "recent", {}, 2023)] == ["2023-05-01"]
+
+
+def test_one_station_season_flagged_per_round_and_rule_records_break_years(tmp_path):
+    tests, first_kept = h.screen(_network(local_break=1.7, shared_drift=0.0))
+    flagged = [t for t in tests if t.get("flagged")]
+    assert len(flagged) == 1 and flagged[0]["station_id"] == "S0"
+
+
+def test_late_starting_neighbour_does_not_create_a_break():
+    # S1 only has 2020-2025 and every station shares a +0.8 drift from 2021: centring each
+    # neighbour on the common years keeps the composite from stepping when S1 enters.
+    rng = random.Random(3)
+    rows = []
+    for i in range(6):
+        years = range(2020, 2026) if i == 1 else range(2016, 2026)
+        offs = {y: 1.5 + rng.gauss(0, 0.15) + (0.8 if y >= 2021 else 0.0) for y in years}
+        rows += _rows(f"S{i}", 22.0 + 0.3 * i, 72.0 + 0.3 * i, offs, 1.0, rng)
+    _, first_kept = h.screen(rows)
+    assert first_kept == {}

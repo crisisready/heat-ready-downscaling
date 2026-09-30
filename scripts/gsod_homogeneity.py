@@ -21,11 +21,12 @@ evaluation set; see research/ahmedabad-bsh-refinement/RESULTS.md in heat-risk-da
      >= MIN_SEGMENT_YEARS on each side and fall in BREAK_YEARS.
   4. p-value by Monte Carlo: the same maximum, same n and same allowed positions, over
      N_MONTE_CARLO iid normal series (SNHT's null), fixed seed.
-  5. Benjamini-Hochberg at FDR_Q across every station-season test, plus a physical floor:
-     |post-break mean - pre-break mean| of the difference series >= MIN_SHIFT_C.
+  5. Benjamini-Hochberg at FDR_Q over the whole family of station-season tests (m = every tested
+     station-season, flagged ones included at the p-value that flagged them), plus a physical
+     floor: |post-break mean - pre-break mean| of the difference series >= MIN_SHIFT_C.
   6. Iterate: flag only the single most significant station-season that passes 5, take that
-     station out of every other station's reference composite, and re-test the rest, until nothing
-     new passes. Without this, one station's break leaks into its neighbours' references and
+     station out of every other station's reference composite, and re-test the remaining
+     stations, until nothing new passes. Without this, one station's break leaks into its neighbours' references and
      shows up as a mirror-image "break" at each of them.
   7. A flagged station keeps only its post-break years (all seasons, both targets); the earlier
      segment is dropped, not adjusted, since adjusting means choosing which regime is "true".
@@ -114,6 +115,8 @@ def difference_series(sid, season, series_by_sid, coords, k=K_NEIGHBOURS, exclud
     nearest = sorted(others, key=lambda o: _km(coords[sid], coords[o]))[:k]
     own_mean = _mean(list(own.values()))
     weights, anomalies = {}, {}
+    # Each neighbour's anomaly is centred on the years it shares with the station, so a neighbour
+    # whose record starts late can't shift the composite by where its own mean happens to fall.
     for o in nearest:
         s = series_by_sid[o][season]
         common = sorted(set(own) & set(s))
@@ -122,8 +125,8 @@ def difference_series(sid, season, series_by_sid, coords, k=K_NEIGHBOURS, exclud
         c = _corr([own[y] for y in common], [s[y] for y in common])
         if c > 0:
             weights[o] = c
-            mo = _mean(list(s.values()))
-            anomalies[o] = {y: v - mo for y, v in s.items()}
+            mo = _mean([s[y] for y in common])
+            anomalies[o] = {y: s[y] - mo for y in common}
     diff = {}
     for y, v in own.items():
         w = [(weights[o], anomalies[o][y]) for o in weights if y in anomalies[o]]
@@ -188,6 +191,7 @@ def benjamini_hochberg(pvalues):
 
 
 def _test_all(series, coords, exclude):
+    """SNHT + Monte Carlo p for every station-season not in `exclude` (no BH here)."""
     tests = []
     for sid in sorted(series):
         if sid in exclude:
@@ -205,16 +209,24 @@ def _test_all(series, coords, exclude):
             shift = _mean(values[k:]) - _mean(values[:k]) if k else 0.0
             tests.append({**test, "tested": True, "snht": round(t, 3), "break_year": years[k] if k else None,
                           "shift_c": round(shift, 3), "p": mc_pvalue(t, len(values), splits)})
-    tested = [t for t in tests if t["tested"]]
-    for t, q in zip(tested, benjamini_hochberg([t["p"] for t in tested])):
-        t["q"] = q
-        t["passes"] = q <= FDR_Q and abs(t["shift_c"]) >= MIN_SHIFT_C
     return tests
+
+
+def _bh_passes(flagged_tests, tests):
+    """BH over the whole family (already-flagged tests at their flagging p, plus the current
+    round's tested ones). Sets q on the current tests; returns the ones that pass step 5."""
+    current = [t for t in tests if t["tested"]]
+    family = flagged_tests + current
+    q = benjamini_hochberg([t["p"] for t in family])
+    for t, qi in zip(family[len(flagged_tests):], q[len(flagged_tests):]):
+        t["q"] = qi
+        t["passes"] = qi <= FDR_Q and abs(t["shift_c"]) >= MIN_SHIFT_C
+    return [t for t in current if t["passes"]]
 
 
 def screen(rows):
     """Run the rule. Returns (tests, {station_id: first kept year}): the last round's tests for
-    unflagged stations plus, for each flagged station, the test that flagged it."""
+    unflagged stations plus, for each flagged station, the one test that flagged it."""
     series = seasonal_annual_means(rows)
     coords = {}
     for r in rows:
@@ -222,22 +234,17 @@ def screen(rows):
     exclude, flagged_tests = set(), []
     while True:
         tests = _test_all(series, coords, frozenset(exclude))
-        passing = [t for t in tests if t.get("passes")]
+        passing = _bh_passes(flagged_tests, tests)
         if not passing:
             break
         top = min(passing, key=lambda t: (t["p"], -t["snht"]))
-        station_tests = [t for t in passing if t["station_id"] == top["station_id"]]
-        for t in station_tests:
-            t["flagged"] = True
-            t["flag_round"] = len(exclude) + 1
-        flagged_tests += station_tests
+        top["flagged"] = True
+        top["flag_round"] = len(exclude) + 1
+        flagged_tests.append(top)
         exclude.add(top["station_id"])
     for t in tests:
         t.setdefault("flagged", False)
-    first_kept = {}
-    for t in flagged_tests:
-        # Two flagged seasons at one station: keep from the later break, so neither regime mixes.
-        first_kept[t["station_id"]] = max(first_kept.get(t["station_id"], 0), t["break_year"])
+    first_kept = {t["station_id"]: t["break_year"] for t in flagged_tests}
     return tests + flagged_tests, first_kept
 
 
@@ -267,8 +274,8 @@ def main(argv=None):
     rows = apply_mode(payload["rows"], args.mode, first_kept, args.recent_from)
     table = args.out.rsplit(".json", 1)[0] + "_homogeneity.json"
     with open(table, "w") as f:
-        json.dump({"rule": {k: v for k, v in globals().items() if k.isupper() and not k.startswith("_")
-                            and isinstance(v, (int, float, str, dict))},
+        json.dump({"rule": {k: (list(v) if isinstance(v, range) else v) for k, v in globals().items()
+                            if k.isupper() and not k.startswith("_") and isinstance(v, (int, float, str, dict, range))},
                    "tests": tests, "flagged_first_kept_year": first_kept}, f, indent=1, default=list)
     by_station = defaultdict(int)
     for r in rows:
