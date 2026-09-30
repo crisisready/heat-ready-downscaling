@@ -119,6 +119,10 @@ def load_training_rows() -> list[dict]:
 
 
 EXTRA_ROWS_ZONE = "_extra_rows"
+# Extra rows may carry only one target (e.g. build_gsod_bsh_rows.py --tmax-only): they need these
+# plus at least one of delta_tmax_c/delta_tmin_c, and build_training_feature_matrix then drops a
+# row only from the target it lacks.
+_EXTRA_REQUIRED_NON_NULL = ("region", "climate_zone", "grid_tmax_c", "grid_tmin_c")
 
 
 def _subset_cv(cv: dict, mask: np.ndarray) -> dict:
@@ -140,7 +144,8 @@ def merge_extra_rows(rows: list[dict], extra_rows: list[dict]) -> tuple[list[dic
     seen = seen_extra
     added, dup_db, dup_extra, dropped = [], 0, 0, 0
     for r in extra_rows:
-        if any(r.get(k) is None for k in _REQUIRED_NON_NULL):
+        if (any(r.get(k) is None for k in _EXTRA_REQUIRED_NON_NULL)
+                or (r.get("delta_tmax_c") is None and r.get("delta_tmin_c") is None)):
             dropped += 1
             continue
         key = (r["station_id"], str(r["date"]))

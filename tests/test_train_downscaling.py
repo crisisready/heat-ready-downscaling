@@ -481,3 +481,11 @@ def test_extra_rows_without_candidate_only_exits_before_db_read(monkeypatch):
     with patch.object(td, "load_training_rows") as load, pytest.raises(SystemExit):
         td.main()
     load.assert_not_called()
+
+
+def test_merge_extra_rows_keeps_tmax_only_rows_and_drops_them_from_tmin_only():
+    base = {"region": "IN", "climate_zone": "BSh", "grid_tmax_c": 40.0, "grid_tmin_c": 27.0,
+            "delta_tmax_c": 1.0, "delta_tmin_c": None, "station_id": "X", "date": "2023-05-02"}
+    merged, counts = td.merge_extra_rows([], [base, {**base, "date": "2023-05-03", "delta_tmax_c": None}])
+    assert counts["added"] == 1 and counts["dropped_null"] == 1
+    assert td.math.isfinite(merged[0]["delta_tmax_c"]) and merged[0]["delta_tmin_c"] is None
