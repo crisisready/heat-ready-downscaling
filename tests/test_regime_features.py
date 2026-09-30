@@ -72,3 +72,23 @@ def test_trainer_attach_regime_features(tmp_path):
     assert c["matched"] == 2
     assert rows[0]["era5_precip_sum_mm"] == 3.0 and rows[1]["era5_precip_sum_mm"] is None
     assert rows[2]["era5_precip_sum_mm"] is None  # literal nan -> missing, never a NaN feature
+
+
+def test_exclude_station_since():
+    spec = importlib.util.spec_from_file_location("td2", ROOT / "scripts" / "train_downscaling.py")
+    td = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(td)
+    except ImportError as e:
+        pytest.skip(f"trainer import needs {e}")
+    rows = [{"station_id": "A", "date": "2022-12-31"}, {"station_id": "A", "date": "2023-01-01"},
+            {"station_id": "B", "date": "2024-01-01"}]
+    kept, dropped = td.exclude_station_since(rows, ["A:2023-01-01"])
+    assert [(r["station_id"], r["date"]) for r in kept] == [("A", "2022-12-31"), ("B", "2024-01-01")]
+    assert dropped == {"A:2023-01-01": 1}
+    with pytest.raises(SystemExit):
+        td.exclude_station_since(rows, ["A-2023"])
+    with pytest.raises(SystemExit):  # unknown station: refuse, never a silent no-op
+        td.exclude_station_since(rows, ["Z:2023-01-01"])
+    with pytest.raises(SystemExit):  # repeated station
+        td.exclude_station_since(rows, ["A:2023-01-01", "A:2024-01-01"])

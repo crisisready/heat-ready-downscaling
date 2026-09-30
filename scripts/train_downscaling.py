@@ -199,6 +199,34 @@ def attach_regime_features(rows: list[dict], csv_paths: list[str]) -> dict:
     return {"rows": len(rows), "matched": matched, "table_rows": len(table)}
 
 
+def exclude_station_since(rows: list[dict], specs: list[str]) -> tuple[list[dict], dict]:
+    """Drop every row of a station dated on or after a cut date, for records whose recent level is
+    unresolved (e.g. Ahmedabad airport IN005010600 from 2023-01-01: its GSOD and METAR records diverge
+    by 1-1.5 C since 2023). `specs` are "STATION_ID:YYYY-MM-DD". Applies to database and extra rows
+    alike. Returns (kept rows, {spec: rows dropped})."""
+    cuts = {}
+    for spec in specs:
+        sid, _, d = spec.partition(":")
+        if not sid or len(d) != 10:
+            raise SystemExit(f"--exclude-station-since expects STATION_ID:YYYY-MM-DD, got {spec!r}")
+        if sid in cuts:
+            raise SystemExit(f"--exclude-station-since given twice for {sid}")
+        cuts[sid] = d
+    dropped = {f"{k}:{v}": 0 for k, v in cuts.items()}
+    kept = []
+    for r in rows:
+        cut = cuts.get(r["station_id"])
+        if cut is not None and str(r["date"])[:10] >= cut:
+            dropped[f"{r['station_id']}:{cut}"] += 1
+            continue
+        kept.append(r)
+    present = {r["station_id"] for r in rows}
+    unknown = sorted(set(cuts) - present)
+    if unknown:  # a mistyped id would otherwise exclude nothing, silently
+        raise SystemExit(f"--exclude-station-since: no rows for station(s) {unknown}")
+    return kept, dropped
+
+
 def build_training_feature_matrix(
     rows: list[dict], target: str, return_keep: bool = False, feature_order: tuple = FEATURE_ORDER,
 ) -> tuple:
@@ -684,7 +712,12 @@ def main() -> None:
                         help="'regime' adds REGIME_FEATURES (needs --regime-features-csv); only with --candidate-only")
     parser.add_argument("--regime-features-csv", action="append", default=[],
                         help="Open-Meteo daily regime covariates per (station_id, date); repeatable; sha256 recorded")
+    parser.add_argument("--exclude-station-since", action="append", default=[], metavar="STATION:YYYY-MM-DD",
+                        help="drop a station's rows dated on/after the date (unresolved recent record); repeatable; "
+                             "recorded in metadata; only with --candidate-only")
     args = parser.parse_args()
+    if args.exclude_station_since and not args.candidate_only:
+        raise SystemExit("--exclude-station-since is only allowed with --candidate-only")
     if args.feature_set != "base" and not (args.candidate_only and args.regime_features_csv):
         raise SystemExit("--feature-set regime needs --candidate-only and at least one --regime-features-csv")
     feature_order = SUPPORTED_FEATURE_ORDERS[args.feature_set]
@@ -714,6 +747,11 @@ def main() -> None:
         extra_sources.append({"path": os.path.basename(path), "sha256": hashlib.sha256(raw).hexdigest(),
                               "rows_in_file": len(extra), **counts})
         print(f"Extra rows from {path}: {counts}")
+
+    excluded_station_rows = {}
+    if args.exclude_station_since:
+        rows, excluded_station_rows = exclude_station_since(rows, args.exclude_station_since)
+        print(f"Excluded station rows: {excluded_station_rows}")
 
     regime_sources = []
     if args.regime_features_csv:
@@ -792,6 +830,7 @@ def main() -> None:
         "trained_at": datetime.utcnow().isoformat() + "Z",
         "feature_order": list(feature_order),
         "regime_features_sources": regime_sources,
+        "excluded_station_rows": excluded_station_rows,
         "targets": ["delta_tmax_c", "delta_tmin_c"],
         # Conformal calibration is per-target (tmax/tmin fit their own QRF
         # interval widths); predict_downscaled reads whichever target's
