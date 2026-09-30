@@ -209,6 +209,8 @@ def exclude_station_since(rows: list[dict], specs: list[str]) -> tuple[list[dict
         sid, _, d = spec.partition(":")
         if not sid or len(d) != 10:
             raise SystemExit(f"--exclude-station-since expects STATION_ID:YYYY-MM-DD, got {spec!r}")
+        if sid in cuts:
+            raise SystemExit(f"--exclude-station-since given twice for {sid}")
         cuts[sid] = d
     dropped = {f"{k}:{v}": 0 for k, v in cuts.items()}
     kept = []
@@ -218,6 +220,10 @@ def exclude_station_since(rows: list[dict], specs: list[str]) -> tuple[list[dict
             dropped[f"{r['station_id']}:{cut}"] += 1
             continue
         kept.append(r)
+    present = {r["station_id"] for r in rows}
+    unknown = sorted(set(cuts) - present)
+    if unknown:  # a mistyped id would otherwise exclude nothing, silently
+        raise SystemExit(f"--exclude-station-since: no rows for station(s) {unknown}")
     return kept, dropped
 
 

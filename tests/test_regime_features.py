@@ -88,3 +88,7 @@ def test_exclude_station_since():
     assert dropped == {"A:2023-01-01": 1}
     with pytest.raises(SystemExit):
         td.exclude_station_since(rows, ["A-2023"])
+    with pytest.raises(SystemExit):  # unknown station: refuse, never a silent no-op
+        td.exclude_station_since(rows, ["Z:2023-01-01"])
+    with pytest.raises(SystemExit):  # repeated station
+        td.exclude_station_since(rows, ["A:2023-01-01", "A:2024-01-01"])
