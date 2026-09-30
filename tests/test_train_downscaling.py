@@ -473,3 +473,11 @@ def test_merge_extra_rows_second_file_overlap_counts_as_within_extra():
     rows, _ = td.merge_extra_rows([], [base])
     _, counts = td.merge_extra_rows(rows, [base])
     assert counts["duplicate_of_db_row"] == 0 and counts["duplicate_within_extra"] == 1
+
+
+def test_extra_rows_without_candidate_only_exits_before_db_read(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["train_downscaling.py", "--model-version", "x", "--bucket", "b",
+                                      "--extra-rows-json", "f.json"])
+    with patch.object(td, "load_training_rows") as load, pytest.raises(SystemExit):
+        td.main()
+    load.assert_not_called()

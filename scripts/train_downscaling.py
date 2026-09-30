@@ -637,6 +637,9 @@ def main() -> None:
                               "({\"rows\": [...]}, e.g. build_gsod_bsh_rows.py). Repeatable. The DB row "
                               "wins on a duplicate (station_id, date); across files, the first file wins. Only with --candidate-only. Path + sha256 recorded in metadata.json.")
     args = parser.parse_args()
+    if args.extra_rows_json and not args.candidate_only:
+        raise SystemExit("--extra-rows-json trains on rows that aren't in ghcn_training; it is only allowed "
+                         "with --candidate-only")
 
     if args.profile:
         os.environ["AWS_PROFILE"] = args.profile
@@ -647,9 +650,6 @@ def main() -> None:
     if not rows:
         print("No training rows available -- nothing to train. Run scripts/build_training_set.py first.")
         return
-    if args.extra_rows_json and not args.candidate_only:
-        raise SystemExit("--extra-rows-json trains on rows that aren't in ghcn_training; it is only allowed "
-                         "with --candidate-only")
     extra_sources = []
     for path in args.extra_rows_json:
         import hashlib
