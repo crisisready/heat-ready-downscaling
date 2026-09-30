@@ -328,6 +328,11 @@ def assemble_rows(stations, series_by_sid, grid_by_station, humidity_by_station,
     return rows, shifts
 
 
+def tmax_only(rows):
+    """Rows with the tmin target nulled; grid_tmin_c stays, since it is also a model input."""
+    return [{**r, "station_tmin_c": None, "delta_tmin_c": None} for r in rows]
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--countries", nargs="+", required=True, help="FIPS codes, e.g. IN PK")
@@ -337,6 +342,10 @@ def main(argv=None):
     ap.add_argument("--min-good-years", type=int, default=5)
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--station-ids", nargs="+", help="restrict to these output station IDs (smoke tests)")
+    ap.add_argument("--tmax-only", action="store_true",
+                    help="null the tmin target (station_tmin_c, delta_tmin_c) so these rows train tmax only. "
+                         "GSOD's day runs 00-24 UTC, 05:30-05:30 in India, which cuts across the daily minimum; "
+                         "its tmin rows lost to the raw grid in leave-region-out CV (2026-09-29, rf7-gsod)")
     ap.add_argument("--stations-only", action="store_true",
                     help="stop after station selection + GSOD coverage (no CDS, no covariates)")
     args = ap.parse_args(argv)
@@ -440,6 +449,8 @@ def main(argv=None):
 
     rows, shifts = assemble_rows(stations, series_by_sid, grid_by_station, humidity_by_station,
                                  wind_by_station, covariates_by_station)
+    if args.tmax_only:
+        rows = tmax_only(rows)
     by_station = defaultdict(int)
     for r in rows:
         by_station[r["station_id"]] += 1
@@ -448,7 +459,7 @@ def main(argv=None):
         json.dump({"rows": rows, "row_count": len(rows), "rows_by_station": dict(by_station),
                    "obs_window_shift_days": shifts, "missing_era5": missing,
                    "start_date": args.start_date.isoformat(), "end_date": args.end_date.isoformat(),
-                   "failed_gsod_fetches": failed_fetches,
+                   "failed_gsod_fetches": failed_fetches, "tmax_only": args.tmax_only,
                    # A station-year that couldn't be fetched means the file is short of data it
                    # should have, so it isn't complete; train_downscaling refuses it.
                    "complete": not failed_fetches}, f)

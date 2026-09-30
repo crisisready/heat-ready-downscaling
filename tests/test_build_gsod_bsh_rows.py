@@ -134,3 +134,9 @@ def test_position_match_only_to_temperature_stations():
     okha = {"usaf": "427300", "fips": "IN", "lat": 22.483, "lon": 69.117}
     assert g.ghcn_match(okha, wmo, meta) == "IN005090699"  # nearest, unfiltered: the rain gauge
     assert g.ghcn_match(okha, wmo, meta, temperature_ids=temp) == "IN005090601"
+
+
+def test_tmax_only_nulls_the_tmin_target_but_keeps_grid_tmin():
+    r = g.tmax_only([{"station_tmin_c": 20.0, "delta_tmin_c": 0.3, "grid_tmin_c": 19.7, "delta_tmax_c": 1.0}])[0]
+    assert r["station_tmin_c"] is None and r["delta_tmin_c"] is None
+    assert r["grid_tmin_c"] == 19.7 and r["delta_tmax_c"] == 1.0

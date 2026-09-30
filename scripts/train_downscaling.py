@@ -119,12 +119,15 @@ def load_training_rows() -> list[dict]:
 
 
 EXTRA_ROWS_ZONE = "_extra_rows"
+# Extra rows may carry only one target (e.g. build_gsod_bsh_rows.py --tmax-only): they need these
+# plus at least one of delta_tmax_c/delta_tmin_c, and build_training_feature_matrix then drops a
+# row only from the target it lacks.
+_EXTRA_REQUIRED_NON_NULL = ("region", "climate_zone", "grid_tmax_c", "grid_tmin_c")
 
 
 def _subset_cv(cv: dict, mask: np.ndarray) -> dict:
     """leave_region_out_cv's per-row arrays restricted to `mask` (non-array entries kept)."""
     return {k: (v[mask] if isinstance(v, np.ndarray) and v.shape[:1] == mask.shape else v) for k, v in cv.items()}
-_REQUIRED_NON_NULL = ("region", "climate_zone", "grid_tmax_c", "grid_tmin_c", "delta_tmax_c", "delta_tmin_c")
 
 
 def merge_extra_rows(rows: list[dict], extra_rows: list[dict]) -> tuple[list[dict], dict]:
@@ -132,15 +135,19 @@ def merge_extra_rows(rows: list[dict], extra_rows: list[dict]) -> tuple[list[dic
     rows, without writing them to the database first -- so a candidate model can be trained on
     a corpus extension before anyone decides whether to upsert it.
 
-    Applies load_training_rows' own non-null filter to the extra rows. On a (station_id, date)
-    key that already exists in ghcn_training, the database row wins: the extension adds days,
-    it never silently replaces an ingested one. Returns (merged rows, counts)."""
+    An extra row needs region, climate_zone, grid_tmax_c and grid_tmin_c plus at least one of
+    delta_tmax_c/delta_tmin_c (a single-target row trains only that target). On a
+    (station_id, date) key that already exists in ghcn_training, the database row wins: the
+    extension adds days, it never silently replaces an ingested one. Across files, the first file
+    wins, so pass a file with both targets before a tmax-only one that overlaps it.
+    Returns (merged rows, counts)."""
     existing = {(r["station_id"], str(r["date"])) for r in rows if not r.get("_extra")}
     seen_extra = {(r["station_id"], str(r["date"])) for r in rows if r.get("_extra")}
     seen = seen_extra
     added, dup_db, dup_extra, dropped = [], 0, 0, 0
     for r in extra_rows:
-        if any(r.get(k) is None for k in _REQUIRED_NON_NULL):
+        if (any(r.get(k) is None for k in _EXTRA_REQUIRED_NON_NULL)
+                or (r.get("delta_tmax_c") is None and r.get("delta_tmin_c") is None)):
             dropped += 1
             continue
         key = (r["station_id"], str(r["date"]))
@@ -201,7 +208,7 @@ def build_training_feature_matrix(
         # not a null, so it sails through "IS NOT NULL" and would otherwise
         # crash the QRF fit deep inside a joblib worker with an opaque
         # "Input y contains NaN" far from this, the real cause.
-        v = rows[i][delta_col]
+        v = rows[i].get(delta_col)
         return v is not None and math.isfinite(v)
 
     keep = [i for i, ok in enumerate(complete_mask) if ok and _target_is_finite(i)]
@@ -210,7 +217,7 @@ def build_training_feature_matrix(
         print(f"[{target}] dropping {dropped}/{len(rows)} row(s) missing a required feature or a non-finite target")
 
     X = X_all[keep]
-    y = np.array([rows[i][delta_col] for i in keep], dtype=float)
+    y = np.array([rows[i].get(delta_col) for i in keep], dtype=float)
     regions = [rows[i]["region"] for i in keep]
     zones = [rows[i]["climate_zone"] for i in keep]
     lons = np.array([rows[i]["lon"] for i in keep], dtype=float)
