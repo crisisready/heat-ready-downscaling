@@ -52,6 +52,20 @@ FEATURE_ORDER = (
     "nighttime_wind_ms",
 )
 
+# Daily ERA5 weather-regime covariates (rf9 candidate): same-day precipitation, surface shortwave,
+# 10 m wind maximum and mean 2 m relative humidity at the point's ERA5 cell. Station-side
+# leave-station-out evidence (heat-risk-data-api research/ahmedabad-bsh-refinement/level/) put their
+# gain in within-month tmax skill at ~2.5x the base covariates' in BSh. Diurnal range is already
+# grid_diurnal_range_c. Units: mm, MJ m-2, km h-1, %.
+REGIME_FEATURES = (
+    "era5_precip_sum_mm", "era5_sw_rad_sum_mj", "era5_wind_max_kmh", "era5_rh_mean_pct",
+)
+FEATURE_ORDER_REGIME = FEATURE_ORDER + REGIME_FEATURES
+
+# Every column order a model may declare in its metadata.json. build_feature_matrix builds whichever
+# one it is asked for; contract.validate_feature_order refuses anything else.
+SUPPORTED_FEATURE_ORDERS = {"base": FEATURE_ORDER, "regime": FEATURE_ORDER_REGIME}
+
 
 def _doy_trig(d) -> tuple[float, float]:
     """Cyclic day-of-year encoding -- a raw integer would put Dec-31 and
@@ -63,7 +77,7 @@ def _doy_trig(d) -> tuple[float, float]:
 
 
 def build_feature_matrix(
-    rows: list[dict], target: str,
+    rows: list[dict], target: str, feature_order: tuple = FEATURE_ORDER,
 ) -> tuple["np.ndarray", list[bool], list[list[str]]]:
     """
     Build the feature matrix for a batch of polygon-day/station-day
@@ -77,8 +91,11 @@ def build_feature_matrix(
     elevation_rel_to_gridcell_m, elevation_mean_m, slope_deg, aspect_deg,
     grid_specific_humidity_kgkg, nighttime_wind_ms).
 
+    `feature_order` is one of SUPPORTED_FEATURE_ORDERS (default: FEATURE_ORDER); with
+    FEATURE_ORDER_REGIME each row must also carry the REGIME_FEATURES keys.
+
     Returns (X, complete_mask, missing_by_row):
-      - X: (n, len(FEATURE_ORDER)) array. A row missing ANY feature gets a
+      - X: (n, len(feature_order)) array. A row missing ANY feature gets a
         0.0 placeholder at the missing slots -- NEVER trust X[i] unless
         complete_mask[i] is True (no imputation: a real gap always falls
         back to the raw grid value, never a filled-in guess).
@@ -94,8 +111,11 @@ def build_feature_matrix(
 
     from heatready_downscaling.koppen import koppen_main_group_code
 
+    if tuple(feature_order) not in SUPPORTED_FEATURE_ORDERS.values():
+        raise ValueError(f"unsupported feature_order: {feature_order!r}")
+    feature_order = tuple(feature_order)
     grid_col = "grid_tmax_c" if target == "tmax" else "grid_tmin_c"
-    X = np.zeros((len(rows), len(FEATURE_ORDER)), dtype=float)
+    X = np.zeros((len(rows), len(feature_order)), dtype=float)
     complete_mask: list[bool] = []
     missing_by_row: list[list[str]] = []
 
@@ -149,11 +169,12 @@ def build_feature_matrix(
             "latitude": r.get("lat"),
             "grid_specific_humidity_kgkg": r.get("grid_specific_humidity_kgkg"),
             "nighttime_wind_ms": r.get("nighttime_wind_ms"),
+            **{c: r.get(c) for c in REGIME_FEATURES},
         }
-        missing = [c for c in FEATURE_ORDER if values[c] is None]
+        missing = [c for c in feature_order if values[c] is None]
         missing_by_row.append(missing)
         complete_mask.append(not missing)
         if not missing:
-            X[i] = [values[c] for c in FEATURE_ORDER]
+            X[i] = [values[c] for c in feature_order]
 
     return X, complete_mask, missing_by_row

@@ -49,7 +49,8 @@ from datetime import date, datetime
 import numpy as np
 
 from heatready_downscaling.contract import aoa_dissimilarity, feature_importance_weights
-from heatready_downscaling.features import FEATURE_ORDER, build_feature_matrix
+from heatready_downscaling.features import (FEATURE_ORDER, REGIME_FEATURES, SUPPORTED_FEATURE_ORDERS,
+                                            build_feature_matrix)
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CREDENTIALS_FILE = os.path.join(REPO_ROOT, "credentials.yaml")
@@ -163,8 +164,41 @@ def merge_extra_rows(rows: list[dict], extra_rows: list[dict]) -> tuple[list[dic
                           "duplicate_within_extra": dup_extra, "dropped_null": dropped}
 
 
+# Column names in a --regime-features-csv (Open-Meteo archive daily output) -> REGIME_FEATURES.
+REGIME_CSV_COLUMNS = {
+    "precipitation_sum": "era5_precip_sum_mm", "shortwave_radiation_sum": "era5_sw_rad_sum_mj",
+    "wind_speed_10m_max": "era5_wind_max_kmh", "relative_humidity_2m_mean": "era5_rh_mean_pct",
+}
+
+
+def attach_regime_features(rows: list[dict], csv_paths: list[str]) -> dict:
+    """Join daily ERA5 regime covariates onto every row by (station_id, date), in place. The CSVs
+    carry station_id, date (YYYY-MM-DD) and REGIME_CSV_COLUMNS' keys. A row with no match keeps the
+    features as None, so build_training_feature_matrix drops it for the regime feature order (no
+    imputation). Returns counts."""
+    import csv
+    table = {}
+    for path in csv_paths:
+        with open(path, newline="") as f:
+            for rec in csv.DictReader(f):
+                vals = {}
+                for src, dst in REGIME_CSV_COLUMNS.items():
+                    v = rec.get(src)
+                    vals[dst] = float(v) if v not in (None, "") else None
+                table[(rec["station_id"], rec.get("date") or rec.get("time"))] = vals
+    matched = 0
+    for r in rows:
+        vals = table.get((r["station_id"], str(r["date"])[:10]))
+        if vals is not None:
+            matched += 1
+            r.update(vals)
+        else:
+            r.update({c: None for c in REGIME_FEATURES})
+    return {"rows": len(rows), "matched": matched, "table_rows": len(table)}
+
+
 def build_training_feature_matrix(
-    rows: list[dict], target: str, return_keep: bool = False,
+    rows: list[dict], target: str, return_keep: bool = False, feature_order: tuple = FEATURE_ORDER,
 ) -> tuple:
     """
     Build (X, y, regions, zones, lons, lats) for `target` in {"tmax", "tmin"}
@@ -194,10 +228,11 @@ def build_training_feature_matrix(
             "grid_specific_humidity_kgkg": r.get("grid_specific_humidity_kgkg"),
             "koppen_main_group_code": r.get("koppen_main_group_code"),
             "nighttime_wind_ms": r.get("nighttime_wind_ms"),
+            **{c: r.get(c) for c in REGIME_FEATURES},
         }
         for r in rows
     ]
-    X_all, complete_mask, _ = build_feature_matrix(covariate_rows, target)
+    X_all, complete_mask, _ = build_feature_matrix(covariate_rows, target, feature_order=feature_order)
     delta_col = "delta_tmax_c" if target == "tmax" else "delta_tmin_c"
 
     def _target_is_finite(i: int) -> bool:
@@ -643,7 +678,14 @@ def main() -> None:
                          help="Train on ghcn_training PLUS the rows in this builder JSON output "
                               "({\"rows\": [...]}, e.g. build_gsod_bsh_rows.py). Repeatable. The DB row "
                               "wins on a duplicate (station_id, date); across files, the first file wins. Only with --candidate-only. Path + sha256 recorded in metadata.json.")
+    parser.add_argument("--feature-set", choices=sorted(SUPPORTED_FEATURE_ORDERS), default="base",
+                        help="'regime' adds REGIME_FEATURES (needs --regime-features-csv); only with --candidate-only")
+    parser.add_argument("--regime-features-csv", action="append", default=[],
+                        help="Open-Meteo daily regime covariates per (station_id, date); repeatable; sha256 recorded")
     args = parser.parse_args()
+    if args.feature_set != "base" and not (args.candidate_only and args.regime_features_csv):
+        raise SystemExit("--feature-set regime needs --candidate-only and at least one --regime-features-csv")
+    feature_order = SUPPORTED_FEATURE_ORDERS[args.feature_set]
     if args.extra_rows_json and not args.candidate_only:
         raise SystemExit("--extra-rows-json trains on rows that aren't in ghcn_training; it is only allowed "
                          "with --candidate-only")
@@ -671,6 +713,14 @@ def main() -> None:
                               "rows_in_file": len(extra), **counts})
         print(f"Extra rows from {path}: {counts}")
 
+    regime_sources = []
+    if args.regime_features_csv:
+        import hashlib
+        counts = attach_regime_features(rows, args.regime_features_csv)
+        print(f"Regime features attached: {counts}")
+        regime_sources = [{"path": os.path.basename(p), "sha256": hashlib.sha256(open(p, "rb").read()).hexdigest()}
+                          for p in args.regime_features_csv]
+
     artifact_bundle: dict = {}
     metadata_cv: dict = {}
     metadata_cv_db_rows: dict = {}
@@ -679,7 +729,8 @@ def main() -> None:
 
     for target in ("tmax", "tmin"):
         print(f"\n=== target: delta_{target}_c ===")
-        X, y, regions, zones, lons, lats, keep = build_training_feature_matrix(rows, target, return_keep=True)
+        X, y, regions, zones, lons, lats, keep = build_training_feature_matrix(rows, target, return_keep=True,
+                                                                               feature_order=feature_order)
         print(f"[{target}] {len(y)} usable row(s) across {len(set(regions))} region(s), {len(set(zones))} climate zone(s)")
 
         cv = leave_region_out_cv(X, y, regions, n_jobs=args.cv_n_jobs)
@@ -732,7 +783,8 @@ def main() -> None:
     metadata = {
         "model_version": args.model_version,
         "trained_at": datetime.utcnow().isoformat() + "Z",
-        "feature_order": list(FEATURE_ORDER),
+        "feature_order": list(feature_order),
+        "regime_features_sources": regime_sources,
         "targets": ["delta_tmax_c", "delta_tmin_c"],
         # Conformal calibration is per-target (tmax/tmin fit their own QRF
         # interval widths); predict_downscaled reads whichever target's
