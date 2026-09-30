@@ -227,6 +227,27 @@ def exclude_station_since(rows: list[dict], specs: list[str]) -> tuple[list[dict
     return kept, dropped
 
 
+def write_oof_csv(path: str, rows: list[dict], keep: list[int], y: np.ndarray, zones: list[str],
+                  cv: dict, grid_col: str) -> int:
+    """Per-row leave-region-out out-of-fold predictions (station_id, date, zone, region, grid value,
+    observed delta, OOF median delta), so centered/station-month skill and amplitude can be computed
+    outside the trainer. gzip if the path ends in .gz. Returns rows written."""
+    import csv, gzip
+    opener = gzip.open if path.endswith(".gz") else open
+    n = 0
+    with opener(path, "wt", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["station_id", "date", "zone", "region", "grid_c", "delta_obs", "delta_oof_median"])
+        for j, i in enumerate(keep):
+            if not cv["valid"][j]:
+                continue
+            r = rows[i]
+            w.writerow([r["station_id"], str(r["date"])[:10], zones[j], r["region"], r.get(grid_col),
+                        f"{y[j]:.4f}", f"{cv['oof_median'][j]:.4f}"])
+            n += 1
+    return n
+
+
 def build_training_feature_matrix(
     rows: list[dict], target: str, return_keep: bool = False, feature_order: tuple = FEATURE_ORDER,
 ) -> tuple:
@@ -715,6 +736,8 @@ def main() -> None:
     parser.add_argument("--exclude-station-since", action="append", default=[], metavar="STATION:YYYY-MM-DD",
                         help="drop a station's rows dated on/after the date (unresolved recent record); repeatable; "
                              "recorded in metadata; only with --candidate-only")
+    parser.add_argument("--save-oof-dir", default=None,
+                        help="also write per-row leave-region-out OOF predictions to DIR/oof_{tmax,tmin}.csv.gz")
     args = parser.parse_args()
     if args.exclude_station_since and not args.candidate_only:
         raise SystemExit("--exclude-station-since is only allowed with --candidate-only")
@@ -796,6 +819,11 @@ def main() -> None:
                 kriging_oof_median=None if kriging_oof_median is None else kriging_oof_median[db_mask],
             ).get("overall")
             metadata_cv_db_rows[target] = db_only
+        if args.save_oof_dir:
+            os.makedirs(args.save_oof_dir, exist_ok=True)
+            n_oof = write_oof_csv(os.path.join(args.save_oof_dir, f"oof_{target}.csv.gz"), rows, keep, y, zones, cv,
+                                  "grid_tmax_c" if target == "tmax" else "grid_tmin_c")
+            print(f"[{target}] wrote {n_oof} OOF rows to {args.save_oof_dir}")
         q95_by_zone = conformal_q95_by_zone(y, zones, cv)
         coverage = conformal_empirical_coverage(y, zones, cv, q95_by_zone)
 
