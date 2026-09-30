@@ -92,3 +92,21 @@ def test_exclude_station_since():
         td.exclude_station_since(rows, ["Z:2023-01-01"])
     with pytest.raises(SystemExit):  # repeated station
         td.exclude_station_since(rows, ["A:2023-01-01", "A:2024-01-01"])
+
+
+def test_write_oof_csv(tmp_path):
+    import gzip
+    import numpy as np
+    spec = importlib.util.spec_from_file_location("td3", ROOT / "scripts" / "train_downscaling.py")
+    td = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(td)
+    except ImportError as e:
+        pytest.skip(f"trainer import needs {e}")
+    rows = [{"station_id": "A", "date": "2025-01-01", "region": "R1", "grid_tmax_c": 30.0},
+            {"station_id": "B", "date": "2025-01-02", "region": "R2", "grid_tmax_c": 31.0}]
+    cv = {"valid": np.array([True, False]), "oof_median": np.array([0.5, np.nan])}
+    p = tmp_path / "o.csv.gz"
+    assert td.write_oof_csv(str(p), rows, [0, 1], np.array([1.0, 2.0]), ["BSh", "BSh"], cv, "grid_tmax_c") == 1
+    lines = gzip.open(p, "rt").read().strip().splitlines()
+    assert lines[1].startswith("A,2025-01-01,BSh,R1,30.0,1.0000,0.5000")
