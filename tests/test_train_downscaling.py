@@ -371,31 +371,36 @@ class TestBuildAoaIndex:
 
 
 class TestSaveModelArtifacts:
-    def test_writes_model_and_metadata_to_expected_keys(self):
+    def _keys(self, mock_s3):
+        put = [c.kwargs["Key"] for c in mock_s3.put_object.call_args_list]
+        up = [c.args[2] for c in mock_s3.upload_file.call_args_list]
+        return put, up
+
+    def test_writes_model_and_metadata_to_expected_keys(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MODEL_ARTIFACT_DIR", str(tmp_path))
         mock_s3 = MagicMock()
         with patch("boto3.client", return_value=mock_s3):
             td.save_model_artifacts("test-bucket", "ds-2026.07-rf1", {"model_tmax": "X"}, {"model_version": "ds-2026.07-rf1"})
-        assert mock_s3.put_object.call_count == 2
-        keys = [c.kwargs["Key"] for c in mock_s3.put_object.call_args_list]
-        assert "downscaling/models/ds-2026.07-rf1/model.joblib" in keys
-        assert "downscaling/models/ds-2026.07-rf1/metadata.json" in keys
-        for c in mock_s3.put_object.call_args_list:
-            assert c.kwargs["Bucket"] == "test-bucket"
+        put, up = self._keys(mock_s3)
+        assert put == ["downscaling/models/ds-2026.07-rf1/metadata.json"]
+        assert up == ["downscaling/models/ds-2026.07-rf1/model.joblib"]
+        assert mock_s3.put_object.call_args.kwargs["Bucket"] == "test-bucket"
+        assert mock_s3.upload_file.call_args.args[1] == "test-bucket"
+        # The model (multipart upload, not a 5 GB-capped put_object) and metadata stay on disk.
+        assert (tmp_path / "model.joblib").exists() and (tmp_path / "metadata.json").exists()
 
-    def test_candidate_only_writes_outside_the_serving_prefix(self):
+    def test_candidate_only_writes_outside_the_serving_prefix(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MODEL_ARTIFACT_DIR", str(tmp_path))
         mock_s3 = MagicMock()
         with patch("boto3.client", return_value=mock_s3):
             td.save_model_artifacts(
                 "test-bucket", "ds-2026.07-rf1", {"model_tmax": "X"},
                 {"model_version": "ds-2026.07-rf1"}, candidate_only=True,
             )
-        assert mock_s3.put_object.call_count == 2
-        keys = [c.kwargs["Key"] for c in mock_s3.put_object.call_args_list]
-        assert "research/candidate-models/ds-2026.07-rf1/model.joblib" in keys
-        assert "research/candidate-models/ds-2026.07-rf1/metadata.json" in keys
-        assert not any(k.startswith("downscaling/") for k in keys)
-        for c in mock_s3.put_object.call_args_list:
-            assert c.kwargs["Bucket"] == "test-bucket"
+        put, up = self._keys(mock_s3)
+        assert put == ["research/candidate-models/ds-2026.07-rf1/metadata.json"]
+        assert up == ["research/candidate-models/ds-2026.07-rf1/model.joblib"]
+        assert not any(k.startswith("downscaling/") for k in put + up)
 
 
 class TestMain:
@@ -438,3 +443,41 @@ class TestMain:
 
         mock_save.assert_called_once()
         assert mock_save.call_args.kwargs["candidate_only"] is True
+
+
+def test_merge_extra_rows_db_row_wins_and_null_rows_dropped():
+    base = {"region": "IN", "climate_zone": "BSh", "grid_tmax_c": 40.0, "grid_tmin_c": 27.0,
+            "delta_tmax_c": 1.0, "delta_tmin_c": 0.5}
+    db_rows = [{**base, "station_id": "IN005010600", "date": date(2023, 5, 1)}]
+    extra = [
+        {**base, "station_id": "IN005010600", "date": "2023-05-01", "delta_tmax_c": 9.9},  # dup of DB row
+        {**base, "station_id": "IN005010600", "date": "2023-05-02"},
+        {**base, "station_id": "IN005010600", "date": "2023-05-02"},  # dup within the file
+        {**base, "station_id": "ING427480", "date": "2023-05-02", "grid_tmax_c": None},
+    ]
+    merged, counts = td.merge_extra_rows(db_rows, extra)
+    assert counts == {"added": 1, "duplicate_of_db_row": 1, "duplicate_within_extra": 1, "dropped_null": 1}
+    assert len(merged) == 2 and merged[0]["delta_tmax_c"] == 1.0
+    assert merged[1]["_extra"] is True and "_extra" not in merged[0]
+
+
+def test_subset_cv_restricts_per_row_arrays_only():
+    cv = {"valid": np.array([True, False, True]), "oof_median": np.array([1.0, 2.0, 3.0]), "folds": ["a"]}
+    sub = td._subset_cv(cv, np.array([True, False, True]))
+    assert sub["oof_median"].tolist() == [1.0, 3.0] and sub["folds"] == ["a"]
+
+
+def test_merge_extra_rows_second_file_overlap_counts_as_within_extra():
+    base = {"region": "IN", "climate_zone": "BSh", "grid_tmax_c": 40.0, "grid_tmin_c": 27.0,
+            "delta_tmax_c": 1.0, "delta_tmin_c": 0.5, "station_id": "X", "date": "2023-05-02"}
+    rows, _ = td.merge_extra_rows([], [base])
+    _, counts = td.merge_extra_rows(rows, [base])
+    assert counts["duplicate_of_db_row"] == 0 and counts["duplicate_within_extra"] == 1
+
+
+def test_extra_rows_without_candidate_only_exits_before_db_read(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["train_downscaling.py", "--model-version", "x", "--bucket", "b",
+                                      "--extra-rows-json", "f.json"])
+    with patch.object(td, "load_training_rows") as load, pytest.raises(SystemExit):
+        td.main()
+    load.assert_not_called()

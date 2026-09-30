@@ -118,9 +118,47 @@ def load_training_rows() -> list[dict]:
     )
 
 
+EXTRA_ROWS_ZONE = "_extra_rows"
+
+
+def _subset_cv(cv: dict, mask: np.ndarray) -> dict:
+    """leave_region_out_cv's per-row arrays restricted to `mask` (non-array entries kept)."""
+    return {k: (v[mask] if isinstance(v, np.ndarray) and v.shape[:1] == mask.shape else v) for k, v in cv.items()}
+_REQUIRED_NON_NULL = ("region", "climate_zone", "grid_tmax_c", "grid_tmin_c", "delta_tmax_c", "delta_tmin_c")
+
+
+def merge_extra_rows(rows: list[dict], extra_rows: list[dict]) -> tuple[list[dict], dict]:
+    """Add rows from a builder's JSON output (e.g. build_gsod_bsh_rows.py) to the ghcn_training
+    rows, without writing them to the database first -- so a candidate model can be trained on
+    a corpus extension before anyone decides whether to upsert it.
+
+    Applies load_training_rows' own non-null filter to the extra rows. On a (station_id, date)
+    key that already exists in ghcn_training, the database row wins: the extension adds days,
+    it never silently replaces an ingested one. Returns (merged rows, counts)."""
+    existing = {(r["station_id"], str(r["date"])) for r in rows if not r.get("_extra")}
+    seen_extra = {(r["station_id"], str(r["date"])) for r in rows if r.get("_extra")}
+    seen = seen_extra
+    added, dup_db, dup_extra, dropped = [], 0, 0, 0
+    for r in extra_rows:
+        if any(r.get(k) is None for k in _REQUIRED_NON_NULL):
+            dropped += 1
+            continue
+        key = (r["station_id"], str(r["date"]))
+        if key in existing:
+            dup_db += 1
+            continue
+        if key in seen:
+            dup_extra += 1
+            continue
+        seen.add(key)
+        added.append({**r, "_extra": True})
+    return rows + added, {"added": len(added), "duplicate_of_db_row": dup_db,
+                          "duplicate_within_extra": dup_extra, "dropped_null": dropped}
+
+
 def build_training_feature_matrix(
-    rows: list[dict], target: str,
-) -> tuple[np.ndarray, np.ndarray, list[str], list[str], np.ndarray, np.ndarray]:
+    rows: list[dict], target: str, return_keep: bool = False,
+) -> tuple:
     """
     Build (X, y, regions, zones, lons, lats) for `target` in {"tmax", "tmin"}
     from ghcn_training rows, reusing build_feature_matrix's
@@ -177,6 +215,8 @@ def build_training_feature_matrix(
     zones = [rows[i]["climate_zone"] for i in keep]
     lons = np.array([rows[i]["lon"] for i in keep], dtype=float)
     lats = np.array([rows[i]["lat"] for i in keep], dtype=float)
+    if return_keep:
+        return X, y, regions, zones, lons, lats, keep
     return X, y, regions, zones, lons, lats
 
 
@@ -540,21 +580,36 @@ def save_model_artifacts(
     later publish, without ever touching the tree any serving code reads -- see
     docs/pipeline-fable-consult-2026-07-19-downscaling-diagnosis.md's own publish-gate
     discussion for why a retrain and a publish are deliberately two separate actions."""
+    import tempfile
+
     import boto3
     import joblib
+    from boto3.s3.transfer import TransferConfig
 
-    buf = io.BytesIO()
-    joblib.dump(artifact_bundle, buf)
     client = boto3.client("s3")
     prefix = (
         f"research/candidate-models/{model_version}/" if candidate_only
         else f"downscaling/models/{model_version}/"
     )
-    client.put_object(Bucket=bucket, Key=f"{prefix}model.joblib", Body=buf.getvalue())
+    # Dump to disk and upload multipart. A single put_object caps at 5 GB, and rf6's bundle
+    # was already 4.84 GB: the 2026-09-29 rf7 control (685k rows) failed there after the
+    # whole fit, with the model only in memory. The local copy is kept (path printed) so an
+    # upload failure never costs the fit; metadata goes first since it is small and the CV
+    # record is the part most worth keeping.
+    local_dir = os.environ.get("MODEL_ARTIFACT_DIR") or tempfile.mkdtemp(prefix=f"{model_version}-")
+    os.makedirs(local_dir, exist_ok=True)
+    model_path = os.path.join(local_dir, "model.joblib")
+    with open(os.path.join(local_dir, "metadata.json"), "w") as f:
+        json.dump(metadata, f, indent=2)
+    joblib.dump(artifact_bundle, model_path)
+    print(f"Wrote local artifacts to {local_dir}")
     client.put_object(
         Bucket=bucket, Key=f"{prefix}metadata.json",
         Body=json.dumps(metadata, indent=2).encode(), ContentType="application/json",
     )
+    client.upload_file(model_path, bucket, f"{prefix}model.joblib",
+                       Config=TransferConfig(multipart_threshold=256 * 1024 ** 2,
+                                             multipart_chunksize=256 * 1024 ** 2))
     if candidate_only:
         print(f"CANDIDATE ONLY -- not published. Wrote to s3://{bucket}/{prefix} "
               f"(outside downscaling/, nothing live reads this). Re-run without "
@@ -572,7 +627,19 @@ def main() -> None:
                          help="Write model.joblib/metadata.json to research/candidate-models/{version}/ "
                               "instead of the live-serving downscaling/models/{version}/ prefix. Use this "
                               "for every retrain until a human has explicitly approved publishing it.")
+    parser.add_argument("--cv-n-jobs", type=int, default=-1,
+                         help="worker processes for the leave-region-out QRF and kriging CV (default -1 = one "
+                              "per core). Each worker holds its own copy of the feature matrix, so this, not "
+                              "the final fit, sets peak memory: at ~670k rows 16 workers need ~150 GB. Results "
+                              "don't depend on it (every fold fit is seeded).")
+    parser.add_argument("--extra-rows-json", action="append", default=[],
+                         help="Train on ghcn_training PLUS the rows in this builder JSON output "
+                              "({\"rows\": [...]}, e.g. build_gsod_bsh_rows.py). Repeatable. The DB row "
+                              "wins on a duplicate (station_id, date); across files, the first file wins. Only with --candidate-only. Path + sha256 recorded in metadata.json.")
     args = parser.parse_args()
+    if args.extra_rows_json and not args.candidate_only:
+        raise SystemExit("--extra-rows-json trains on rows that aren't in ghcn_training; it is only allowed "
+                         "with --candidate-only")
 
     if args.profile:
         os.environ["AWS_PROFILE"] = args.profile
@@ -583,21 +650,49 @@ def main() -> None:
     if not rows:
         print("No training rows available -- nothing to train. Run scripts/build_training_set.py first.")
         return
+    extra_sources = []
+    for path in args.extra_rows_json:
+        import hashlib
+        with open(path, "rb") as f:
+            raw = f.read()
+        payload = json.loads(raw)
+        if payload.get("complete") is not True:
+            raise SystemExit(f"{path} is not marked complete (a partial builder checkpoint?) -- refusing to train on it")
+        extra = payload["rows"]
+        rows, counts = merge_extra_rows(rows, extra)
+        extra_sources.append({"path": os.path.basename(path), "sha256": hashlib.sha256(raw).hexdigest(),
+                              "rows_in_file": len(extra), **counts})
+        print(f"Extra rows from {path}: {counts}")
 
     artifact_bundle: dict = {}
     metadata_cv: dict = {}
+    metadata_cv_db_rows: dict = {}
     metadata_conformal: dict = {}
     ood_thresholds: list[float] = []
 
     for target in ("tmax", "tmin"):
         print(f"\n=== target: delta_{target}_c ===")
-        X, y, regions, zones, lons, lats = build_training_feature_matrix(rows, target)
+        X, y, regions, zones, lons, lats, keep = build_training_feature_matrix(rows, target, return_keep=True)
         print(f"[{target}] {len(y)} usable row(s) across {len(set(regions))} region(s), {len(set(zones))} climate zone(s)")
 
-        cv = leave_region_out_cv(X, y, regions)
+        cv = leave_region_out_cv(X, y, regions, n_jobs=args.cv_n_jobs)
         print(f"[{target}] running regression-kriging comparison baseline...")
-        kriging_oof_median = regression_kriging_cv(X, y, regions, lons, lats)
+        kriging_oof_median = regression_kriging_cv(X, y, regions, lons, lats, n_jobs=args.cv_n_jobs)
         zone_metrics = cv_metrics_by_zone(y, zones, cv, kriging_oof_median=kriging_oof_median)
+        if extra_sources:
+            # The same out-of-fold predictions, scored on ghcn_training's own rows only (extra rows
+            # pooled under EXTRA_ROWS_ZONE), so each zone's numbers compare like for like with a
+            # model trained on ghcn_training alone.
+            zones_db = [EXTRA_ROWS_ZONE if rows[i].get("_extra") else z for i, z in zip(keep, zones)]
+            db_only = cv_metrics_by_zone(y, zones_db, cv, kriging_oof_median=kriging_oof_median)
+            # cv_metrics_by_zone's "overall" pools every row regardless of zone label; recompute
+            # it over the database rows alone.
+            db_mask = np.array([not rows[i].get("_extra") for i in keep])
+            db_only["overall"] = cv_metrics_by_zone(
+                y[db_mask], [z for z, m in zip(zones, db_mask) if m], _subset_cv(cv, db_mask),
+                kriging_oof_median=None if kriging_oof_median is None else kriging_oof_median[db_mask],
+            ).get("overall")
+            metadata_cv_db_rows[target] = db_only
         q95_by_zone = conformal_q95_by_zone(y, zones, cv)
         coverage = conformal_empirical_coverage(y, zones, cv, q95_by_zone)
 
@@ -641,6 +736,9 @@ def main() -> None:
         "conformal_q95_by_zone_tmin": metadata_conformal.get("tmin", {}),
         "ood_aoa_threshold": (sum(ood_thresholds) / len(ood_thresholds)) if ood_thresholds else None,
         "cv": {"leave_region_out": metadata_cv},
+        "training_rows": len(rows),
+        "extra_rows_sources": extra_sources,
+        "cv_ghcn_training_rows_only": {"leave_region_out": metadata_cv_db_rows} if extra_sources else None,
     }
 
     save_model_artifacts(bucket, args.model_version, artifact_bundle, metadata, candidate_only=args.candidate_only)
