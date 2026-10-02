@@ -1,4 +1,10 @@
-# Out-of-time scorecard, version 1
+# Out-of-time scorecard, version 2
+
+Version 2 is version 1 plus 101 GHCN-D stations from the C1 thin-zone pull (2026-10-02), so the tropical and cold
+zones are scored: 338 truth stations, manifest sha256 in `spec.yaml`. The 101 stations' rows are
+`thin_zone_rows.json` (built by `scripts/build_thin_zone_rows.py`, listed under `truth_extra_rows`); everything else
+below is unchanged from v1. First result: `results/2026-10-rf8b-vs-rf6/` (fast tier, both recipes rescored).
+
 
 One standing definition of "better" for the global downscaling model. Every candidate change (a new
 model version, a level anchor, the pooled residual layer, a logger bias model, a new station source)
@@ -28,10 +34,10 @@ version bump (`scorecard/v2/`), and the incumbent is rescored first.
 - Contributor stations held out for their own place would carry `visibility: private` and are scored
   only into a private file. None exist yet.
 
-Zone coverage today (unseen stations): BSh 88, Csa 47, Cfb 33, BSk 25, Csb 18, Cfa 17, Cfc 4,
-BWh 3, "temperate" 2. The tropical and cold zone groups have no unseen station, so they are
-reported as unscored. Filling them needs new stations pulled for 2025 (and earlier years for the
-full tier), which is its own plan.
+Zone coverage today (unseen stations, v2): BSh 88, Csa 47, Cfb 33, BSk 25, Csb 18, Cfa 17, Af 15, Am 15, Cwa 15,
+Dfb 13, Dwa 13, Dfa 12, Aw 10, Cwb 8, Cfc 4, BWh 3, "temperate" 2. The 101 thin-zone stations are GHCN-D
+(public domain), with 2023 and 2025 rows, so the full tier can score them too. (v1 had no tropical or cold
+station and reported those groups as unscored.)
 
 ## How a candidate is scored
 
