@@ -1,0 +1,24 @@
+{
+  "manifest_sha256": "8aca18889ad9a36a25e10341d52463d9fef166e6e41bb0c75ea07152d0f6caa0",
+  "n_keys": 168002,
+  "keys_by_target_year": {
+    "tmax:2022": 2892,
+    "tmax:2023": 2890,
+    "tmax:2024": 2799,
+    "tmax:2025": 80047,
+    "tmin:2023": 1190,
+    "tmin:2025": 78184
+  },
+  "stations_with_keys": 237,
+  "truth_stations_without_rows": [],
+  "sources": [
+    {
+      "name": "rows_none.json",
+      "sha256": "d892681d76f61ff8d3134af9b940239508b0455d507931999aad2eebd9fbef93",
+      "added": 89728,
+      "duplicate_of_db_row": 5257,
+      "duplicate_within_extra": 0,
+      "dropped_null": 0
+    }
+  ]
+}
