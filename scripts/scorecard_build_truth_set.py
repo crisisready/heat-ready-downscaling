@@ -120,6 +120,8 @@ def build(spans_path, gsod_paths, ghcnd_path, holdout_path, first_scored_year: i
             removed.append({"station_id": lose, "reason": f"duplicate of a training station ({why})", "kept": keep,
                             "distance_km": round(d, 3)})
     drop = {r["station_id"] for r in removed}
+    if drop & set(holdout):  # a moved station must be scored, or it was moved for nothing
+        raise SystemExit(f"dedupe would drop holdout station(s) {sorted(drop & set(holdout))}")
     rows = []
     for sid in sorted(truth - drop):
         s = stations[sid]

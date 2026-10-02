@@ -43,7 +43,7 @@ def _frame(stations_by_zone, n_days=40, inc_err=1.0, cand_err=None, seed=0, year
 
 
 def _decl(zones=("BSh",), metric="rmse_tmax", min_effect=0.02):
-    return {"candidate": "c", "incumbent": "i", "declared_at": "2026-10-02",
+    return {"candidate": "c", "incumbent": "i", "declared_at": "2026-10-02", "kind": "layer",
             "aim": {"subset": {"zones": list(zones)}, "metric": metric, "min_effect_c": min_effect}}
 
 
@@ -325,3 +325,31 @@ def test_truth_set_builder_dedupes_by_distance_and_wmo(tmp_path):
     assert "WMO" in why["U2"] and "training" in why["U3"]
     assert {r["station_id"]: r["airport"] for r in rows}["U1"] == "yes"
     assert {r["station_id"]: r["origin"] for r in rows}["T2"] == "moved_2026-10-01"
+
+
+def test_untested_global_metric_blocks_ship():
+    rows, st = _frame({"BSh": 10}, cand_err={"BSh": 0.5}, targets=("tmax",))
+    res, aim, dec = _run(rows, st, _spec(), _decl())
+    assert not dec["pass"]
+    assert any("global rmse_tmin not worse: no rows" in r for r in dec["reasons"])
+
+
+def test_model_version_needs_full_tier():
+    rows, st = _frame({"BSh": 10, "Csa": 9}, cand_err={"BSh": 0.7, "Csa": 0.9})
+    res = sc.score(rows, st, _spec())
+    aim = sc.score_aim(rows, st, _spec(), _decl())
+    assert not sc.ship_decision(res, aim, _spec(), kind="model_version", tier="fast")["pass"]
+    assert sc.ship_decision(res, aim, _spec(), kind="model_version", tier="full")["pass"]
+
+
+def test_empty_zone_groups_are_listed():
+    rows, st = _frame({"BSh": 10}, n_days=3)
+    names = {g["name"] for g in sc.score(rows, st, _spec())["groups"]}
+    assert {"arid", "tropical", "temperate", "cold"} <= names
+
+
+def test_yaml_booleans_in_subset_are_refused():
+    d = _decl()
+    d["aim"]["subset"] = {"airport": [True]}
+    with pytest.raises(ValueError):
+        sc.validate_declaration(d)

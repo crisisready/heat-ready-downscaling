@@ -43,11 +43,15 @@ full tier), which is its own plan.
 3. Predictions go through the serving contract (`contract.QRFModelAdapter.predict`, the mirror of
    the API's own serving function): the version's own CV gate per zone and target, and the raw
    ERA5-Land value wherever the model does not apply (a failed gate or a missing covariate). That
-   is the value a user would get.
+   is the value a user would get. In v1 the per-zone CV gate, conformal widths and AOA threshold
+   come from the served version's own metadata.json, which was fit on all of its data, so the gate
+   a refit uses was chosen with the full corpus in view. The gate is pass or fail per zone, and rf6
+   and rf8b agree on it everywhere (tmin falls back to the grid in As, BWh and Cwa for both).
+   Refitting the gate at each cutoff is a v2 item.
 4. Fast tier (every candidate): cutoff 2024-12-31, score 2025. The incumbent's predictions are
    cached, so a layer candidate supplies its own served deltas (fit before the cutoff) and scores in
    minutes.
-5. Full tier (model versions and new training sources): cutoffs 2021 to 2024, a refit at each, the
+5. Full tier (model versions and new training sources, which ship only on this tier): cutoffs 2021 to 2024, a refit at each, the
    paired deltas pooled over every scored year. A year where either side has no training rows before
    the cutoff is listed as unscoreable in the provenance block. Today the corpus holds 2023 and 2025
    for most stations, so an incumbent trained on the main table alone can only be scored in 2024
@@ -64,7 +68,8 @@ station-days.
 `heatready_downscaling.scorecard.ship_decision` returns pass or fail with every reason. A candidate
 ships only when all of these hold:
 
-- Global: not worse on tmax RMSE, tmin RMSE, or hot-day tmax MAE.
+- Global: not worse on tmax RMSE, tmin RMSE, or hot-day tmax MAE. A global metric with no rows
+  blocks the ship.
 - Every zone with at least 8 unseen stations for a target, and every pool of thin zones within a
   zone group that reaches 8 together, is no more than 0.10 C worse on RMSE (point estimate). A pool
   still under 8 is reported and does not gate.

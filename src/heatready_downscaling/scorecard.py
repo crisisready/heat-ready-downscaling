@@ -31,6 +31,9 @@ import pandas as pd
 
 TARGETS = ("tmax", "tmin")
 METRICS = ("rmse_tmax", "rmse_tmin", "hot_mae_tmax")
+# model_version and data_source candidates must pass on the full tier; layers may ship on the fast tier
+DECLARATION_KINDS = ("model_version", "data_source", "layer")
+FULL_TIER_KINDS = ("model_version", "data_source")
 _BOOTSTRAP_SEED = 20261001
 
 
@@ -71,7 +74,7 @@ def zone_group(zone: str, spec: dict) -> str:
     for group, zones in spec["zone_groups"].items():
         if zone in zones:
             return group
-    letter = (zone or "?")[:1]
+    letter = (zone if isinstance(zone, str) and zone else "?")[:1]
     return {"A": "tropical", "B": "arid", "C": "temperate", "D": "cold", "E": "cold"}.get(letter, "unassigned")
 
 
@@ -213,7 +216,7 @@ def score(rows: pd.DataFrame, stations: pd.DataFrame, spec: dict) -> dict:
                              "gating_targets": [t for t in TARGETS if _unit_target_gates(u, t, spec)],
                              "note": u.note, **block})
     out["groups"] = []
-    for g in sorted(public["zone_group"].unique()):
+    for g in sorted(set(spec["zone_groups"]) | set(public["zone_group"].unique())):
         out["groups"].append({"name": g, **_metric_block(public[public["zone_group"] == g])})
     out["report"] = _report(public, spec, units)
     out["private"] = ({sid: _metric_block(s) for sid, s in private.groupby("station_id")}
@@ -352,6 +355,14 @@ def validate_declaration(decl: dict) -> None:
         if key not in decl:
             raise ValueError(f"declaration missing {key!r}")
     aim = decl["aim"]
+    if not isinstance(aim, dict):
+        raise ValueError("declaration aim must be a mapping")
+    if decl.get("kind") not in DECLARATION_KINDS:
+        raise ValueError(f"declaration kind must be one of {DECLARATION_KINDS}")
+    for col in ("airport", "setting"):
+        vals = (aim.get("subset") or {}).get(col)
+        if vals is not None and (not isinstance(vals, list) or not all(isinstance(v, str) for v in vals)):
+            raise ValueError(f"aim.subset.{col} must be a list of quoted strings (YAML reads bare yes/no as booleans)")
     if aim.get("metric") not in METRICS:
         raise ValueError(f"aim.metric must be one of {METRICS}, got {aim.get('metric')!r}")
     if not (isinstance(aim.get("min_effect_c"), (int, float)) and aim["min_effect_c"] > 0):
@@ -390,7 +401,7 @@ def score_aim(rows: pd.DataFrame, stations: pd.DataFrame, spec: dict, decl: dict
             "n_stations_tmin": block["n_stations_tmin"], "block": _compact(block)}
 
 
-def ship_decision(result: dict, aim: dict, spec: dict) -> dict:
+def ship_decision(result: dict, aim: dict, spec: dict, kind: str | None = None, tier: str | None = None) -> dict:
     """The ship rule as code (plan section 4 item 7). Returns {"pass": bool, "reasons": [...],
     "checks": [...]}; every check that fails is a reason. A check with no rows to evaluate is
     recorded as not applicable, never as a pass in disguise."""
@@ -421,9 +432,15 @@ def ship_decision(result: dict, aim: dict, spec: dict) -> dict:
     failed = [c for c in checks if c["ok"] is False]
     aim_missing = checks[-1]["ok"] is None
     reasons = [f"{c['check']}: {c['detail']}" for c in failed]
+    # a global metric with no rows was never tested: that blocks a ship (a thin unit or an empty
+    # zone group is reported as not applicable instead)
+    untested = [c["check"] for c in checks if c["ok"] is None and c["check"].startswith("global ")]
+    reasons += [f"{c}: no rows, so the candidate was never tested on it" for c in untested]
     if aim_missing:
         reasons.append("aim has no rows to score; a ship needs a measurable aim")
-    return {"pass": not failed and not aim_missing, "reasons": reasons, "checks": checks}
+    if kind in FULL_TIER_KINDS and tier != "full":
+        reasons.append(f"a {kind} candidate ships only on the full tier (this is the {tier} tier)")
+    return {"pass": not reasons, "reasons": reasons, "checks": checks}
 
 
 # ---------------------------------------------------------------- publication

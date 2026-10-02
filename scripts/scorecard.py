@@ -204,6 +204,22 @@ def recipe_corpus(rows: list[dict], recipe: dict, cutoff: str, truth_ids: set[st
             and r["station_id"] not in truth_ids]
 
 
+_FINGERPRINT_COLS = ("station_id", "date", "climate_zone", "region", "grid_tmax_c", "grid_tmin_c", "delta_tmax_c",
+                     "delta_tmin_c", "lst_warm_season_anomaly_c", "canopy_height_mean_m", "canopy_frac_over_3m",
+                     "wc_built_frac", "wc_tree_frac", "wc_water_frac", "ghsl_urban_fraction", "pop_density_per_km2",
+                     "elevation_rel_to_gridcell_m", "elevation_mean_m", "slope_deg", "aspect_deg",
+                     "grid_specific_humidity_kgkg", "koppen_main_group_code", "nighttime_wind_ms", "lat", "lon")
+
+
+def rows_fingerprint(rows: list[dict]) -> str:
+    """sha256 over the values a fit or a prediction depends on, so a cached prediction is reused only
+    when the training corpus and the predicted rows are unchanged (a DB backfill invalidates it)."""
+    h = hashlib.sha256()
+    for r in rows:
+        h.update(repr(tuple(r.get(c) for c in _FINGERPRINT_COLS)).encode())
+    return h.hexdigest()
+
+
 def _cache_key(parts: dict) -> str:
     return hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()[:16]
 
@@ -238,10 +254,12 @@ def recipe_predictions(rows, recipe, metadata, cutoff, target, truth_ids, test_r
                        n_jobs) -> tuple[dict, dict]:
     """{(station_id, date): (served_delta, ci95)} for one recipe/cutoff/target, from the cache when the
     content key matches. Returns (predictions, provenance)."""
+    train = recipe_corpus(rows, recipe, cutoff, truth_ids)
     served_meta = {"gate": metadata.get("cv", {}).get("leave_region_out", {}).get(target, {}).get("by_zone"),
                    "q95": metadata.get("conformal_q95_by_zone" if target == "tmax" else "conformal_q95_by_zone_tmin"),
                    "ood": metadata.get("ood_aoa_threshold")}
-    key = _cache_key({**key_parts, "recipe": recipe, "cutoff": cutoff, "target": target, "served_meta": served_meta})
+    key = _cache_key({**key_parts, "recipe": recipe, "cutoff": cutoff, "target": target, "served_meta": served_meta,
+                      "train_rows_sha256": rows_fingerprint(train), "test_rows_sha256": rows_fingerprint(test_rows)})
     path = os.path.join(cache_dir, f"{recipe['model_version']}__{cutoff}__{target}__{key}.csv.gz")
     if os.path.exists(path):
         preds = {}
@@ -250,7 +268,6 @@ def recipe_predictions(rows, recipe, metadata, cutoff, target, truth_ids, test_r
                 preds[(rec["station_id"], rec["date"])] = (float(rec["served_delta"]),
                                                           float(rec["ci95"]) if rec["ci95"] else float("nan"))
         return preds, {"cache": os.path.basename(path), "cache_hit": True, "sha256": _sha256_file(path)}
-    train = recipe_corpus(rows, recipe, cutoff, truth_ids)
     results = served_predictions(train, test_rows, target, metadata, n_jobs)
     if not results:
         return {}, {"cache": None, "cache_hit": False, "train_rows": len(train),
@@ -261,8 +278,8 @@ def recipe_predictions(rows, recipe, metadata, cutoff, target, truth_ids, test_r
         w = csv.writer(f)
         w.writerow(["station_id", "date", "served_delta", "applied", "ci95"])
         for r, res in zip(test_rows, results):
-            delta = res["delta_c"] if res["applied"] else 0.0
-            ci = res["ci95_c"] if res["applied"] else None
+            delta = round(res["delta_c"], 4) if res["applied"] else 0.0
+            ci = round(res["ci95_c"], 4) if res["applied"] else None
             k = (r["station_id"], str(r["date"])[:10])
             preds[k] = (delta, float("nan") if ci is None else ci)
             w.writerow([k[0], k[1], f"{delta:.4f}", int(bool(res["applied"])), "" if ci is None else f"{ci:.4f}"])
@@ -296,6 +313,8 @@ def cmd_run(args) -> None:
     sc.validate_declaration(decl)
     stations = load_truth_stations(_repo_path(args.spec, spec["truth_stations"]))
     truth_ids = {s["station_id"] for s in stations}
+    if any(not s.get("setting") or not s.get("region") for s in stations):
+        raise SystemExit("truth_stations.csv has no setting/region: commit build-manifest's enriched file first")
     inc = load_recipe(args.incumbent_recipe)
     cand = load_recipe(args.candidate_recipe) if args.candidate_recipe else None
     if (cand is None) == (args.candidate_predictions is None):
@@ -321,6 +340,15 @@ def cmd_run(args) -> None:
         if r["station_id"] in truth_ids:
             by_key.setdefault((r["station_id"], str(r["date"])[:10]), r)
     st_by_id = {s["station_id"]: s for s in stations}
+    # units use the row's climate_zone (what serving gates on); make the station's zone and group agree
+    relabelled = {}
+    for (sid, _), r in by_key.items():
+        z = r.get("climate_zone")
+        if z and z != st_by_id[sid]["zone"]:
+            relabelled[sid] = (st_by_id[sid]["zone"], z)
+            st_by_id[sid]["zone"], st_by_id[sid]["zone_group"] = z, sc.zone_group(z, spec)
+    if relabelled:
+        print(f"station zone relabelled from the row label: {relabelled}", flush=True)
     key_parts = {"scorecard_version": spec["scorecard_version"], "manifest_sha256": spec["manifest"]["sha256"],
                  "trainer_sha256": _sha256_file(td.__file__),
                  "contract_sha256": _sha256_file(os.path.join(REPO_ROOT, "src/heatready_downscaling/contract.py")),
@@ -347,11 +375,13 @@ def cmd_run(args) -> None:
                                                        args.cache_dir, key_parts, args.n_jobs)
             else:
                 p_cand = load_candidate_predictions(args.candidate_predictions, cutoff, target)
-                prov_cand = {"candidate_predictions": args.candidate_predictions}
+                cp = os.path.join(args.candidate_predictions, f"{cutoff}__{target}.csv.gz")
+                prov_cand = {"candidate_predictions": os.path.basename(cp),
+                             "sha256": _sha256_file(cp) if os.path.exists(cp) else None}
             status = "scored"
             if not p_inc or not p_cand:
                 status = "unscoreable: " + ("incumbent" if not p_inc else "candidate") + " has no fit or predictions"
-            elif set(p_cand) < set(keys) or set(p_inc) < set(keys):
+            elif not set(keys) <= set(p_cand) or not set(keys) <= set(p_inc):
                 raise SystemExit(f"{cutoff} {target}: predictions do not cover the manifest (coverage must be "
                                  "at least the incumbent's)")
             prov.append({"cutoff": cutoff, "target": target, "status": status, "incumbent": prov_inc,
@@ -384,13 +414,13 @@ def cmd_run(args) -> None:
     df["city"] = df["station_id"].map(clusters)
     result = sc.score(df, st, spec)
     aim = sc.score_aim(df, st, spec, decl)
-    decision = sc.ship_decision(result, aim, spec)
+    decision = sc.ship_decision(result, aim, spec, kind=decl["kind"], tier=args.tier)
     private = result.pop("private")
     out = {"tier": args.tier, "declaration": decl, "declaration_sha256": _sha256_file(args.declaration),
            "incumbent": inc["model_version"], "candidate": cand["model_version"] if cand else decl["candidate"],
            "metadata_sha256": {"incumbent": _sha256_file(args.incumbent_metadata),
                                "candidate": _sha256_file(args.candidate_metadata) if cand else None},
-           "key_parts": key_parts, "provenance": prov, "aim": aim, "decision": decision, **result}
+           "key_parts": key_parts, "provenance": prov, "zone_relabelled": relabelled, "aim": aim, "decision": decision, **result}
     os.makedirs(args.out_dir, exist_ok=True)
     with open(os.path.join(args.out_dir, f"result_{args.tier}.json"), "w") as f:
         json.dump(out, f, indent=2, default=str)
