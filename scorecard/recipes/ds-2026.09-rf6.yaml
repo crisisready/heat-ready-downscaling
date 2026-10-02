@@ -1,0 +1,5 @@
+# Corpus recipe for ds-2026.09-rf6 (served in production since 2026-09): ghcn_training only, base
+# features, trainer QRF params. The scorecard refits this recipe at each cutoff.
+model_version: ds-2026.09-rf6
+feature_set: base
+extra_rows: []
