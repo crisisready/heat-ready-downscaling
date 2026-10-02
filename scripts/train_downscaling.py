@@ -227,6 +227,33 @@ def exclude_station_since(rows: list[dict], specs: list[str]) -> tuple[list[dict
     return kept, dropped
 
 
+def read_holdout_stations(path: str) -> list[str]:
+    """Station ids, one per line (# comments and blank lines ignored), from a scorecard holdout list
+    (scorecard/v1/holdout_stations.txt): stations moved out of training so the out-of-time scorecard
+    can score them as unseen."""
+    with open(path) as f:
+        ids = [line.split("#", 1)[0].strip() for line in f]
+    ids = [i for i in ids if i]
+    if len(set(ids)) != len(ids):
+        raise SystemExit(f"{path}: duplicate station ids")
+    return ids
+
+
+def exclude_stations(rows: list[dict], station_ids: list[str]) -> tuple[list[dict], dict]:
+    """Drop every row of the given stations at every date (database and extra rows alike). A listed
+    station with no rows is reported with 0, not an error: a holdout list spans corpus parts that a
+    given run may not load. Returns (kept rows, {station_id: rows dropped})."""
+    wanted = set(station_ids)
+    dropped = {sid: 0 for sid in station_ids}
+    kept = []
+    for r in rows:
+        if r["station_id"] in wanted:
+            dropped[r["station_id"]] += 1
+            continue
+        kept.append(r)
+    return kept, dropped
+
+
 def write_oof_csv(path: str, rows: list[dict], keep: list[int], y: np.ndarray, zones: list[str],
                   cv: dict, grid_col: str) -> int:
     """Per-row leave-region-out out-of-fold predictions (station_id, date, zone, region, grid value,
@@ -736,6 +763,9 @@ def main() -> None:
     parser.add_argument("--exclude-station-since", action="append", default=[], metavar="STATION:YYYY-MM-DD",
                         help="drop a station's rows dated on/after the date (unresolved recent record); repeatable; "
                              "recorded in metadata; only with --candidate-only")
+    parser.add_argument("--holdout-stations", default=None, metavar="PATH",
+                        help="drop every row of the stations listed in PATH at every date (the scorecard's "
+                             "holdout list, scorecard/v1/holdout_stations.txt); recorded in metadata")
     parser.add_argument("--save-oof-dir", default=None,
                         help="also write per-row leave-region-out OOF predictions to DIR/oof_{tmax,tmin}.csv.gz")
     args = parser.parse_args()
@@ -775,6 +805,16 @@ def main() -> None:
     if args.exclude_station_since:
         rows, excluded_station_rows = exclude_station_since(rows, args.exclude_station_since)
         print(f"Excluded station rows: {excluded_station_rows}")
+
+    holdout = None
+    if args.holdout_stations:
+        import hashlib
+        ids = read_holdout_stations(args.holdout_stations)
+        rows, dropped = exclude_stations(rows, ids)
+        with open(args.holdout_stations, "rb") as f:
+            holdout = {"path": os.path.basename(args.holdout_stations), "sha256": hashlib.sha256(f.read()).hexdigest(),
+                       "rows_dropped": dropped}
+        print(f"Holdout stations dropped: {dropped}")
 
     regime_sources = []
     if args.regime_features_csv:
@@ -859,6 +899,7 @@ def main() -> None:
         "feature_order": list(feature_order),
         "regime_features_sources": regime_sources,
         "excluded_station_rows": excluded_station_rows,
+        **({"holdout_stations": holdout} if holdout else {}),
         "targets": ["delta_tmax_c", "delta_tmin_c"],
         # Conformal calibration is per-target (tmax/tmin fit their own QRF
         # interval widths); predict_downscaled reads whichever target's

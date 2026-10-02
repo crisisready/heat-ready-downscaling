@@ -1,0 +1,10 @@
+# Corpus recipe for ds-2026.09-rf8b: ghcn_training plus GSOD BSh rows (rows_none: 28 IN/PK stations;
+# rows_break: 142 stations in 25 countries), base features, trainer QRF params. File hashes as in
+# rf8b's own metadata.json extra_rows_sources.
+model_version: ds-2026.09-rf8b
+feature_set: base
+extra_rows:
+  - name: rows_none.json
+    sha256: d892681d76f61ff8d3134af9b940239508b0455d507931999aad2eebd9fbef93
+  - name: rows_break.json
+    sha256: fa4e597a5ca872965fccdbf191357eab6fedea1b4623f747a7fd799d404eac98
