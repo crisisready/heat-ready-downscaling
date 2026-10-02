@@ -1,0 +1,21 @@
+station_id,reason,kept,distance_km
+AE7031,duplicate of another truth station (1 km),EC001404,0.018
+AE7031X,duplicate of another truth station (1 km),EC027460,0.028
+AE7244X,duplicate of another truth station (1 km),EC027481,0.0
+AE7261X,duplicate of another truth station (1 km),EC027484,0.147
+AE8018X,duplicate of another truth station (1 km),EC027489,0.0
+AE8293X,duplicate of another truth station (1 km),EC027507,0.0
+AE8300X,duplicate of another truth station (1 km),EC027508,0.028
+AE8414A,duplicate of another truth station (1 km),EC003969,0.026
+AE8416,duplicate of another truth station (1 km),EC000237,0.0
+AE8416,duplicate of another truth station (1 km),EC027518,0.056
+AE8416X,duplicate of another truth station (1 km),EC027517,0.034
+EC000237,duplicate of another truth station (1 km),EC027518,0.056
+SPM00008284,duplicate of another truth station (1 km),AE8414A,0.768
+SPM00008284,duplicate of another truth station (1 km),EC003969,0.789
+SPM00008359,duplicate of another truth station (1 km),EC000412,0.794
+SPW00014010,duplicate of another truth station (same WMO id),SP000009434,2.166
+USC00413060,duplicate of a training station (1 km),USR0000TFAL,0.41
+USC00413280,duplicate of another truth station (1 km),USW00023091,0.553
+USC00415893,duplicate of another truth station (1 km),USW00023023,0.091
+USC00417981,duplicate of another truth station (1 km),USC00415721,0.467

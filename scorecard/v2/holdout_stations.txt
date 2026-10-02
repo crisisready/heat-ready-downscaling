@@ -1,0 +1,13 @@
+# Scorecard v2 holdout: stations moved out of training so the scorecard can score them as unseen.
+# Every trainer run that should stay comparable with the scorecard drops these at every date
+# (train_downscaling.py --holdout-stations scorecard/v2/holdout_stations.txt).
+# Approved by Nishant 2026-10-01 ("8 South Asia (Recommended)"): 8 IN/PK GSOD stations chosen for
+# geographic spread (greedy max-min distance over the 27 IN/PK stations, Ahmedabad airport excluded).
+IN019261900  # Udaipur
+IN009070100  # Chitradurga
+PKM00041530  # Peshawar
+IN023351400  # Lucknow
+IN018103100  # Patiala
+IN005090100  # Dwarka
+IN012020100  # Akola
+PKM00041685  # Bar Khan

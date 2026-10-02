@@ -1,0 +1,12 @@
+# Declared before the scorer runs. This run calibrates scorecard v2; it does not re-decide rf8b
+# (its production promotion is held under its own brief).
+candidate: ds-2026.09-rf8b
+incumbent: ds-2026.09-rf6
+kind: model_version          # ships only on the full tier
+declared_at: "2026-10-02"
+aim:
+  # rf8b added 446k GSOD BSh rows; its aim is BSh tmax.
+  subset:
+    zones: [BSh]
+  metric: rmse_tmax
+  min_effect_c: 0.02

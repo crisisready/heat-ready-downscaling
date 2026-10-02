@@ -1,0 +1,48 @@
+# HeatReady out-of-time scorecard, version 2: v1 plus the C1 thin-zone pull stations (101 GHCN-D stations). Frozen: any change
+# to a value below is a version bump, and the incumbent is rescored first. Method: scorecard/v1/README.md.
+# Plan: heat-risk-data-api archive/plans/2026-10/2026-10-01-global-model-development-plan.md section 4.
+scorecard_version: "2.0.0"
+
+# Ship-rule constants (plan section 4, frozen before the first run).
+zone_tolerance_rmse_c: 0.10        # no zone (or pooled thin zones) may get worse than this, point estimate
+min_stations_per_zone: 8           # below this a zone pools into its zone group
+hot_day_quantile: 0.90             # hot days: grid tmax at or above the station-year's own p90 (ERA5-Land cell)
+
+# Fixed zone groups for pooling and for the raw ERA5-Land floor. A zone not listed falls to its
+# Koppen main letter (A tropical, B arid, C temperate, D/E cold).
+zone_groups:
+  arid: [BSh, BSk, BWh, BWk]
+  tropical: [Af, Am, Aw, As, tropical]
+  temperate: [Cfa, Cfb, Cfc, Csa, Csb, Csc, Cwa, Cwb, Cwc, temperate, subtropical]
+  cold: [Dfa, Dfb, Dfc, Dfd, Dsa, Dsb, Dsc, Dsd, Dwa, Dwb, Dwc, Dwd, ET, EF, polar]
+
+tiers:
+  fast:    # every candidate: cutoff 2024-12-31, score 2025
+    cutoffs: ["2024-12-31"]
+  full:    # model versions and new training sources: refit at each cutoff, deltas pooled
+    cutoffs: ["2021-12-31", "2022-12-31", "2023-12-31", "2024-12-31"]
+
+# Truth set: unseen stations, deduplicated (1 km), tagged. Built by scripts/scorecard_build_truth_set.py.
+truth_stations: scorecard/v2/truth_stations.csv
+holdout_stations: scorecard/v2/holdout_stations.txt
+dedupe_km: 1.0
+# Extra rows files that hold truth rows (the moved South Asia stations' GSOD records), by sha256.
+truth_extra_rows:
+  - name: rows_none.json
+    sha256: d892681d76f61ff8d3134af9b940239508b0455d507931999aad2eebd9fbef93
+  - name: thin_zone_rows.json      # C1 thin-zone pull 2026-10-02: 101 GHCN-D stations, 2023-2025 (E54)
+    sha256: d3783ec18cb1cbc9f6d1296a4120bb96035accf73b25a3b2d70c618e07fa1b46
+
+# Station-day manifest: every (station, date, target) of a truth station in a scored year with an
+# observed delta and a grid value. Written by `scripts/scorecard.py build-manifest`; the runner
+# refuses to score if the file's canonical sha256 differs from this value.
+manifest:
+  path: scorecard/v2/manifest.csv.gz
+  sha256: 63b6e7909ea8eb90d85c9def921fd879099061da383b71e41e58279163b03687
+
+# Report-only settings (never gate).
+bootstrap_reps: 1000
+distance_bands_km: [10, 50, 200]
+city_radius_km: 30
+min_city_stations: 5
+urban_ghsl_fraction_threshold: 0.5
