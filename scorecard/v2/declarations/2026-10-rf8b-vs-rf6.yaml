@@ -1,4 +1,4 @@
-# Declared before the scorer runs. This run calibrates scorecard v1; it does not re-decide rf8b
+# Declared before the scorer runs. This run calibrates scorecard v2; it does not re-decide rf8b
 # (its production promotion is held under its own brief).
 candidate: ds-2026.09-rf8b
 incumbent: ds-2026.09-rf6

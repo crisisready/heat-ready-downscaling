@@ -17,8 +17,9 @@ version bump (`scorecard/v2/`), and the incumbent is rescored first.
 
 ## Truth set
 
-`truth_stations.csv`: 237 stations, built by `scripts/scorecard_build_truth_set.py`.
+`truth_stations.csv`: 338 stations, built by `scripts/scorecard_build_truth_set.py` (v1: 237) and extended by `scripts/scorecard_extend_truth_set.py` (the 101 thin-zone stations).
 
+- 101 thin-zone stations (C1 pull, 2026-10-02): public-domain GHCN-D, 2023 and 2025 rows, picked per zone (Af15 Am15 Cwa15 Dfb13 Dwa13 Dfa12 Aw10 Cwb8) and deduplicated against training and v1 truth. Their rows are `thin_zone_rows.json`.
 - 229 stations whose first row in the corpus is in 2025. They have no row before the fast tier's
   cutoff, so they are unseen in space and time without moving anything.
 - 8 South Asian GSOD stations moved out of training on 2026-10-01 (`holdout_stations.txt`), chosen
@@ -53,7 +54,7 @@ station and reported those groups as unscored.)
    come from the served version's own metadata.json, which was fit on all of its data, so the gate
    a refit uses was chosen with the full corpus in view. The gate is pass or fail per zone, and rf6
    and rf8b agree on it everywhere (tmin falls back to the grid in As, BWh and Cwa for both).
-   Refitting the gate at each cutoff is a v2 item.
+   Refitting the gate at each cutoff is still open (a v3 item).
 4. Fast tier (every candidate): cutoff 2024-12-31, score 2025. The incumbent's predictions are
    cached, so a layer candidate supplies its own served deltas (fit before the cutoff) and scores in
    minutes.
@@ -96,20 +97,20 @@ Both subcommands read `ghcn_training` (SELECT only) through the trainer's own lo
 where the trainer runs, with the extra rows files named in the spec and recipes in `--data-dir`
 (checked by sha256).
 
-    python scripts/scorecard.py build-manifest --spec scorecard/v1/spec.yaml --data-dir DIR --out-dir OUT
-    python scripts/scorecard.py run --spec scorecard/v1/spec.yaml --tier fast \
-        --declaration scorecard/v1/declarations/2026-10-rf8b-vs-rf6.yaml \
+    python scripts/scorecard.py build-manifest --spec scorecard/v2/spec.yaml --data-dir DIR --out-dir OUT
+    python scripts/scorecard.py run --spec scorecard/v2/spec.yaml --tier fast \
+        --declaration scorecard/v2/declarations/2026-10-rf8b-vs-rf6.yaml \
         --incumbent-recipe scorecard/recipes/ds-2026.09-rf6.yaml --incumbent-metadata rf6/metadata.json \
         --candidate-recipe scorecard/recipes/ds-2026.09-rf8b.yaml --candidate-metadata rf8b/metadata.json \
         --data-dir DIR --cache-dir CACHE --out-dir OUT --n-jobs 8
 
 A production retrain that should stay comparable with the scorecard passes
-`--holdout-stations scorecard/v1/holdout_stations.txt` to `train_downscaling.py`.
+`--holdout-stations scorecard/v2/holdout_stations.txt` to `train_downscaling.py`.
 
 ## Open work
 
-- New stations for the zones without unseen coverage (tropical and cold groups, BWh, Cwa, Cwb,
-  Cfc), with India, Africa and Mexico as the sourcing targets.
+- More stations for the zones still thin (BWh, Cfc, and the 8 to 15 station thin-zone cohorts), with India,
+  Africa and Mexico as the sourcing targets. The tropical and cold groups gained stations in v2.
 - Rows for 2022 and 2024 at the main-table stations, so the full tier covers four years everywhere.
 - Station tagging is a first pass (name keywords for airports, one GHSL threshold for urban). Better
   airport matching (ICAO/WMO metadata) and WMO ids for the AEMET-coded stations are good
