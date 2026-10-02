@@ -214,7 +214,7 @@ def main(argv=None):
     plan = plan_clusters(stations, fetch_stations, _cluster_stations_by_bbox_cells)
     covariates_by_station, failed = run_cluster_covariates(
         plan, args.out_dir, args.cluster_workers, args.s3_prefix, args.max_clusters)
-    if failed or args.max_clusters:
+    if failed or any(f["station_id"] not in covariates_by_station for f in fetch_stations):
         logger.warning("covariates incomplete (failed clusters: %s; max_clusters=%s), no rows file written",
                        failed, args.max_clusters)
         return 1 if failed else 0
