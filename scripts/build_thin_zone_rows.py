@@ -232,6 +232,8 @@ def main(argv=None):
                    "ghcnd_coverage_by_year": coverage,
                    "start_date": args.start_date.isoformat(), "end_date": args.end_date.isoformat(),
                    "complete": not missing and not no_series}, f)
+    if args.s3_prefix:
+        _s3_cp(out, f"{args.s3_prefix}/thin_zone_rows.json")
     logger.info("wrote %s", out)
 
 
