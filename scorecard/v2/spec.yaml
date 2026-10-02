@@ -38,7 +38,7 @@ truth_extra_rows:
 # refuses to score if the file's canonical sha256 differs from this value.
 manifest:
   path: scorecard/v2/manifest.csv.gz
-  sha256: 8aca18889ad9a36a25e10341d52463d9fef166e6e41bb0c75ea07152d0f6caa0
+  sha256: 63b6e7909ea8eb90d85c9def921fd879099061da383b71e41e58279163b03687
 
 # Report-only settings (never gate).
 bootstrap_reps: 1000

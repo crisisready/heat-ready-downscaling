@@ -236,104 +236,104 @@ USW00023160,32.1317,-110.9564,BSh,arid,unseen_by_date,ghcn_training,yes,urban,US
 USW00053131,32.2394,-111.1697,BSh,arid,unseen_by_date,ghcn_training,no,rural,US,public,TUCSON 11 W
 USW00093138,33.8222,-116.5044,BSh,arid,unseen_by_date,ghcn_training,no,urban,US,public,PALM SPRINGS ASOS
 USW00093193,36.78,-119.7203,BSh,arid,unseen_by_date,ghcn_training,yes,urban,US,public,FRESNO YOSEMITE INTL
-CHM00059758,20.0,110.25,Aw,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,HAIKOU
-CHM00059948,18.217,109.583,Aw,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,SANYA
-UVM00065518,11.15,-1.15,Aw,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,PO
-BNM00065338,7.167,2.067,Aw,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,BOHICON
-GHM00065437,7.817,-0.033,Aw,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,KETE-KRACHI
-TH000048425,14.467,100.133,Aw,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,SUPHAN BURI
-TH000048450,14.017,99.533,Aw,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,KANCHANABURI
-THM00048453,13.667,100.617,Aw,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,BANG NA AGROMET
-CHM00056182,32.65,103.567,Cwb,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,SONGPAN
-SF003336820,-28.367,29.383,Cwb,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,VAN REENEN
-CHM00056462,29.0,101.5,Cwb,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,JIULONG
-CHM00056651,26.833,100.467,Cwb,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,LIJING
-CHM00056671,26.65,102.25,Cwb,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,HUILI
-CHM00056739,25.117,98.483,Cwb,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,TENGCHONG
-CHM00056951,23.95,100.217,Cwb,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,LINCANG
-CHM00057707,27.3,105.233,Cwb,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,BIJIE
-AM000037711,40.867,45.15,Dfa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,IDJEVAN
-CAN06130257,42.1034,-83.0945,Dfa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,AMHERSTBURG
-USC00060973,41.7944,-72.9319,Dfa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,BURLINGTON
-AM000037897,39.533,46.017,Dfa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,SISIAN
-CAN06133055,43.1836,-79.5583,Dfa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,GRIMSBY MOUNTAIN
-USC00110356,40.6633,-90.4447,Dfa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,AVON
-CAN06133362,42.0333,-82.9,Dfa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,HARROW CDA AUTO
-USC00110442,42.1153,-88.1639,Dfa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,BARRINGTON 3SW
-USC00110598,40.3444,-91.1125,Dfa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,BENTLEY
-CAN06139530,42.2761,-82.9553,Dfa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,WINDSOR A
-KZ000035344,49.95,60.133,Dfa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,KARABUTAK
-CAN0613P001,41.9486,-82.5189,Dfa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,POINT PELEE CS
-AM000037618,41.117,44.283,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,TASHIR
-CAN01067748,55.9333,-129.9833,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,STEWART A
-EN000026029,59.383,24.033,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,PAKRI
-FI000000304,60.1667,24.95,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,HELSINKI KAISANIEMI AWS
-KG000038353,42.83,74.58,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,BISHKEK
-MJE00175548,43.15,19.13,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,ZABLJAK
-NO000005350,60.3883,11.5603,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,NORD ODAL
-ROE00100898,47.6667,23.5,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,BAIA MARE
-SW000002361,62.6331,17.9331,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,HARNOSAND
-USC00050214,39.4992,-108.3808,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,ALTENBERN
-AM000037682,40.783,43.833,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,AMASIA
-FI000002963,60.8139,23.5006,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,JOKIOINEN JOKIOISTEN OBSERVATO
-USC00250365,41.5697,-101.6917,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,ARTHUR
-USC00251200,41.4083,-99.675,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,BROKEN BOW 2 W
-CHM00050788,47.233,131.983,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,FUJIN
-USC00258090,42.8389,-99.7781,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,SPRINGVIEW 2NW
-CHM00050854,46.383,125.317,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,ANDA
-USC00258751,42.8753,-100.5517,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,VALENTINE #1
-USC00258755,42.5703,-100.6933,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,VALENTINE NWR
-CHM00050953,45.75,126.767,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,HARBIN
-USC00396170,44.4419,-100.4172,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,OAHE DAM
-CHM00050968,45.217,127.967,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,SHANGZHI
-CHM00054094,44.567,129.6,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,MUDANJIANG
-CHM00054157,43.183,124.333,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,SIPING
-CHM00054236,42.417,122.533,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,ZHANGWU
-BP000091517,-9.417,159.967,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,HONIARA
-BXM00096315,4.944,114.928,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,yes,,,public,BRUNEI INTL
-CEM00043466,6.9,79.867,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,COLOMBO
-CS000081003,9.967,-83.017,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,PUERTO LIMON
-DRM00078458,19.75,-70.55,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,PUERTO PLATA
-FJM00091680,-17.7597,177.4447,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,yes,,,public,Nadi Airport
-GYM00081001,6.8,-58.15,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,GEORGETOWN
-MA000067095,-18.117,49.4,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,TOAMASINA
-NH000091554,-15.517,167.217,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,yes,,,public,PEKOA AIRPORT (SANT
-RP000098836,6.9,122.067,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,ZAMBOANGA
-BPW00080601,-9.4333,160.05,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,GUADALCANAL AAF
-CSM00078762,9.994,-84.209,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,yes,,,public,JUAN SANTAMARIA INTL
-NHM00091557,-17.699,168.32,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,PORT VILA BAUERFIELD
-RQC00665807,18.4308,-66.4661,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,MANATI 2 E
-RPM00098644,9.664,123.853,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,TAGBILARAN
-BHM00078583,17.539,-88.308,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,yes,,,public,PHILIP S W GOLDSON INTL
-BL000085141,-14.47,-67.57,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,RURRENABAQUE
-BMM00048062,20.133,92.873,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,SITTWE
-CHM00059855,19.233,110.467,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,QIONGHAI
-DRM00078479,18.567,-68.363,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,yes,,,public,PUNTA CANA INTL
-HO000078711,15.217,-83.8,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,PUERTO LEMPIRA
-IN099999901,11.667,92.717,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,PORT BLAIR
-IV000005592,4.42,-7.37,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,TABOU
-JM000078388,18.5,-77.917,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,MONTEGO BAY/SANGSTE
-TH000048480,12.6,102.117,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,CHANTHABURI
-BLM00085140,-14.3,-67.367,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,REYES
-BMM00048097,16.907,96.133,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,yes,,,public,YANGON INTL
-CEM00043441,7.467,80.367,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,KURUNEGALA
-DRM00078486,18.433,-69.883,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,SANTO DOMINGO
-JMM00078397,17.936,-76.788,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,yes,,,public,NORMAN MANLEY INTL
-ASN00031108,-17.1347,145.4281,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,WALKAMIN RESEARCH STATION
-BL000085365,-21.95,-63.65,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,YACUIBA
-BMM00048008,25.367,97.4,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,MYITKYINA
-CHM00054725,37.5,117.533,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,HUIMIN
-MCM00045011,22.15,113.592,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,yes,,,public,MACAU INTL
-NP000444540,27.7,85.367,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,yes,,,public,KATHMANDU AIRPORT
-PKM00041571,33.617,73.099,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,CHAKLALA
-TZ000063962,-10.667,35.583,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,SONGEA
-ASN00033013,-20.5534,147.8464,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,COLLINSVILLE POST OFFICE
-CHM00054776,37.4,122.683,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,CHENGSHANTOU
-NPM00044477,26.983,87.35,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,DHANKUTA
-PKM00041598,32.933,73.717,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,JHELUM
-ASN00033307,-19.4167,146.5364,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,WOOLSHED
-CHM00054823,36.6,117.05,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,JINAN
-PKM00041600,32.5,74.533,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,SIALKOT
-CHM00059838,19.1,108.617,Aw,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,DONGFANG
-CUW00011706,19.9,-75.15,Aw,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,GUANTANAMO BAY NAS
-NOE00105503,60.5669,9.1333,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,,,public,NESBYEN-TODOKK
+CHM00059758,20.0,110.25,Aw,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CH,public,HAIKOU
+CHM00059948,18.217,109.583,Aw,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,CH,public,SANYA
+UVM00065518,11.15,-1.15,Aw,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,UV,public,PO
+BNM00065338,7.167,2.067,Aw,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,BN,public,BOHICON
+GHM00065437,7.817,-0.033,Aw,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,GH,public,KETE-KRACHI
+TH000048425,14.467,100.133,Aw,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,TH,public,SUPHAN BURI
+TH000048450,14.017,99.533,Aw,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,TH,public,KANCHANABURI
+THM00048453,13.667,100.617,Aw,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,TH,public,BANG NA AGROMET
+CHM00056182,32.65,103.567,Cwb,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,CH,public,SONGPAN
+SF003336820,-28.367,29.383,Cwb,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,SF,public,VAN REENEN
+CHM00056462,29.0,101.5,Cwb,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CH,public,JIULONG
+CHM00056651,26.833,100.467,Cwb,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,CH,public,LIJING
+CHM00056671,26.65,102.25,Cwb,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CH,public,HUILI
+CHM00056739,25.117,98.483,Cwb,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,CH,public,TENGCHONG
+CHM00056951,23.95,100.217,Cwb,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,CH,public,LINCANG
+CHM00057707,27.3,105.233,Cwb,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,CH,public,BIJIE
+AM000037711,40.867,45.15,Dfa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,AM,public,IDJEVAN
+CAN06130257,42.1034,-83.0945,Dfa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CA,public,AMHERSTBURG
+USC00060973,41.7944,-72.9319,Dfa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,US,public,BURLINGTON
+AM000037897,39.533,46.017,Dfa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,AM,public,SISIAN
+CAN06133055,43.1836,-79.5583,Dfa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CA,public,GRIMSBY MOUNTAIN
+USC00110356,40.6633,-90.4447,Dfa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,US,public,AVON
+CAN06133362,42.0333,-82.9,Dfa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,CA,public,HARROW CDA AUTO
+USC00110442,42.1153,-88.1639,Dfa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,US,public,BARRINGTON 3SW
+USC00110598,40.3444,-91.1125,Dfa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,US,public,BENTLEY
+CAN06139530,42.2761,-82.9553,Dfa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,CA,public,WINDSOR A
+KZ000035344,49.95,60.133,Dfa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,KZ,public,KARABUTAK
+CAN0613P001,41.9486,-82.5189,Dfa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,CA,public,POINT PELEE CS
+AM000037618,41.117,44.283,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,AM,public,TASHIR
+CAN01067748,55.9333,-129.9833,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,CA,public,STEWART A
+EN000026029,59.383,24.033,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,EN,public,PAKRI
+FI000000304,60.1667,24.95,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,FI,public,HELSINKI KAISANIEMI AWS
+KG000038353,42.83,74.58,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,KG,public,BISHKEK
+MJE00175548,43.15,19.13,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,MJ,public,ZABLJAK
+NO000005350,60.3883,11.5603,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,NO,public,NORD ODAL
+ROE00100898,47.6667,23.5,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,RO,public,BAIA MARE
+SW000002361,62.6331,17.9331,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,SW,public,HARNOSAND
+USC00050214,39.4992,-108.3808,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,US,public,ALTENBERN
+AM000037682,40.783,43.833,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,AM,public,AMASIA
+FI000002963,60.8139,23.5006,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,FI,public,JOKIOINEN JOKIOISTEN OBSERVATO
+USC00250365,41.5697,-101.6917,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,US,public,ARTHUR
+USC00251200,41.4083,-99.675,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,US,public,BROKEN BOW 2 W
+CHM00050788,47.233,131.983,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CH,public,FUJIN
+USC00258090,42.8389,-99.7781,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,US,public,SPRINGVIEW 2NW
+CHM00050854,46.383,125.317,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CH,public,ANDA
+USC00258751,42.8753,-100.5517,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,US,public,VALENTINE #1
+USC00258755,42.5703,-100.6933,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,US,public,VALENTINE NWR
+CHM00050953,45.75,126.767,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CH,public,HARBIN
+USC00396170,44.4419,-100.4172,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,US,public,OAHE DAM
+CHM00050968,45.217,127.967,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CH,public,SHANGZHI
+CHM00054094,44.567,129.6,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CH,public,MUDANJIANG
+CHM00054157,43.183,124.333,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CH,public,SIPING
+CHM00054236,42.417,122.533,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,CH,public,ZHANGWU
+BP000091517,-9.417,159.967,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,BP,public,HONIARA
+BXM00096315,4.944,114.928,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,yes,urban,BX,public,BRUNEI INTL
+CEM00043466,6.9,79.867,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CE,public,COLOMBO
+CS000081003,9.967,-83.017,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,CS,public,PUERTO LIMON
+DRM00078458,19.75,-70.55,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,DR,public,PUERTO PLATA
+FJM00091680,-17.7597,177.4447,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,yes,urban,FJ,public,Nadi Airport
+GYM00081001,6.8,-58.15,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,GY,public,GEORGETOWN
+MA000067095,-18.117,49.4,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,MA,public,TOAMASINA
+NH000091554,-15.517,167.217,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,yes,urban,NH,public,PEKOA AIRPORT (SANT
+RP000098836,6.9,122.067,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,RP,public,ZAMBOANGA
+BPW00080601,-9.4333,160.05,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,BP,public,GUADALCANAL AAF
+CSM00078762,9.994,-84.209,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,yes,urban,CS,public,JUAN SANTAMARIA INTL
+NHM00091557,-17.699,168.32,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,NH,public,PORT VILA BAUERFIELD
+RQC00665807,18.4308,-66.4661,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,RQ,public,MANATI 2 E
+RPM00098644,9.664,123.853,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,RP,public,TAGBILARAN
+BHM00078583,17.539,-88.308,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,yes,urban,BH,public,PHILIP S W GOLDSON INTL
+BL000085141,-14.47,-67.57,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,BL,public,RURRENABAQUE
+BMM00048062,20.133,92.873,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,BM,public,SITTWE
+CHM00059855,19.233,110.467,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CH,public,QIONGHAI
+DRM00078479,18.567,-68.363,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,yes,rural,DR,public,PUNTA CANA INTL
+HO000078711,15.217,-83.8,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,HO,public,PUERTO LEMPIRA
+IN099999901,11.667,92.717,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,IN,public,PORT BLAIR
+IV000005592,4.42,-7.37,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,IV,public,TABOU
+JM000078388,18.5,-77.917,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,JM,public,MONTEGO BAY/SANGSTE
+TH000048480,12.6,102.117,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,TH,public,CHANTHABURI
+BLM00085140,-14.3,-67.367,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,BL,public,REYES
+BMM00048097,16.907,96.133,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,yes,urban,BM,public,YANGON INTL
+CEM00043441,7.467,80.367,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CE,public,KURUNEGALA
+DRM00078486,18.433,-69.883,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,DR,public,SANTO DOMINGO
+JMM00078397,17.936,-76.788,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,yes,rural,JM,public,NORMAN MANLEY INTL
+ASN00031108,-17.1347,145.4281,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,AS,public,WALKAMIN RESEARCH STATION
+BL000085365,-21.95,-63.65,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,BL,public,YACUIBA
+BMM00048008,25.367,97.4,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,BM,public,MYITKYINA
+CHM00054725,37.5,117.533,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CH,public,HUIMIN
+MCM00045011,22.15,113.592,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,yes,rural,MC,public,MACAU INTL
+NP000444540,27.7,85.367,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,yes,urban,NP,public,KATHMANDU AIRPORT
+PKM00041571,33.617,73.099,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,PK,public,CHAKLALA
+TZ000063962,-10.667,35.583,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,TZ,public,SONGEA
+ASN00033013,-20.5534,147.8464,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,AS,public,COLLINSVILLE POST OFFICE
+CHM00054776,37.4,122.683,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CH,public,CHENGSHANTOU
+NPM00044477,26.983,87.35,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,NP,public,DHANKUTA
+PKM00041598,32.933,73.717,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,PK,public,JHELUM
+ASN00033307,-19.4167,146.5364,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,AS,public,WOOLSHED
+CHM00054823,36.6,117.05,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CH,public,JINAN
+PKM00041600,32.5,74.533,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,PK,public,SIALKOT
+CHM00059838,19.1,108.617,Aw,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CH,public,DONGFANG
+CUW00011706,19.9,-75.15,Aw,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,CU,public,GUANTANAMO BAY NAS
+NOE00105503,60.5669,9.1333,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,NO,public,NESBYEN-TODOKK
