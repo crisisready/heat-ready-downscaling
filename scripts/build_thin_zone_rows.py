@@ -87,6 +87,9 @@ def main(argv=None):
     series_by_sid = ghcn.fetch_ghcn_daily_bulk_concurrent(
         [s["station_id"] for s in stations], args.start_date, args.end_date,
         checkpoint_path=os.path.join(args.out_dir, "ghcnd_checkpoint.jsonl"))
+    no_series = sorted(s["station_id"] for s in stations if not series_by_sid.get(s["station_id"]))
+    if no_series:  # a failed fetch and a genuinely empty station look the same here, so say so and mark incomplete
+        logger.warning("no GHCN-D series for %d station(s), left out: %s", len(no_series), no_series)
     stations = [s for s in stations if series_by_sid.get(s["station_id"])]
     coverage = {s["station_id"]: coverage_by_year(series_by_sid[s["station_id"]]) for s in stations}
 
@@ -124,10 +127,10 @@ def main(argv=None):
     out = os.path.join(args.out_dir, "thin_zone_rows.json")
     with open(out, "w") as f:
         json.dump({"rows": rows, "row_count": len(rows), "rows_by_station": dict(by_station),
-                   "obs_window_shift_days": shifts, "missing_era5": missing,
+                   "obs_window_shift_days": shifts, "missing_era5": missing, "no_ghcnd_series": no_series,
                    "ghcnd_coverage_by_year": coverage,
                    "start_date": args.start_date.isoformat(), "end_date": args.end_date.isoformat(),
-                   "complete": not missing}, f)
+                   "complete": not missing and not no_series}, f)
     logger.info("wrote %s", out)
 
 

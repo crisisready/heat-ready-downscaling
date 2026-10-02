@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
-def extend(v1_rows, selected, rows_payload, zone_of, group_of, airport_tag, hav_km, min_rows_year=2025):
+def extend(v1_rows, selected, rows_payload, zone_of, group_of, airport_tag, hav_km):
     have = {r["station_id"]: r for r in v1_rows}
     by_station = rows_payload["rows_by_station"]
     out = list(v1_rows)
