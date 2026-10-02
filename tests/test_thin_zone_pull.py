@@ -43,3 +43,21 @@ def test_read_stations_filters_and_rejects_duplicates(tmp_path):
 
 def test_coverage_by_year():
     assert coverage_by_year([{"date": "2023-01-01"}, {"date": "2023-01-02"}, {"date": "2025-01-01"}]) == {"2023": 2, "2025": 1}
+
+
+def test_plan_clusters_labels_and_order():
+    from build_thin_zone_rows import plan_clusters
+    stations = [{"station_id": "AAA", "fips": "US"}, {"station_id": "BBB", "fips": "US"}, {"station_id": "CCC", "fips": "CH"}]
+    fetch = [{"station_id": s["station_id"]} for s in stations]
+    plan = plan_clusters(stations, fetch, lambda c: [c[:1], c[1:]] if len(c) == 2 else [c])
+    assert [l for l, _ in plan] == ["thinzone_CH", "thinzone_US_c0", "thinzone_US_c1"]
+
+
+def test_run_cluster_covariates_resumes_from_saved_clusters(tmp_path):
+    import json
+    from build_thin_zone_rows import run_cluster_covariates
+    cdir = tmp_path / "clusters"
+    cdir.mkdir()
+    (cdir / "thinzone_US.json").write_text(json.dumps({"AAA": {"lst_warm_season_anomaly_c": 1.5}}))
+    cov, failed = run_cluster_covariates([("thinzone_US", [{"station_id": "AAA"}])], str(tmp_path), workers=1)
+    assert cov == {"AAA": {"lst_warm_season_anomaly_c": 1.5}} and failed == []
