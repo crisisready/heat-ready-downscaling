@@ -1,4 +1,5 @@
 import json
+from datetime import date
 import os
 import sys
 
@@ -135,3 +136,44 @@ def test_truth_overrides_replace_drop_and_null_tmin(tmp_path):
     assert rows[2]["delta_tmax_c"] == -1.0 and rows[2]["delta_tmin_c"] == 1.0
     with pytest.raises(SystemExit):
         scorecard.load_truth_overrides(str(p), "0" * 64)
+
+
+def test_trainer_end_to_end_gridbias_with_region_map_and_tmax_only_extra_rows(tmp_path):
+    from unittest.mock import patch
+
+    import train_downscaling as td
+    from test_train_downscaling import _make_rows
+    rows = _make_rows(80, ["US", "FR", "CH"], {"US": "Cfa", "FR": "Cfb", "CH": "Dwa"})
+    for r in rows:  # 4 stations per region, fixed positions, 20 days each in January
+        k = int(r["station_id"].split("_")[1])
+        r["station_id"] = f"{r['region']}_{k % 4}"
+        r["lat"], r["lon"] = 30.0 + (k % 4) * 0.5 + {"US": 0, "FR": 2, "CH": 4}[r["region"]], -100.0
+        r["date"] = date(2023, 1, 1 + k // 4)
+    extra = [{**r, "station_id": "KN_x", "region": "KN", "delta_tmin_c": None, "station_tmin_c": None,
+              "lat": 35.0, "date": r["date"].isoformat()} for r in rows[:20]]
+    xp = tmp_path / "extra.json"
+    xp.write_text(json.dumps({"complete": True, "rows": extra}))
+    mp = tmp_path / "map.json"
+    mp.write_text(json.dumps({"CH": "NE_ASIA", "KN": "NE_ASIA"}))
+    with patch.object(td, "load_training_rows", return_value=rows), \
+         patch.object(td, "_bucket_from_credentials", return_value="b"), \
+         patch.object(td, "_MIN_FOLD_TRAIN_ROWS", 10), \
+         patch.object(td, "save_model_artifacts") as save, \
+         patch("sys.argv", ["t", "--model-version", "x", "--candidate-only", "--feature-set", "gridbias",
+                            "--cv-region-map", str(mp), "--extra-rows-json", str(xp), "--cv-n-jobs", "1"]):
+        td.main()
+    _, _, bundle, meta = save.call_args[0]
+    assert meta["feature_order"][-2:] == ["grid_bias_prior_c", "grid_bias_support"]
+    assert meta["cv_region_map"] == {"CH": "NE_ASIA", "KN": "NE_ASIA"}
+    assert meta["grid_bias_prior"]["tmax"]["station_months"] > 0
+    assert "grid_bias_table_tmax" in bundle and "grid_bias_table_tmin" in bundle
+    assert set(meta["cv"]["leave_region_out"]["tmax"]["by_zone"]) >= {"Cfa", "Cfb", "Dwa"}
+
+
+def test_trainer_refuses_gridbias_without_candidate_only():
+    from unittest.mock import patch
+
+    import train_downscaling as td
+    with patch("sys.argv", ["t", "--model-version", "x", "--feature-set", "gridbias"]):
+        with pytest.raises(SystemExit):
+            td.main()
