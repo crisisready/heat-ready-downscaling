@@ -1,0 +1,14 @@
+# Declared before the scorer runs (chunk C-ref, 2026-10-04). Nishant chose in the worker pane ("Fix truth, refine"):
+# score on the corrected 2025 truth (v2b), where the bar is beating rf6 in Aw and Dwa with no regressions. The full
+# ship rule for this chunk is heat-risk-data-api research/aw-dwa-refine-pull/pass_bar.yaml.
+candidate: ds-2026.10-rf10gb
+incumbent: ds-2026.09-rf6
+kind: model_version          # ships only on the full tier
+declared_at: "2026-10-04"
+aim:
+  # rf10gb adds the grid-bias prior (grid_bias_prior_c, grid_bias_support) and 30 East Asian Dwa / West African Aw
+  # training stations (set a); its aim is Aw and Dwa tmax.
+  subset:
+    zones: [Aw, Dwa]
+  metric: rmse_tmax
+  min_effect_c: 0.05

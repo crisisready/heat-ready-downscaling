@@ -109,7 +109,41 @@ def load_rows(spec: dict, recipes: list[dict], data_dir: str) -> tuple[list[dict
         for r in rows[before:]:
             r["_src"] = name
         sources.append({"name": name, "sha256": sha, **counts})
+    ov = spec.get("truth_overrides")
+    if ov:
+        counts = apply_truth_overrides(rows, load_truth_overrides(_repo_path("", ov["path"]), ov["sha256"]))
+        sources.append({"name": os.path.basename(ov["path"]), "sha256": ov["sha256"], **counts})
     return rows, sources
+
+
+def load_truth_overrides(path: str, sha256: str) -> dict:
+    """{(station_id, date): tmax_c or None} from a truth-override CSV (station_id, date, tmax_c; empty = drop)."""
+    got = _sha256_file(path)
+    if got != sha256:
+        raise SystemExit(f"{path}: sha256 {got} does not match the frozen {sha256}")
+    with open(path, newline="") as f:
+        return {(r["station_id"], r["date"]): (float(r["tmax_c"]) if r["tmax_c"] else None) for r in csv.DictReader(f)}
+
+
+def apply_truth_overrides(rows: list[dict], overrides: dict) -> dict:
+    """Scorecard v2b: NOAA's 2025 GHCN-D source switch (SSOD v2, MFLAG H) puts a biased value in a truth row's
+    station tmax. A listed (station, date) takes the override as its station tmax, delta recomputed against the
+    row's own grid value, or loses both targets when the override is empty; tmin is dropped on every listed day.
+    Rows are changed in place; only truth stations are listed, and truth stations never train a recipe."""
+    replaced = dropped = 0
+    for r in rows:
+        k = (r["station_id"], str(r["date"])[:10])
+        if k not in overrides:
+            continue
+        v = overrides[k]
+        if v is None or r.get("grid_tmax_c") is None:
+            r["station_tmax_c"] = r["delta_tmax_c"] = None
+            dropped += 1
+        else:
+            r["station_tmax_c"], r["delta_tmax_c"] = v, v - r["grid_tmax_c"]
+            replaced += 1
+        r["station_tmin_c"] = r["delta_tmin_c"] = None
+    return {"overrides": len(overrides), "rows_replaced": replaced, "rows_dropped": dropped}
 
 
 # ---------------------------------------------------------------- manifest

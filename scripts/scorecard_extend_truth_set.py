@@ -21,7 +21,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
-def extend(v1_rows, selected, rows_payload, zone_of, group_of, airport_tag, hav_km):
+def extend(v1_rows, selected, rows_payload, zone_of, group_of, airport_tag, hav_km,
+           origin="thin_zone_pull_2026-10-02", source="ghcnd_thin_zone_pull"):
     have = {r["station_id"]: r for r in v1_rows}
     by_station = rows_payload["rows_by_station"]
     out = list(v1_rows)
@@ -42,7 +43,7 @@ def extend(v1_rows, selected, rows_payload, zone_of, group_of, airport_tag, hav_
             continue
         zone = zone_of(lat, lon)
         out.append({"station_id": sid, "lat": lat, "lon": lon, "zone": zone, "zone_group": group_of(zone),
-                    "origin": "thin_zone_pull_2026-10-02", "source": "ghcnd_thin_zone_pull",
+                    "origin": origin, "source": source,
                     "airport": airport_tag(s.get("name")), "setting": "", "region": "",
                     "visibility": "public", "name": s.get("name", "")})
     return out, skipped
@@ -55,6 +56,8 @@ def main():
     ap.add_argument("--rows", required=True)
     ap.add_argument("--spec", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--origin", default="thin_zone_pull_2026-10-02")
+    ap.add_argument("--source", default="ghcnd_thin_zone_pull")
     args = ap.parse_args()
     from heatready_downscaling.koppen import koppen_climate_zone
     from heatready_downscaling.scorecard import load_spec, zone_group
@@ -66,14 +69,15 @@ def main():
         selected = list(csv.DictReader(f))
     with open(args.rows) as f:
         payload = json.load(f)
-    out, skipped = extend(v1, selected, payload, koppen_climate_zone, lambda z: zone_group(z, spec), airport_tag, hav_km)
+    out, skipped = extend(v1, selected, payload, koppen_climate_zone, lambda z: zone_group(z, spec), airport_tag, hav_km,
+                          args.origin, args.source)
     with open(args.out, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(v1[0].keys()))
         w.writeheader()
         w.writerows(out)
     from collections import Counter
     print(f"v1 {len(v1)} + new {len(out) - len(v1)} = {len(out)}; skipped {skipped}")
-    print(Counter(r["zone"] for r in out if r["origin"].startswith("thin_zone")).most_common())
+    print(Counter(r["zone"] for r in out if r["origin"] == args.origin).most_common())
 
 
 if __name__ == "__main__":

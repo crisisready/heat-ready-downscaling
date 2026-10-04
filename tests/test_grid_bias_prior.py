@@ -114,3 +114,24 @@ def test_scorecard_grid_bias_copies_rows_and_uses_train_table():
     tr2, te2 = scorecard.attach_grid_bias_for_fit(train, test, "tmax")
     assert "grid_bias_prior_c" not in train[0] and "grid_bias_prior_c" not in test[0]
     assert te2[0]["grid_bias_prior_c"] > 0  # from A and B only; the test station's own -5 never enters
+
+
+def test_truth_overrides_replace_drop_and_null_tmin(tmp_path):
+    import hashlib
+    import scorecard
+    p = tmp_path / "o.csv"
+    p.write_text("station_id,date,tmax_c\nA,2025-01-01,30.0\nA,2025-01-02,\n")
+    ov = scorecard.load_truth_overrides(str(p), hashlib.sha256(p.read_bytes()).hexdigest())
+    rows = [{"station_id": "A", "date": "2025-01-01", "grid_tmax_c": 28.0, "station_tmax_c": 27.0, "delta_tmax_c": -1.0,
+             "station_tmin_c": 20.0, "delta_tmin_c": 1.0},
+            {"station_id": "A", "date": "2025-01-02", "grid_tmax_c": 28.0, "station_tmax_c": 27.0, "delta_tmax_c": -1.0,
+             "station_tmin_c": 20.0, "delta_tmin_c": 1.0},
+            {"station_id": "A", "date": "2025-01-03", "grid_tmax_c": 28.0, "station_tmax_c": 27.0, "delta_tmax_c": -1.0,
+             "station_tmin_c": 20.0, "delta_tmin_c": 1.0}]
+    counts = scorecard.apply_truth_overrides(rows, ov)
+    assert counts == {"overrides": 2, "rows_replaced": 1, "rows_dropped": 1}
+    assert rows[0]["delta_tmax_c"] == pytest.approx(2.0) and rows[0]["delta_tmin_c"] is None
+    assert rows[1]["delta_tmax_c"] is None and rows[1]["delta_tmin_c"] is None
+    assert rows[2]["delta_tmax_c"] == -1.0 and rows[2]["delta_tmin_c"] == 1.0
+    with pytest.raises(SystemExit):
+        scorecard.load_truth_overrides(str(p), "0" * 64)
