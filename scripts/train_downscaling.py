@@ -49,8 +49,9 @@ from datetime import date, datetime
 import numpy as np
 
 from heatready_downscaling.contract import aoa_dissimilarity, feature_importance_weights
-from heatready_downscaling.features import (FEATURE_ORDER, REGIME_FEATURES, SUPPORTED_FEATURE_ORDERS,
-                                            build_feature_matrix)
+from heatready_downscaling import grid_bias_prior
+from heatready_downscaling.features import (FEATURE_ORDER, GRID_BIAS_FEATURES, REGIME_FEATURES,
+                                            SUPPORTED_FEATURE_ORDERS, build_feature_matrix)
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CREDENTIALS_FILE = os.path.join(REPO_ROOT, "credentials.yaml")
@@ -307,6 +308,7 @@ def build_training_feature_matrix(
             "koppen_main_group_code": r.get("koppen_main_group_code"),
             "nighttime_wind_ms": r.get("nighttime_wind_ms"),
             **{c: r.get(c) for c in REGIME_FEATURES},
+            **{c: r.get(c) for c in GRID_BIAS_FEATURES},
         }
         for r in rows
     ]
@@ -340,9 +342,57 @@ def build_training_feature_matrix(
     return X, y, regions, zones, lons, lats
 
 
+def attach_grid_bias(rows: list[dict], target: str) -> dict:
+    """Set grid_bias_prior_c / grid_bias_support on every row for `target`, from a station-month table built
+    from all of `rows` (a station never informs its own prior; see grid_bias_prior). Returns the table, which
+    is what serving would compute the prior from."""
+    delta_col = "delta_tmax_c" if target == "tmax" else "delta_tmin_c"
+    table = grid_bias_prior.station_month_table([r["station_id"] for r in rows], [r["lat"] for r in rows],
+                                                [r["lon"] for r in rows], [r["date"] for r in rows],
+                                                [r.get(delta_col) for r in rows])
+    prior, support = grid_bias_prior.priors_for_rows(table, [r["lat"] for r in rows], [r["lon"] for r in rows],
+                                                     [r["date"] for r in rows])
+    for r, p, w in zip(rows, prior, support):
+        r["grid_bias_prior_c"], r["grid_bias_support"] = float(p), float(w)
+    return table
+
+
+def grid_bias_context(rows: list[dict], keep: list[int], feature_order: tuple) -> dict | None:
+    """What a CV fold needs to rebuild the grid-bias columns from its own training rows, or None when the
+    feature order has none."""
+    if GRID_BIAS_FEATURES[0] not in feature_order:
+        return None
+    return {"cols": tuple(feature_order.index(c) for c in GRID_BIAS_FEATURES),
+            "station_id": [rows[i]["station_id"] for i in keep], "lat": [rows[i]["lat"] for i in keep],
+            "lon": [rows[i]["lon"] for i in keep], "date": [rows[i]["date"] for i in keep]}
+
+
+def refit_grid_bias_columns(X: np.ndarray, y: np.ndarray, train_mask: np.ndarray, ctx: dict) -> np.ndarray:
+    """X with the grid-bias columns recomputed from the rows in train_mask alone, so a held-out region's
+    priors never see its own stations (training rows still skip their own site)."""
+    idx = np.flatnonzero(train_mask)
+    table = grid_bias_prior.station_month_table([ctx["station_id"][i] for i in idx], [ctx["lat"][i] for i in idx],
+                                                [ctx["lon"][i] for i in idx], [ctx["date"][i] for i in idx],
+                                                y[idx].tolist())
+    prior, support = grid_bias_prior.priors_for_rows(table, ctx["lat"], ctx["lon"], ctx["date"])
+    X = X.copy()
+    X[:, ctx["cols"][0]], X[:, ctx["cols"][1]] = prior, support
+    return X
+
+
+def apply_cv_region_map(regions: list[str], path: str | None) -> tuple[list[str], dict | None]:
+    """Group FIPS regions into one leave-region-out fold each ({"CH": "NE_ASIA", "KN": "NE_ASIA", ...}), so a
+    whole region the model must generalise to is held out at once. Unlisted regions stay their own fold."""
+    if not path:
+        return regions, None
+    with open(path) as f:
+        mapping = json.load(f)
+    return [mapping.get(r, r) for r in regions], mapping
+
+
 def _fit_one_qrf_fold(
     held_region: str, X: np.ndarray, y: np.ndarray, regions_arr: np.ndarray,
-    qrf_params: dict, min_fold_train_rows: int,
+    qrf_params: dict, min_fold_train_rows: int, grid_bias_ctx: dict | None = None,
 ) -> dict | None:
     """
     Fit + score ONE leave-region-out fold. Standalone (not a closure) and
@@ -363,6 +413,8 @@ def _fit_one_qrf_fold(
     train_mask = ~test_mask
     if train_mask.sum() < min_fold_train_rows or test_mask.sum() == 0:
         return None
+    if grid_bias_ctx is not None:
+        X = refit_grid_bias_columns(X, y, train_mask, grid_bias_ctx)
 
     model = RandomForestQuantileRegressor(**qrf_params).fit(X[train_mask], y[train_mask])
     preds = model.predict(X[test_mask], quantiles=[0.025, 0.5, 0.975])
@@ -379,7 +431,8 @@ def _fit_one_qrf_fold(
     }
 
 
-def leave_region_out_cv(X: np.ndarray, y: np.ndarray, regions: list[str], n_jobs: int = -1) -> dict:
+def leave_region_out_cv(X: np.ndarray, y: np.ndarray, regions: list[str], n_jobs: int = -1,
+                        grid_bias_ctx: dict | None = None) -> dict:
     """
     Spatial leave-region-out CV (Roberts et al. 2017 -- never a random
     split, since neighboring station-days are spatially correlated and
@@ -411,7 +464,7 @@ def leave_region_out_cv(X: np.ndarray, y: np.ndarray, regions: list[str], n_jobs
     fold_qrf_params = {**_QRF_PARAMS, "n_jobs": 1}
 
     results = Parallel(n_jobs=n_jobs)(
-        delayed(_fit_one_qrf_fold)(region, X, y, regions_arr, fold_qrf_params, _MIN_FOLD_TRAIN_ROWS)
+        delayed(_fit_one_qrf_fold)(region, X, y, regions_arr, fold_qrf_params, _MIN_FOLD_TRAIN_ROWS, grid_bias_ctx)
         for region in unique_regions
     )
 
@@ -766,13 +819,20 @@ def main() -> None:
     parser.add_argument("--holdout-stations", default=None, metavar="PATH",
                         help="drop every row of the stations listed in PATH at every date (the scorecard's "
                              "holdout list, scorecard/v1/holdout_stations.txt); recorded in metadata")
+    parser.add_argument("--cv-region-map", default=None, metavar="JSON",
+                        help="group FIPS regions into single leave-region-out folds, e.g. {\"CH\": \"NE_ASIA\"}; "
+                             "recorded in metadata; only with --candidate-only")
     parser.add_argument("--save-oof-dir", default=None,
                         help="also write per-row leave-region-out OOF predictions to DIR/oof_{tmax,tmin}.csv.gz")
     args = parser.parse_args()
     if args.exclude_station_since and not args.candidate_only:
         raise SystemExit("--exclude-station-since is only allowed with --candidate-only")
-    if args.feature_set != "base" and not (args.candidate_only and args.regime_features_csv):
+    if args.feature_set == "regime" and not (args.candidate_only and args.regime_features_csv):
         raise SystemExit("--feature-set regime needs --candidate-only and at least one --regime-features-csv")
+    if args.feature_set == "gridbias" and not args.candidate_only:
+        raise SystemExit("--feature-set gridbias is only allowed with --candidate-only")
+    if args.cv_region_map and not args.candidate_only:
+        raise SystemExit("--cv-region-map is only allowed with --candidate-only")
     feature_order = SUPPORTED_FEATURE_ORDERS[args.feature_set]
     if args.extra_rows_json and not args.candidate_only:
         raise SystemExit("--extra-rows-json trains on rows that aren't in ghcn_training; it is only allowed "
@@ -834,16 +894,27 @@ def main() -> None:
     metadata_cv_db_rows: dict = {}
     metadata_conformal: dict = {}
     ood_thresholds: list[float] = []
+    cv_region_map = None
+    grid_bias_meta = {}
 
     for target in ("tmax", "tmin"):
         print(f"\n=== target: delta_{target}_c ===")
+        if "grid_bias_prior_c" in feature_order:
+            table = attach_grid_bias(rows, target)
+            artifact_bundle[f"grid_bias_table_{target}"] = grid_bias_prior.to_json(table)
+            grid_bias_meta[target] = {"station_months": int(sum(len(v[0]) for v in table.values()))}
         X, y, regions, zones, lons, lats, keep = build_training_feature_matrix(rows, target, return_keep=True,
                                                                                feature_order=feature_order)
+        regions, cv_region_map = apply_cv_region_map(regions, args.cv_region_map)
         print(f"[{target}] {len(y)} usable row(s) across {len(set(regions))} region(s), {len(set(zones))} climate zone(s)")
 
-        cv = leave_region_out_cv(X, y, regions, n_jobs=args.cv_n_jobs)
-        print(f"[{target}] running regression-kriging comparison baseline...")
-        kriging_oof_median = regression_kriging_cv(X, y, regions, lons, lats, n_jobs=args.cv_n_jobs)
+        gb_ctx = grid_bias_context(rows, keep, feature_order)
+        cv = leave_region_out_cv(X, y, regions, n_jobs=args.cv_n_jobs, grid_bias_ctx=gb_ctx)
+        if gb_ctx is None:
+            print(f"[{target}] running regression-kriging comparison baseline...")
+            kriging_oof_median = regression_kriging_cv(X, y, regions, lons, lats, n_jobs=args.cv_n_jobs)
+        else:  # its folds would see the full-data grid-bias columns; it is a comparison baseline only, skip it
+            kriging_oof_median = None
         zone_metrics = cv_metrics_by_zone(y, zones, cv, kriging_oof_median=kriging_oof_median)
         if extra_sources:
             # The same out-of-fold predictions, scored on ghcn_training's own rows only (extra rows
@@ -898,6 +969,11 @@ def main() -> None:
         "trained_at": datetime.utcnow().isoformat() + "Z",
         "feature_order": list(feature_order),
         "regime_features_sources": regime_sources,
+        **({"grid_bias_prior": {"length_km": grid_bias_prior.LENGTH_KM, "radius_km": grid_bias_prior.RADIUS_KM,
+                                "same_site_km": grid_bias_prior.SAME_SITE_KM,
+                                "shrink_weight": grid_bias_prior.SHRINK_WEIGHT,
+                                "min_days": grid_bias_prior.MIN_DAYS, **grid_bias_meta}} if grid_bias_meta else {}),
+        **({"cv_region_map": cv_region_map} if cv_region_map else {}),
         "excluded_station_rows": excluded_station_rows,
         **({"holdout_stations": holdout} if holdout else {}),
         "targets": ["delta_tmax_c", "delta_tmin_c"],

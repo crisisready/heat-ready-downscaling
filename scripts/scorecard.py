@@ -72,9 +72,10 @@ def load_recipe(path: str) -> dict:
     for key in ("model_version", "feature_set", "extra_rows"):
         if key not in recipe:
             raise SystemExit(f"recipe {path} missing {key!r}")
-    if recipe["feature_set"] != "base":
-        raise SystemExit("scorecard v1 refits base-feature recipes only; a regime recipe needs its covariate "
+    if recipe["feature_set"] not in ("base", "gridbias"):
+        raise SystemExit("the scorecard refits base and gridbias recipes only; a regime recipe needs its covariate "
                          "CSVs plumbed through first")
+    recipe.setdefault("cv_region_map", None)
     return recipe
 
 
@@ -224,16 +225,35 @@ def _cache_key(parts: dict) -> str:
     return hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()[:16]
 
 
+def attach_grid_bias_for_fit(train_rows: list[dict], test_rows: list[dict], target: str) -> tuple[list, list]:
+    """Copies of train_rows and test_rows carrying grid_bias_prior_c / grid_bias_support built from
+    train_rows alone (the cutoff corpus without truth stations), as the trainer does for its final fit.
+    Copies, so the incumbent's rows (and its cache fingerprint) are never touched."""
+    import train_downscaling as td
+    from heatready_downscaling import grid_bias_prior as gbp
+    train_rows = [dict(r) for r in train_rows]
+    test_rows = [dict(r) for r in test_rows]
+    table = td.attach_grid_bias(train_rows, target)
+    prior, support = gbp.priors_for_rows(table, [r["lat"] for r in test_rows], [r["lon"] for r in test_rows],
+                                         [r["date"] for r in test_rows])
+    for r, p, w in zip(test_rows, prior, support):
+        r["grid_bias_prior_c"], r["grid_bias_support"] = float(p), float(w)
+    return train_rows, test_rows
+
+
 def served_predictions(train_rows: list[dict], test_rows: list[dict], target: str, metadata: dict,
-                       n_jobs: int) -> list[dict]:
+                       n_jobs: int, feature_set: str = "base") -> list[dict]:
     """Fit the recipe's QRF on train_rows and return the SERVED result for each test row: the DS
     serving contract with this version's own CV gate (from its metadata.json)."""
     import train_downscaling as td
     from quantile_forest import RandomForestQuantileRegressor
 
     from heatready_downscaling.contract import QRFModelAdapter, derive_zones_passing_cv_gate
-    from heatready_downscaling.features import FEATURE_ORDER
+    from heatready_downscaling.features import SUPPORTED_FEATURE_ORDERS
 
+    FEATURE_ORDER = SUPPORTED_FEATURE_ORDERS[feature_set]
+    if feature_set == "gridbias":
+        train_rows, test_rows = attach_grid_bias_for_fit(train_rows, test_rows, target)
     X, y, *_ = td.build_training_feature_matrix(train_rows, target, feature_order=FEATURE_ORDER)
     if len(y) < td._MIN_FOLD_TRAIN_ROWS:
         return []
@@ -268,7 +288,7 @@ def recipe_predictions(rows, recipe, metadata, cutoff, target, truth_ids, test_r
                 preds[(rec["station_id"], rec["date"])] = (float(rec["served_delta"]),
                                                           float(rec["ci95"]) if rec["ci95"] else float("nan"))
         return preds, {"cache": os.path.basename(path), "cache_hit": True, "sha256": _sha256_file(path)}
-    results = served_predictions(train, test_rows, target, metadata, n_jobs)
+    results = served_predictions(train, test_rows, target, metadata, n_jobs, recipe["feature_set"])
     if not results:
         return {}, {"cache": None, "cache_hit": False, "train_rows": len(train),
                     "note": "fewer training rows than the trainer's minimum before this cutoff"}
@@ -353,6 +373,8 @@ def cmd_run(args) -> None:
                  "trainer_sha256": _sha256_file(td.__file__),
                  "contract_sha256": _sha256_file(os.path.join(REPO_ROOT, "src/heatready_downscaling/contract.py")),
                  "features_sha256": _sha256_file(os.path.join(REPO_ROOT, "src/heatready_downscaling/features.py")),
+                 **({"grid_bias_prior_sha256": _sha256_file(os.path.join(REPO_ROOT, "src/heatready_downscaling/grid_bias_prior.py"))}
+                    if "gridbias" in {inc["feature_set"], (cand or {}).get("feature_set")} else {}),
                  "truth_stations_sha256": _sha256_file(_repo_path(args.spec, spec["truth_stations"])),
                  "sources": sorted((s["name"], s["sha256"]) for s in sources)}
 
@@ -408,6 +430,9 @@ def cmd_run(args) -> None:
     if not frames:
         raise SystemExit("nothing scoreable on this tier")
     df = pd.concat(frames, ignore_index=True)
+    if args.dump_rows:  # per station-day served deltas, for recomputing any number outside the scorer
+        os.makedirs(args.out_dir, exist_ok=True)
+        df.to_csv(os.path.join(args.out_dir, f"rows_{args.tier}.csv.gz"), index=False)
     st = pd.DataFrame(stations)
     st["lat"], st["lon"] = st["lat"].astype(float), st["lon"].astype(float)
     clusters = sc.city_clusters(st, float(spec.get("city_radius_km", 30)))
@@ -453,6 +478,7 @@ def main() -> None:
     r.add_argument("--cache-dir", required=True)
     r.add_argument("--out-dir", required=True)
     r.add_argument("--n-jobs", type=int, default=-1)
+    r.add_argument("--dump-rows", action="store_true", help="also write the scored station-day rows to rows_<tier>.csv.gz")
     args = p.parse_args()
     if args.cmd == "run" and args.candidate_recipe and not args.candidate_metadata:
         raise SystemExit("--candidate-recipe needs --candidate-metadata (its CV gate)")
