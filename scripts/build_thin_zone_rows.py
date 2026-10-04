@@ -9,7 +9,13 @@ ghcn.fetch_ghcn_daily_bulk_concurrent (same QC-flag path as the main corpus). Gr
 covariates come from the same helpers build_gsod_bsh_rows.py and build_training_set.py use, and rows are
 assembled by build_gsod_bsh_rows.assemble_rows, so a row here is built exactly as every other ghcn_training row.
 
-Output is a JSON file of rows (not a database write). The rows go to the scorecard's unseen set only.
+GSOD stations (chunk C-ref, 2026-10-04): a selection row with source=gsod and usaf/wban columns takes its
+observations from NOAA GSOD instead (build_gsod_bsh_rows.parse_gsod_csv, same parsing and plausibility checks), and
+tmax_only=True nulls that station's tmin target (GSOD's 00-24 UTC day cuts across the morning minimum east of about
+UTC+4). Rows without a source column, or source=ghcnd, are fetched from GHCN-D as before.
+
+Output is a JSON file of rows (not a database write). The rows go to the scorecard's unseen set, or to
+train_downscaling.py --extra-rows-json.
 
 Environment and PYTHONPATH as build_gsod_bsh_rows.py (heat-risk-data-api/src on PYTHONPATH).
 
@@ -48,9 +54,16 @@ def read_stations(path, only=None):
                 elev = float(r["elev"])
             except (KeyError, TypeError, ValueError):
                 elev = None
+            source = (r.get("source") or "ghcnd").strip()
+            if source not in ("ghcnd", "gsod"):
+                raise ValueError(f"{r['id']}: unknown source {source!r}")
+            if source == "gsod" and not (r.get("usaf") and r.get("wban")):
+                raise ValueError(f"{r['id']}: source=gsod needs usaf and wban")
             stations.append({"station_id": r["id"], "lat": float(r["lat"]), "lon": float(r["lon"]),
                              "elevation_m": None if elev is None or elev <= -999 else elev,
-                             "name": r.get("name", ""), "fips": r["id"][:2], "zone": r.get("zone", "")})
+                             "name": r.get("name", ""), "fips": r["id"][:2], "zone": r.get("zone", ""),
+                             "source": source, "usaf": r.get("usaf"), "wban": r.get("wban"),
+                             "tmax_only": (r.get("tmax_only") or "").strip().lower() == "true"})
     ids = [s["station_id"] for s in stations]
     if len(ids) != len(set(ids)):
         raise ValueError("duplicate station ids in the selection CSV")
@@ -85,6 +98,36 @@ def _write_json_atomic(path, obj):
     with open(tmp, "w") as f:
         json.dump(obj, f)
     os.replace(tmp, path)
+
+
+def fetch_gsod_series(stations, start_date, end_date, out_dir):
+    """GSOD observation series for source=gsod stations, by station id, through build_gsod_bsh_rows' on-disk cache
+    (the current year is always refetched). Returns (series_by_sid, failed 'usafwban/year' fetches)."""
+    from build_gsod_bsh_rows import GSOD_URL, _cached, parse_gsod_csv
+    series_by_sid, failed = {}, []
+    this_year = date.today().year
+    lo, hi = start_date.isoformat(), end_date.isoformat()
+    for s in stations:
+        series = []
+        for year in range(start_date.year, end_date.year + 1):
+            try:
+                body = _cached(out_dir, f"gsod/{year}/{s['usaf']}{s['wban']}.csv",
+                               GSOD_URL.format(year=year, usaf=s["usaf"], wban=s["wban"]), cache=year < this_year)
+            except Exception as exc:  # noqa: BLE001 -- one station-year must not end the run
+                logger.warning("GSOD %s%s %d: fetch failed, year left out: %r", s["usaf"], s["wban"], year, exc)
+                failed.append(f"{s['usaf']}{s['wban']}/{year}")
+                continue
+            if body:
+                series.extend(parse_gsod_csv(body.decode("latin-1")))
+        series_by_sid[s["station_id"]] = [o for o in series if lo <= o["date"] <= hi]
+    return series_by_sid, failed
+
+
+def apply_tmax_only(rows, stations):
+    """Null the tmin target for rows of tmax_only stations (build_gsod_bsh_rows.tmax_only, per station)."""
+    from build_gsod_bsh_rows import tmax_only
+    ids = {s["station_id"] for s in stations if s.get("tmax_only")}
+    return [tmax_only([r])[0] if r["station_id"] in ids else r for r in rows]
 
 
 def plan_clusters(stations, fetch_stations, cluster_fn):
@@ -185,12 +228,16 @@ def main(argv=None):
     stations = read_stations(args.stations, set(args.station_ids) if args.station_ids else None)
     logger.info("%d station(s)", len(stations))
 
+    ghcnd_ids = [s["station_id"] for s in stations if s["source"] == "ghcnd"]
     series_by_sid = ghcn.fetch_ghcn_daily_bulk_concurrent(
-        [s["station_id"] for s in stations], args.start_date, args.end_date,
-        checkpoint_path=os.path.join(args.out_dir, "ghcnd_checkpoint.jsonl"))
+        ghcnd_ids, args.start_date, args.end_date,
+        checkpoint_path=os.path.join(args.out_dir, "ghcnd_checkpoint.jsonl")) if ghcnd_ids else {}
+    gsod_series, failed_gsod = fetch_gsod_series([s for s in stations if s["source"] == "gsod"],
+                                                 args.start_date, args.end_date, args.out_dir)
+    series_by_sid.update(gsod_series)
     no_series = sorted(s["station_id"] for s in stations if not series_by_sid.get(s["station_id"]))
     if no_series:  # a failed fetch and a genuinely empty station look the same here, so say so and mark incomplete
-        logger.warning("no GHCN-D series for %d station(s), left out: %s", len(no_series), no_series)
+        logger.warning("no GHCN-D/GSOD series for %d station(s), left out: %s", len(no_series), no_series)
     stations = [s for s in stations if series_by_sid.get(s["station_id"])]
     coverage = {s["station_id"]: coverage_by_year(series_by_sid[s["station_id"]]) for s in stations}
 
@@ -221,6 +268,7 @@ def main(argv=None):
 
     rows, shifts = assemble_rows(stations, series_by_sid, grid_by_station, humidity_by_station,
                                  wind_by_station, covariates_by_station)
+    rows = apply_tmax_only(rows, stations)
     by_station = defaultdict(int)
     for r in rows:
         by_station[r["station_id"]] += 1
@@ -230,8 +278,11 @@ def main(argv=None):
         json.dump({"rows": rows, "row_count": len(rows), "rows_by_station": dict(by_station),
                    "obs_window_shift_days": shifts, "missing_era5": missing, "no_ghcnd_series": no_series,
                    "ghcnd_coverage_by_year": coverage,
+                   "source_by_station": {s["station_id"]: s["source"] for s in stations},
+                   "tmax_only_stations": sorted(s["station_id"] for s in stations if s["tmax_only"]),
+                   "failed_gsod_fetches": failed_gsod,
                    "start_date": args.start_date.isoformat(), "end_date": args.end_date.isoformat(),
-                   "complete": not missing and not no_series}, f)
+                   "complete": not missing and not no_series and not failed_gsod}, f)
     if args.s3_prefix:
         _s3_cp(out, f"{args.s3_prefix}/thin_zone_rows.json")
     logger.info("wrote %s", out)
