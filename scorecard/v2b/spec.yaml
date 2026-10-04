@@ -48,7 +48,7 @@ truth_overrides:
 # refuses to score if the file's canonical sha256 differs from this value.
 manifest:
   path: scorecard/v2b/manifest.csv.gz
-  sha256: ""    # frozen after build-manifest
+  sha256: ac9df0aed66f525c195cbf98c3476eb3f4036d1ef18623c575aa5b36a986cd6a
 
 # Report-only settings (never gate).
 bootstrap_reps: 1000

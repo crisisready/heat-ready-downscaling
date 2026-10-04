@@ -337,14 +337,14 @@ PKM00041600,32.5,74.533,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_
 CHM00059838,19.1,108.617,Aw,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CH,public,DONGFANG
 CUW00011706,19.9,-75.15,Aw,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,CU,public,GUANTANAMO BAY NAS
 NOE00105503,60.5669,9.1333,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,NO,public,NESBYEN-TODOKK
-KSM00047108,37.567,126.967,Cwa,temperate,aw_dwa_set_b_2026-10-04,gsod_aw_dwa_pull,no,,,public,SEOUL CITY
-KSM00047159,35.1,129.033,Cwa,temperate,aw_dwa_set_b_2026-10-04,gsod_aw_dwa_pull,no,,,public,BUSAN
-KSG471360,36.567,128.7,Cwa,temperate,aw_dwa_set_b_2026-10-04,gsod_aw_dwa_pull,no,,,public,ANDONG
-KSG471730,35.417,127.4,Cwa,temperate,aw_dwa_set_b_2026-10-04,gsod_aw_dwa_pull,no,,,public,NAMWON
-KSG471310,36.633,127.45,Cwa,temperate,aw_dwa_set_b_2026-10-04,gsod_aw_dwa_pull,no,,,public,CHEONGJU
-KSG471140,37.438,127.96,Dwa,cold,aw_dwa_set_b_2026-10-04,gsod_aw_dwa_pull,no,,,public,WONJU
-KSG471290,36.767,126.5,Cwa,temperate,aw_dwa_set_b_2026-10-04,gsod_aw_dwa_pull,no,,,public,SEOSAN
-KSM00047168,34.733,127.75,Cwa,temperate,aw_dwa_set_b_2026-10-04,gsod_aw_dwa_pull,no,,,public,YEOSU
-NIM00065201,6.577,3.321,Aw,tropical,aw_dwa_set_b_2026-10-04,gsod_aw_dwa_pull,no,,,public,MURTALA MUHAMMED
-NIM00065046,12.048,8.525,BSh,arid,aw_dwa_set_b_2026-10-04,gsod_aw_dwa_pull,yes,,,public,MALLAM AMINU INTL
-GHM00065472,5.605,-0.167,Aw,tropical,aw_dwa_set_b_2026-10-04,gsod_aw_dwa_pull,yes,,,public,KOTOKA INTL
+KSM00047108,37.567,126.967,Cwa,temperate,aw_dwa_set_b_2026-10-04,gsod_aw_dwa_pull,no,urban,KS,public,SEOUL CITY
+KSM00047159,35.1,129.033,Cwa,temperate,aw_dwa_set_b_2026-10-04,gsod_aw_dwa_pull,no,urban,KS,public,BUSAN
+KSG471360,36.567,128.7,Cwa,temperate,aw_dwa_set_b_2026-10-04,gsod_aw_dwa_pull,no,urban,KS,public,ANDONG
+KSG471730,35.417,127.4,Cwa,temperate,aw_dwa_set_b_2026-10-04,gsod_aw_dwa_pull,no,urban,KS,public,NAMWON
+KSG471310,36.633,127.45,Cwa,temperate,aw_dwa_set_b_2026-10-04,gsod_aw_dwa_pull,no,urban,KS,public,CHEONGJU
+KSG471140,37.438,127.96,Dwa,cold,aw_dwa_set_b_2026-10-04,gsod_aw_dwa_pull,no,rural,KS,public,WONJU
+KSG471290,36.767,126.5,Cwa,temperate,aw_dwa_set_b_2026-10-04,gsod_aw_dwa_pull,no,urban,KS,public,SEOSAN
+KSM00047168,34.733,127.75,Cwa,temperate,aw_dwa_set_b_2026-10-04,gsod_aw_dwa_pull,no,urban,KS,public,YEOSU
+NIM00065201,6.577,3.321,Aw,tropical,aw_dwa_set_b_2026-10-04,gsod_aw_dwa_pull,no,urban,NI,public,MURTALA MUHAMMED
+NIM00065046,12.048,8.525,BSh,arid,aw_dwa_set_b_2026-10-04,gsod_aw_dwa_pull,yes,urban,NI,public,MALLAM AMINU INTL
+GHM00065472,5.605,-0.167,Aw,tropical,aw_dwa_set_b_2026-10-04,gsod_aw_dwa_pull,yes,urban,GH,public,KOTOKA INTL

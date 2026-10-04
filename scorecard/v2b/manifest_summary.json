@@ -1,0 +1,52 @@
+{
+  "manifest_sha256": "ac9df0aed66f525c195cbf98c3476eb3f4036d1ef18623c575aa5b36a986cd6a",
+  "n_keys": 333568,
+  "keys_by_target_year": {
+    "tmax:2022": 2892,
+    "tmax:2023": 36531,
+    "tmax:2024": 35384,
+    "tmax:2025": 104670,
+    "tmin:2023": 31911,
+    "tmin:2024": 29737,
+    "tmin:2025": 92443
+  },
+  "stations_with_keys": 346,
+  "truth_stations_without_rows": [
+    "SPE00119981",
+    "SPW00013025",
+    "USW00023109"
+  ],
+  "sources": [
+    {
+      "name": "rows_none.json",
+      "sha256": "d892681d76f61ff8d3134af9b940239508b0455d507931999aad2eebd9fbef93",
+      "added": 89728,
+      "duplicate_of_db_row": 5257,
+      "duplicate_within_extra": 0,
+      "dropped_null": 0
+    },
+    {
+      "name": "thin_zone_rows.json",
+      "sha256": "d3783ec18cb1cbc9f6d1296a4120bb96035accf73b25a3b2d70c618e07fa1b46",
+      "added": 86739,
+      "duplicate_of_db_row": 0,
+      "duplicate_within_extra": 0,
+      "dropped_null": 0
+    },
+    {
+      "name": "b_scored_rows.json",
+      "sha256": "c185994c92774a946fc00baa44cc48cb901e2f1db5f286a2531c9f2c3a8d3d2a",
+      "added": 10234,
+      "duplicate_of_db_row": 205,
+      "duplicate_within_extra": 0,
+      "dropped_null": 0
+    },
+    {
+      "name": "truth_overrides_2025.csv",
+      "sha256": "153682a4a317fad81cbb00fadbc46b090cf826468a9fcc7cb390adad24b0b83f",
+      "overrides": 17555,
+      "rows_replaced": 9635,
+      "rows_dropped": 6329
+    }
+  ]
+}
