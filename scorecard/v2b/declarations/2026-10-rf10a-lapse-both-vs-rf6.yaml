@@ -1,0 +1,31 @@
+# Declared before the official scorer run (heatready-nonus-refit, 2026-10-06), after a local screen of the variants on the
+# same rows (research/nonus-shift-refit/screen_variants.py). Revised after review: the aim names every scored station whose
+# elevation offset to its ERA5-Land cell is 300 m or more in either direction (16 of the 345; offsets for all scored stations
+# come from ghcn_training and the builder row files). A standard lapse term (0.0065 C/m) goes under the forest on tmax. Ship bar
+# (Nishant, 2026-10-06): better overall and no zone worse than rf6 by more than the scorer's 0.10 C tolerance.
+# rf6 corpus plus set (a), lapse base on tmax (0.0065) and tmin (0.0035).
+candidate: ds-2026.10-rf10a-lapse
+incumbent: ds-2026.09-rf6
+kind: layer
+declared_at: "2026-10-06"
+aim:
+  subset:
+    station_ids:
+      - CAN01067748
+      - CHM00056462
+      - CHM00056951
+      - EC027436
+      - SP000060010
+      - SPE00120449
+      - SPE00120458
+      - SPE00156045
+      - SPE00156153
+      - SPE00156198
+      - SPE00156306
+      - SPE00156360
+      - SPE00156459
+      - SPE00156495
+      - SPE00156558
+      - USC00021357
+  metric: rmse_tmax
+  min_effect_c: 0.05
