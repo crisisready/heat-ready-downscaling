@@ -39,10 +39,27 @@ def test_read_allowlist_header_only_means_drop_everything(tmp_path):
     assert sg.read_allowlist(str(p)) == {"SPE00000001"}
 
 
-def test_committed_allowlist_is_well_formed():
+def test_committed_allowlist_meets_its_own_criteria():
+    import csv
     path = os.path.join(_ROOT, "scorecard", "ssod_guard", "allowlist_2025.csv")
-    ids = sg.read_allowlist(path)
-    assert ids and all(len(i) == 11 and not i.startswith("US") for i in ids)
+    with open(path, newline="") as f:
+        rows = list(csv.DictReader(f))
+    ids = [r["station_id"] for r in rows]
+    assert ids and len(ids) == len(set(ids)) and all(len(i) == 11 and not i.startswith("US") for i in ids)
+    for r in rows:
+        assert float(r["n"]) >= sg.MIN_DAYS
+        assert abs(float(r["tmax_diff"])) <= sg.AGREE_C and abs(float(r["tmin_diff"])) <= sg.AGREE_C
+
+
+def test_extra_rows_are_not_guarded_and_bad_header_is_a_clear_error(tmp_path):
+    rows = [{"station_id": "SPE00000009", "date": "2025-03-01", "_extra": True},
+            {"station_id": "SPE00000009", "date": "2025-03-02"}]
+    kept, rep = sg.apply_guard(rows, set())
+    assert kept == rows[:1] and rep["rows_dropped"] == 1 and sg.count_affected(rows) == 1
+    p = tmp_path / "bad.csv"
+    p.write_text("id\nSPE00000001\n")
+    with pytest.raises(ValueError, match="station_id"):
+        sg.read_allowlist(str(p))
 
 
 def _spanish_rows():

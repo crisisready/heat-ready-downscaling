@@ -866,18 +866,6 @@ def main() -> None:
                               "rows_in_file": len(extra), **counts})
         print(f"Extra rows from {path}: {counts}")
 
-    ssod_guard = None
-    n_ssod = ssod_guard_mod.count_affected(rows)
-    if n_ssod and not args.ssod_allowlist:
-        raise SystemExit(f"{n_ssod} non-US GHCN-D row(s) are dated on or after {ssod_guard_mod.SWITCH_DATE} (NOAA's "
-                         "SSOD-v2 source switch: TMAX low, TMIN high). Pass --ssod-allowlist CSV (a header-only file "
-                         "drops them all); see heatready_downscaling/ssod_guard.py")
-    if args.ssod_allowlist:
-        rows, ssod_guard = ssod_guard_mod.apply_guard(rows, ssod_guard_mod.read_allowlist(args.ssod_allowlist))
-        ssod_guard.update({"allowlist": os.path.basename(args.ssod_allowlist),
-                           "sha256": ssod_guard_mod.sha256_file(args.ssod_allowlist)})
-        print(f"SSOD-v2 guard: {ssod_guard}")
-
     excluded_station_rows = {}
     if args.exclude_station_since:
         rows, excluded_station_rows = exclude_station_since(rows, args.exclude_station_since)
@@ -892,6 +880,18 @@ def main() -> None:
             holdout = {"path": os.path.basename(args.holdout_stations), "sha256": hashlib.sha256(f.read()).hexdigest(),
                        "rows_dropped": dropped}
         print(f"Holdout stations dropped: {dropped}")
+
+    ssod_guard = None
+    n_ssod = ssod_guard_mod.count_affected(rows)
+    if n_ssod and not args.ssod_allowlist:
+        raise SystemExit(f"{n_ssod} non-US GHCN-D row(s) are dated on or after {ssod_guard_mod.SWITCH_DATE} (NOAA's "
+                         "SSOD-v2 source switch: TMAX low, TMIN high). Pass --ssod-allowlist CSV (a header-only file "
+                         "drops them all); see heatready_downscaling/ssod_guard.py")
+    if args.ssod_allowlist:
+        rows, ssod_guard = ssod_guard_mod.apply_guard(rows, ssod_guard_mod.read_allowlist(args.ssod_allowlist))
+        ssod_guard.update({"allowlist": os.path.basename(args.ssod_allowlist),
+                           "sha256": ssod_guard_mod.sha256_file(args.ssod_allowlist)})
+        print(f"SSOD-v2 guard: {ssod_guard}")
 
     regime_sources = []
     if args.regime_features_csv:

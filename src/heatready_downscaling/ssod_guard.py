@@ -25,8 +25,11 @@ def affected(station_id: str, date) -> bool:
 
 def read_allowlist(path: str) -> set:
     """Station ids in the allowlist CSV (column station_id; a header-only file is a valid drop-everything list)."""
-    with open(path, newline="") as f:
-        return {r["station_id"] for r in csv.DictReader(f)}
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        if "station_id" not in (reader.fieldnames or []):
+            raise ValueError(f"{path}: the header must include station_id, got {reader.fieldnames}")
+        return {r["station_id"] for r in reader}
 
 
 def sha256_file(path: str) -> str:
@@ -34,15 +37,21 @@ def sha256_file(path: str) -> str:
         return hashlib.sha256(f.read()).hexdigest()
 
 
+def _db_affected(r: dict) -> bool:
+    """Affected rows are the database's: an extra-rows file (merge_extra_rows tags it _extra) is builder output,
+    e.g. real GSOD under a matched GHCN id, which the switch does not touch."""
+    return not r.get("_extra") and affected(r["station_id"], r["date"])
+
+
 def count_affected(rows: list[dict]) -> int:
-    return sum(1 for r in rows if affected(r["station_id"], r["date"]))
+    return sum(1 for r in rows if _db_affected(r))
 
 
 def apply_guard(rows: list[dict], allowlist: set) -> tuple[list[dict], dict]:
     """rows without the affected ones whose station is not allowlisted, plus a report of what was dropped."""
     kept, dropped, stations = [], 0, set()
     for r in rows:
-        if affected(r["station_id"], r["date"]) and r["station_id"] not in allowlist:
+        if _db_affected(r) and r["station_id"] not in allowlist:
             dropped += 1
             stations.add(r["station_id"])
         else:
