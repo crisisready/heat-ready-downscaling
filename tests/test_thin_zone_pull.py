@@ -61,3 +61,53 @@ def test_run_cluster_covariates_resumes_from_saved_clusters(tmp_path):
     (cdir / "thinzone_US.json").write_text(json.dumps({"AAA": {"lst_warm_season_anomaly_c": 1.5}}))
     cov, failed = run_cluster_covariates([("thinzone_US", [{"station_id": "AAA"}])], str(tmp_path), workers=1)
     assert cov == {"AAA": {"lst_warm_season_anomaly_c": 1.5}} and failed == []
+
+
+def test_read_stations_gsod_source_columns(tmp_path):
+    p = tmp_path / "s.csv"
+    p.write_text("id,zone,lat,lon,elev,name,source,usaf,wban,tmax_only\n"
+                 "KSM00047108,Cwa,37.5,127.0,87,SEOUL,gsod,471080,99999,True\n"
+                 "CHM00050658,Dwa,48.0,125.9,237,X,ghcnd,,,False\n")
+    got = {s["station_id"]: s for s in read_stations(str(p))}
+    assert got["KSM00047108"]["source"] == "gsod" and got["KSM00047108"]["tmax_only"]
+    assert got["KSM00047108"]["usaf"] == "471080" and got["KSM00047108"]["wban"] == "99999"
+    assert got["CHM00050658"]["source"] == "ghcnd" and not got["CHM00050658"]["tmax_only"]
+    p.write_text("id,zone,lat,lon,elev,name,source,usaf,wban\nA,Aw,1,2,1,X,gsod,,\n")
+    with pytest.raises(ValueError):
+        read_stations(str(p))
+    p.write_text("id,zone,lat,lon,elev,name,source\nA,Aw,1,2,1,X,metar\n")
+    with pytest.raises(ValueError):
+        read_stations(str(p))
+
+
+def test_fetch_gsod_series_filters_dates_and_reports_failures(tmp_path, monkeypatch):
+    from datetime import date
+    import build_gsod_bsh_rows as g
+    from build_thin_zone_rows import fetch_gsod_series
+    csv_2025 = ('"STATION","DATE","MAX","MAX_ATTRIBUTES","MIN"\n'
+                '"47108099999","2024-12-31","80.0"," ","60.0"\n'
+                '"47108099999","2025-01-01","86.0"," ","68.0"\n'
+                '"47108099999","2025-01-02","9999.9"," ","68.0"\n').encode()
+
+    def fake_cached(out_dir, name, url, cache=True):
+        if "2024" in name:
+            raise TimeoutError("boom")
+        return csv_2025
+
+    monkeypatch.setattr(g, "_cached", fake_cached)
+    st = [{"station_id": "KSM00047108", "usaf": "471080", "wban": "99999"}]
+    series, failed = fetch_gsod_series(st, date(2025, 1, 1), date(2025, 12, 31), str(tmp_path))
+    assert [o["date"] for o in series["KSM00047108"]] == ["2025-01-01"]
+    assert series["KSM00047108"][0]["station_tmax_c"] == 30.0
+    assert failed == []
+    series, failed = fetch_gsod_series(st, date(2024, 1, 1), date(2025, 12, 31), str(tmp_path))
+    assert failed == ["47108099999/2024"] and len(series["KSM00047108"]) == 2  # the 2025 file also carries 2024-12-31
+
+
+def test_apply_tmax_only_nulls_tmin_target_for_flagged_stations_only():
+    from build_thin_zone_rows import apply_tmax_only
+    rows = [{"station_id": "A", "station_tmin_c": 1.0, "delta_tmin_c": 0.5, "grid_tmin_c": 0.5},
+            {"station_id": "B", "station_tmin_c": 2.0, "delta_tmin_c": 0.1, "grid_tmin_c": 1.9}]
+    out = apply_tmax_only(rows, [{"station_id": "A", "tmax_only": True}, {"station_id": "B", "tmax_only": False}])
+    assert out[0]["station_tmin_c"] is None and out[0]["delta_tmin_c"] is None and out[0]["grid_tmin_c"] == 0.5
+    assert out[1] == rows[1]

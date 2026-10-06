@@ -1,0 +1,6 @@
+# Ablation recipe ds-2026.10-rf10a (chunk C-ref, 2026-10-04): rf6's recipe plus the set (a) rows, base features.
+model_version: ds-2026.10-rf10a
+feature_set: base
+extra_rows:
+  - name: a_training_rows.json
+    sha256: ba2f10174728f1bfde4b7bc37503afedcc03d605eeed3be9acf4ffbca9115f28

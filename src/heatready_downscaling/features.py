@@ -62,9 +62,15 @@ REGIME_FEATURES = (
 )
 FEATURE_ORDER_REGIME = FEATURE_ORDER + REGIME_FEATURES
 
+# Grid-bias prior (Aw/Dwa refinement, 2026-10-04): neighbouring stations' mean station-minus-grid delta for the
+# row's month and how much station evidence backs it (heatready_downscaling.grid_bias_prior). The caller attaches
+# both to each row; the trainer and the scorecard compute them from the fitted rows only.
+GRID_BIAS_FEATURES = ("grid_bias_prior_c", "grid_bias_support")
+FEATURE_ORDER_GRIDBIAS = FEATURE_ORDER + GRID_BIAS_FEATURES
+
 # Every column order a model may declare in its metadata.json. build_feature_matrix builds whichever
 # one it is asked for; contract.validate_feature_order refuses anything else.
-SUPPORTED_FEATURE_ORDERS = {"base": FEATURE_ORDER, "regime": FEATURE_ORDER_REGIME}
+SUPPORTED_FEATURE_ORDERS = {"base": FEATURE_ORDER, "regime": FEATURE_ORDER_REGIME, "gridbias": FEATURE_ORDER_GRIDBIAS}
 
 
 def _doy_trig(d) -> tuple[float, float]:
@@ -170,6 +176,7 @@ def build_feature_matrix(
             "grid_specific_humidity_kgkg": r.get("grid_specific_humidity_kgkg"),
             "nighttime_wind_ms": r.get("nighttime_wind_ms"),
             **{c: r.get(c) for c in REGIME_FEATURES},
+            **{c: r.get(c) for c in GRID_BIAS_FEATURES},
         }
         missing = [c for c in feature_order if values[c] is None]
         missing_by_row.append(missing)

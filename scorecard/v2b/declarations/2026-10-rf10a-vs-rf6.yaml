@@ -1,0 +1,12 @@
+# Ablation for rf10gb, declared 2026-10-04 before scoring (chunk C-ref): rf6's recipe plus set (a)'s rows, no
+# grid-bias prior, served through rf6's own CV gate (its metadata copied under this name). It separates the effect of
+# the new training stations from the effect of the covariate; it is not a ship candidate.
+candidate: ds-2026.10-rf10a
+incumbent: ds-2026.09-rf6
+kind: model_version
+declared_at: "2026-10-04"
+aim:
+  subset:
+    zones: [Aw, Dwa]
+  metric: rmse_tmax
+  min_effect_c: 0.05

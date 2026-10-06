@@ -1,0 +1,350 @@
+station_id,lat,lon,zone,zone_group,origin,source,airport,setting,region,visibility,name
+EC000309,38.2828,-0.5706,BSh,arid,unseen_by_date,ghcn_training,unknown,urban,ECAD_ES,public,
+EC000412,38.3725,-0.4942,BSh,arid,unseen_by_date,ghcn_training,unknown,urban,ECAD_ES,public,
+EC001404,37.7889,-0.8031,BSh,arid,unseen_by_date,ghcn_training,unknown,rural,ECAD_ES,public,
+EC003969,39.485,-0.4744,BSh,arid,unseen_by_date,ghcn_training,unknown,urban,ECAD_ES,public,
+EC027436,36.7744,-2.8131,BSh,arid,unseen_by_date,ghcn_training,unknown,urban,ECAD_ES,public,
+EC027460,37.7781,-0.8056,BSh,arid,unseen_by_date,ghcn_training,unknown,rural,ECAD_ES,public,
+EC027481,38.0678,-0.9814,BSh,arid,unseen_by_date,ghcn_training,unknown,rural,ECAD_ES,public,
+EC027484,38.0894,-0.7156,BSh,arid,unseen_by_date,ghcn_training,unknown,urban,ECAD_ES,public,
+EC027489,38.2875,-0.6806,BSh,arid,unseen_by_date,ghcn_training,unknown,urban,ECAD_ES,public,
+EC027507,39.0017,-0.5231,BSh,arid,unseen_by_date,ghcn_training,unknown,rural,ECAD_ES,public,
+EC027508,39.1131,-0.4456,BSh,arid,unseen_by_date,ghcn_training,unknown,urban,ECAD_ES,public,
+EC027517,39.4792,-0.3369,BSh,arid,unseen_by_date,ghcn_training,unknown,urban,ECAD_ES,public,
+EC027518,39.4808,-0.3658,BSh,arid,unseen_by_date,ghcn_training,unknown,urban,ECAD_ES,public,
+IN005090100,22.367,69.083,BSh,arid,moved_2026-10-01,ghcn_training+gsod_extra,no,rural,IN,public,DWARKA
+IN009070100,14.233,76.433,BSh,arid,moved_2026-10-01,ghcn_training+gsod_extra,no,rural,IN,public,CHITRADURGA
+IN012020100,20.7,77.033,BSh,arid,moved_2026-10-01,ghcn_training+gsod_extra,no,urban,IN,public,AKOLA
+IN018103100,30.333,76.467,BSh,arid,moved_2026-10-01,ghcn_training+gsod_extra,no,urban,IN,public,PATIALA
+IN019261900,24.617,73.883,BSh,arid,moved_2026-10-01,ghcn_training+gsod_extra,no,urban,IN,public,UDAIPUR DABOK
+IN023351400,26.75,80.883,BSh,arid,moved_2026-10-01,ghcn_training+gsod_extra,no,urban,IN,public,LUCKNOW/AMAUSI
+PKM00041530,33.994,71.515,BSh,arid,moved_2026-10-01,gsod_extra,no,urban,PK,public,PESHAWAR
+PKM00041685,29.883,69.717,BSh,arid,moved_2026-10-01,gsod_extra,no,rural,PK,public,BAR KHAN
+SP000003195,40.4117,-3.6781,BSk,arid,unseen_by_date,ghcn_training,no,urban,SP,public,MADRID - RETIRO
+SP000004452,38.8831,-6.8292,Csa,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,BADAJOZ/TALAVERA LA REAL
+SP000006155,36.6667,-4.4881,Csa,temperate,unseen_by_date,ghcn_training,yes,urban,SP,public,MALAGA AEROPUERTO
+SP000008027,43.3075,-2.0392,Cfb,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,SAN SEBASTIAN - IGUELDO
+SP000008181,41.2928,2.0697,Csa,temperate,unseen_by_date,ghcn_training,yes,urban,SP,public,BARCELONA/AEROPUERTO
+SP000008202,40.9592,-5.4981,Csa,temperate,unseen_by_date,ghcn_training,yes,rural,SP,public,SALAMANCA AEROPUERTO
+SP000008215,40.7806,-4.0103,Csb,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,NAVACERRADA
+SP000008280,38.9519,-1.8631,BSk,arid,unseen_by_date,ghcn_training,no,urban,SP,public,ALBACETE LOS LLANOS
+SP000008410,37.8442,-4.8458,Csa,temperate,unseen_by_date,ghcn_training,yes,urban,SP,public,CORDOBA AEROPUERTO
+SP000009434,41.6617,-1.0081,BSk,arid,unseen_by_date,ghcn_training,yes,urban,SP,public,ZARAGOZA AEROPUERTO
+SP000009981,40.8206,0.4914,BSk,arid,unseen_by_date,ghcn_training,no,rural,SP,public,TORTOSA - OBSERVATORIO DEL EBR
+SP000060010,28.3089,-16.4992,Csb,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,IZANA
+SP000060040,28.9517,-13.6003,BWh,arid,unseen_by_date,ghcn_training,yes,urban,SP,public,LANZAROTE/AEROPUERTO
+SP000060338,35.2778,-2.9553,Csa,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,MELILLA
+SPE00119720,43.3067,-8.3719,Csb,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,A CORUNA/ALVEDRO
+SPE00119729,42.8878,-8.4106,Csb,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,SANTIAGO DE COMPOSTELA/LABACOL
+SPE00119747,42.8717,-2.7331,Cfb,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,VITORIA/FORONDA
+SPE00119756,39.0067,-1.8606,BSk,arid,unseen_by_date,ghcn_training,no,urban,SP,public,ALBACETE OBS.
+SPE00119783,36.8464,-2.3567,BSh,arid,unseen_by_date,ghcn_training,yes,rural,SP,public,ALMERIA/AEROPUERTO
+SPE00119837,40.6592,-4.68,Csb,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,AVILA
+SPE00119855,38.8764,1.3842,temperate,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,IBIZA/ESCODOLA
+SPE00119864,39.8544,4.2156,temperate,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,MENORCA/MAO
+SPE00119882,39.5556,2.6264,Csa,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,PALMA DE MALLORCA CMT
+SPE00119909,42.3558,-3.6325,Csb,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,BURGOS-VILLAFRIA
+SPE00119918,39.4719,-6.3392,Csa,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,CACERES
+SPE00119945,36.7506,-6.0556,Csa,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,JEREZ DE LA FRONTERA
+SPE00119981,43.4917,-3.7994,Cfb,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,SANTANDER CMT
+SPE00119990,43.4292,-3.8314,Cfb,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,SANTANDER/PARAYAS
+SPE00120035,38.9892,-3.9194,Csa,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,CIUDAD REAL
+SPE00120062,40.0667,-2.1381,Csa,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,CUENCA
+SPE00120080,41.9117,2.7631,Csa,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,GIRONA/COSTA BRAVA
+SPE00120089,37.1894,-3.7892,Csa,temperate,unseen_by_date,ghcn_training,yes,rural,SP,public,GRANADA/AEROPUERTO
+SPE00120107,40.6608,-3.1742,BSk,arid,unseen_by_date,ghcn_training,no,rural,SP,public,GUADALAJARA
+SPE00120125,40.8442,-1.8853,Cfb,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,MOLINA DE ARAGON
+SPE00120143,37.28,-6.9094,Csa,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,HUELVA (RONDA DEL ESTE)
+SPE00120152,37.2594,-6.9492,Csa,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,HUELVA
+SPE00120161,42.0831,0.3264,Cfa,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,HUESCA
+SPE00120170,37.7778,-3.8075,Csa,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,JAEN
+SPE00120188,42.4519,-2.3308,Cfa,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,LOGRONO-AGONCILLO
+SPE00120197,28.4444,-13.8631,BWh,arid,unseen_by_date,ghcn_training,yes,rural,SP,public,FUERTEVENTURA/AEROPUERTO
+SPE00120215,27.9225,-15.3892,BWh,arid,unseen_by_date,ghcn_training,no,urban,SP,public,LAS PALMAS DE GRAN CANARIA/GAN
+SPE00120224,42.5889,-5.6492,Csb,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,LEON VIRGEN DEL CAMINO
+SPE00120233,42.5639,-6.6,Csb,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,PONFERRADA
+SPE00120242,41.6256,0.595,BSk,arid,unseen_by_date,ghcn_training,no,urban,SP,public,LLEIDA
+SPE00120260,43.1153,-7.4558,Csb,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,LUGO/ROZAS
+SPE00120269,40.6983,-3.7642,Csa,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,COLMENAR VIEJO/FAMET
+SPE00120278,40.4667,-3.5556,BSk,arid,unseen_by_date,ghcn_training,no,urban,SP,public,MADRID/BARAJAS
+SPE00120287,40.3778,-3.7892,Csa,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,MADRID/CUATROVIENTOS
+SPE00120296,40.3,-3.7225,BSk,arid,unseen_by_date,ghcn_training,no,urban,SP,public,MADRID/GETAFE
+SPE00120305,40.4831,-3.4503,BSk,arid,unseen_by_date,ghcn_training,no,urban,SP,public,MADRID/TORREJON
+SPE00120323,38.0028,-1.1692,BSk,arid,unseen_by_date,ghcn_training,no,urban,SP,public,MURCIA
+SPE00120332,37.9578,-1.2294,BSk,arid,unseen_by_date,ghcn_training,no,urban,SP,public,MURCIA/ALCANTARILLA
+SPE00120350,42.8175,-1.6364,Cfb,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,PAMPLONA (OBSERVATORIO)
+SPE00120359,42.7767,-1.65,Cfb,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,PAMPLONA
+SPE00120368,42.3278,-7.8603,Csb,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,OURENSE
+SPE00120395,42.44,-8.6164,Csb,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,PONTEVEDRA
+SPE00120413,42.2392,-8.6239,Csb,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,VIGO PEINADOR
+SPE00120422,40.9564,-5.6614,Csa,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,SALAMANCA OBS.
+SPE00120431,27.8189,-17.8889,BSk,arid,unseen_by_date,ghcn_training,yes,rural,SP,public,HIERRO/AEROPUERTO
+SPE00120449,28.6331,-17.755,Csb,temperate,unseen_by_date,ghcn_training,yes,rural,SP,public,LA PALMA/AEROPUERTO
+SPE00120458,28.4631,-16.2553,BSh,arid,unseen_by_date,ghcn_training,no,urban,SP,public,STA. CRUZ DE TENERIFE
+SPE00120467,28.4775,-16.3292,BSh,arid,unseen_by_date,ghcn_training,no,urban,SP,public,TENERIFE/LOS RODEOS
+SPE00120476,28.0475,-16.5606,BSh,arid,unseen_by_date,ghcn_training,no,urban,SP,public,TENERIFE/SUR
+SPE00120485,40.9478,-4.1269,Csb,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,SEGOVIA
+SPE00120503,37.1581,-5.6156,Csa,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,MORON DE LA FRONTERA
+SPE00120512,37.4167,-5.8792,Csa,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,SEVILLA/SAN PABLO
+SPE00120521,41.775,-2.4831,Cfb,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,SORIA
+SPE00120530,41.1494,1.1789,BSk,arid,unseen_by_date,ghcn_training,yes,rural,SP,public,REUS/AEROPUERTO
+SPE00120539,40.9258,-1.2931,Cfb,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,CALAMOCHA
+SPE00120557,40.3494,-1.1167,BSk,arid,unseen_by_date,ghcn_training,no,urban,SP,public,TERUEL
+SPE00120566,39.8844,-4.0492,BSk,arid,unseen_by_date,ghcn_training,no,urban,SP,public,TOLEDO
+SPE00120593,41.65,-4.7667,Csa,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,VALLADOLID
+SPE00120602,41.7,-4.85,Csb,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,VALLADOLID (VILLANUBLA)
+SPE00120611,43.2981,-2.9056,Cfb,temperate,unseen_by_date,ghcn_training,yes,rural,SP,public,BILBAO AEROPUERTO
+SPE00120620,41.5167,-5.7333,Csa,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,ZAMORA
+SPE00120629,41.1144,-1.4106,Cfb,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,DAROCA
+SPE00155955,41.7428,0.5356,BSk,arid,unseen_by_date,ghcn_training,no,rural,SP,public,ALGUAIRE
+SPE00155964,40.7078,0.6319,BSk,arid,unseen_by_date,ghcn_training,no,rural,SP,public,AMPOSTA
+SPE00155973,41.9606,2.6308,Cfa,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,ANGLES
+SPE00155982,42.1164,2.7894,Cfa,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,BANYOLES
+SPE00155991,41.3839,2.1675,Csa,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,BARCELONA-EL RAVAL
+SPE00156000,41.3792,2.1053,Csa,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,BARCELONA-ZONA UNIVERSITARIA
+SPE00156009,41.0628,0.635,BSk,arid,unseen_by_date,ghcn_training,no,rural,SP,public,BENISSANET
+SPE00156018,42.4658,0.8842,Cfb,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,BOI
+SPE00156027,42.6467,0.9844,Cfc,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,BONAIGUA
+SPE00156036,41.5178,2.3767,Cfa,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,CABRILS
+SPE00156045,42.2925,1.715,Cfb,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,CADI NORD-PRAT DAGUILO
+SPE00156054,41.6128,2.1681,Cfa,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,CALDES DE MONTBUI
+SPE00156063,41.4789,1.9756,Cfa,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,CASTELLBISBAL
+SPE00156072,41.8083,3.0325,Csa,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,CASTELL DARO
+SPE00156081,41.8306,1.8467,Cfa,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,CASTELLNOU DE BAGES
+SPE00156090,41.6567,0.9517,BSk,arid,unseen_by_date,ghcn_training,no,rural,SP,public,CASTELLNOU DE SEANA
+SPE00156099,42.6833,1.2717,Cfb,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,CERTASCAN
+SPE00156108,41.6756,1.2958,Csa,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,CERVERA
+SPE00156117,41.1714,1.1678,BSk,arid,unseen_by_date,ghcn_training,no,urban,SP,public,CONSTANTI
+SPE00156126,41.2017,1.6331,Csa,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,CUNIT
+SPE00156135,42.3858,1.8664,Cfb,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,DAS-AERODROM
+SPE00156144,40.8728,0.7156,Csa,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,EL PERELLO
+SPE00156153,42.3981,0.7433,Cfb,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,EL PONT DE SUERT
+SPE00156171,41.3403,2.0803,Csa,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,EL PRAT DE LLOBREGAT
+SPE00156180,41.5308,1.8081,Cfa,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,ELS HOSTALETS DE PIEROLA
+SPE00156198,42.5342,1.0544,Cfc,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,ESPOT
+SPE00156207,41.1533,0.8192,Csa,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,FALSET
+SPE00156216,41.4328,1.6239,Csa,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,FONT-RUBI
+SPE00156225,41.9819,2.8067,Csa,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,GIRONA
+SPE00156234,42.2342,1.8744,Cfb,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,GUARDIOLA DE BERGUEDA
+SPE00156243,40.9514,0.3056,Csa,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,HORTA DE SANT JOAN
+SPE00156252,40.7069,0.8342,Csa,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,ILLA DE BUDA
+SPE00156261,41.9775,3.0353,Csa,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,LA BISBAL DEMPORDA
+SPE00156270,42.6381,0.7789,Cfc,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,LAC REDON
+SPE00156279,41.6025,1.4006,Csb,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,LA PANADELLA
+SPE00156297,42.0803,1.9625,Cfb,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,LA QUAR
+SPE00156306,42.3706,1.4328,Cfb,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,LA SEU DURGELL
+SPE00156315,41.3925,1.0989,Csa,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,LESPLUGA DE FRANCOLI
+SPE00156333,42.4658,1.7781,Cfb,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,MALNIU
+SPE00156342,40.7181,0.3994,Csa,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,MAS DE BARBERANS-ABOCADOR
+SPE00156351,42.3769,2.4142,Cfb,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,MOLLO-FABERT
+SPE00156360,42.0514,0.7292,Cfb,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,MONTSEC
+SPE00156369,41.5953,1.8375,Cfa,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,MONTSERRAT-SANT DIMES
+SPE00156378,41.8781,2.1783,Cfb,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,MUNTANYOLA
+SPE00156387,42.3817,2.1553,Cfc,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,NURIA
+SPE00156396,41.5864,1.6531,Cfa,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,ODENA
+SPE00156414,42.2158,1.3314,Cfb,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,ORGANYA
+SPE00156423,42.0739,2.2083,Cfb,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,ORIS
+SPE00156432,41.5669,2.2258,Cfa,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,PARETS DEL VALLES
+SPE00156441,40.7967,0.3181,Csb,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,PN DELS PORTS
+SPE00156459,41.7733,2.4378,Cfb,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,PUIG SESOLLES
+SPE00156468,41.6831,0.4483,BSk,arid,unseen_by_date,ghcn_training,no,rural,SP,public,RAIMAT
+SPE00156477,42.2706,3.1817,Csa,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,ROSES
+SPE00156486,41.5656,2.0692,Cfa,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,SABADELL-PARC AGRARI
+SPE00156495,42.5192,1.3656,Cfb,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,SALORIA
+SPE00156504,41.4831,2.0792,Cfa,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,SANT CUGAT DEL VALLES-CAR
+SPE00156513,42.2581,2.3642,Cfb,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,SANT PAU DE SEGURIES
+SPE00156522,42.1769,3.0967,Csa,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,SANT PERE PESCADOR
+SPE00156531,42.1392,1.0389,Cfa,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,SANT ROMA DABELLA
+SPE00156540,41.6739,1.7678,Cfa,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,SANT SALVADOR DE GUARDIOLA
+SPE00156549,42.1069,1.8267,Cfb,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,SANTUARI DE QUERALT
+SPE00156558,42.77,0.7317,Cfb,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,SASSEUVA
+SPE00156567,41.9878,1.5117,Cfb,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,SOLSONA
+SPE00156576,41.1039,1.2008,BSk,arid,unseen_by_date,ghcn_training,no,urban,SP,public,TARRAGONA-COMPLEX EDUCATIU
+SPE00156585,41.6667,1.1653,Csa,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,TARREGA
+SPE00156603,41.32,0.8856,Csb,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,ULLDEMOLINS
+SPE00156612,41.3817,1.9356,Csa,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,VALLIRANA
+SPE00156630,41.84,2.4183,Cfb,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,VILADRAU
+SPE00156639,41.9956,1.0256,Cfa,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,VILANOVA DE MEIA
+SPE00156648,41.3069,1.3625,Csa,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,VILA-RODONA
+SPE00156657,41.185,0.5933,BSk,arid,unseen_by_date,ghcn_training,no,rural,SP,public,VINEBRE
+SPE00173105,42.3419,2.8342,Csa,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,PANTA DE DARNIUS - BOADELLA
+SPE00173114,42.4403,1.9344,Cfb,temperate,unseen_by_date,ghcn_training,no,urban,SP,public,PUIGCERDA
+SPE00173123,41.0431,0.7403,Csa,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,TIVISSA
+SPE00175681,41.5106,0.8564,BSk,arid,unseen_by_date,ghcn_training,no,rural,SP,public,LES BORGES BLANQUES
+SPM00008360,38.282,-0.558,BSh,arid,unseen_by_date,ghcn_training,no,urban,SP,public,ALICANTE
+SPW00013024,37.1833,-5.6,Csa,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,MORON DE LA FRONTERA
+SPW00013025,36.65,-6.35,Csa,temperate,unseen_by_date,ghcn_training,no,rural,SP,public,ROTA NAS
+USC00020287,31.9792,-111.3836,BSh,arid,unseen_by_date,ghcn_training,no,rural,US,public,ANVIL RCH
+USC00020288,33.4625,-111.4814,BSh,arid,unseen_by_date,ghcn_training,no,rural,US,public,APACHE JUNCTION 5 NE
+USC00020632,33.8097,-111.6497,BSh,arid,unseen_by_date,ghcn_training,no,rural,US,public,BARTLETT DAM
+USC00020683,31.8806,-110.2403,BSh,arid,unseen_by_date,ghcn_training,no,rural,US,public,BENSON 6SE
+USC00020975,33.28,-111.1583,BSh,arid,unseen_by_date,ghcn_training,no,rural,US,public,BOYCE THOMPSON ARBORETUM
+USC00021282,33.8164,-111.9017,BSh,arid,unseen_by_date,ghcn_training,no,rural,US,public,CAREFREE
+USC00021330,32.2617,-110.3481,BSh,arid,unseen_by_date,ghcn_training,no,rural,US,public,CASCABEL
+USC00021357,32.4178,-110.9303,BSh,arid,unseen_by_date,ghcn_training,no,rural,US,public,CATALINA SP
+USC00023668,31.8931,-110.9978,BSh,arid,unseen_by_date,ghcn_training,no,urban,US,public,GREEN VALLEY
+USC00025635,34.6106,-111.8383,BSh,arid,unseen_by_date,ghcn_training,no,rural,US,public,MONTEZUMA CASTLE NM
+USC00025700,33.5536,-111.4453,BSh,arid,unseen_by_date,ghcn_training,no,rural,US,public,MORMON FLAT
+USC00026603,33.7275,-111.8606,BSh,arid,unseen_by_date,ghcn_training,no,rural,US,public,PINNACLE PEAK
+USC00027281,33.6489,-111.1089,BSh,arid,unseen_by_date,ghcn_training,no,rural,US,public,ROOSEVELT 1 S
+USC00027398,32.1794,-110.7364,BSh,arid,unseen_by_date,ghcn_training,no,rural,US,public,SAGUARO NP
+USC00027480,33.1819,-110.5261,BSh,arid,unseen_by_date,ghcn_training,no,rural,US,public,SAN CARLOS RSVR
+USC00027530,32.6014,-110.6292,BSh,arid,unseen_by_date,ghcn_training,no,rural,US,public,SAN MANUEL
+USC00028214,33.5589,-111.5367,BSh,arid,unseen_by_date,ghcn_training,no,rural,US,public,STEWART MTN DAM
+USC00028590,32.3392,-110.9808,BSh,arid,unseen_by_date,ghcn_training,no,urban,US,public,TOHONO CHUL
+USC00028795,32.2542,-111.1961,BSh,arid,unseen_by_date,ghcn_training,no,rural,US,public,TUCSON 17 NW
+USC00040332,35.2111,-118.8336,BSh,arid,unseen_by_date,ghcn_training,no,urban,US,public,ARVIN
+USC00040444,35.4186,-119.0508,BSh,arid,unseen_by_date,ghcn_training,no,urban,US,public,BAKERSFIELD 5 NW
+USC00042346,35.7683,-119.26,BSh,arid,unseen_by_date,ghcn_training,no,urban,US,public,DELANO
+USC00043256,36.7672,-119.7092,BSh,arid,unseen_by_date,ghcn_training,no,urban,US,public,FRESNO 5 NE
+USC00044890,36.3817,-119.0264,BSh,arid,unseen_by_date,ghcn_training,no,rural,US,public,LEMON COVE
+USC00044957,36.2033,-119.0545,BSh,arid,unseen_by_date,ghcn_training,no,rural,US,public,LINDSAY
+USC00048122,35.4867,-119.1458,BSh,arid,unseen_by_date,ghcn_training,no,rural,US,public,SHAFTER 6E
+USC00049367,36.3283,-119.2997,BSh,arid,unseen_by_date,ghcn_training,no,urban,US,public,VISALIA
+USC00049452,35.5892,-119.3519,BSh,arid,unseen_by_date,ghcn_training,no,urban,US,public,WASCO
+USC00410225,29.4608,-101.0286,BSh,arid,unseen_by_date,ghcn_training,no,rural,US,public,AMISTAD DAM
+USC00411486,28.4894,-99.8733,BSh,arid,unseen_by_date,ghcn_training,no,rural,US,public,CARRIZO SPRINGS 3S
+USC00411974,31.5333,-101.2842,BSh,arid,unseen_by_date,ghcn_training,no,rural,US,public,COPE RCH
+USC00412082,31.4072,-102.3578,BSh,arid,unseen_by_date,ghcn_training,no,rural,US,public,CRANE
+USC00412758,26.2981,-98.1575,BSh,arid,unseen_by_date,ghcn_training,no,urban,US,public,EDINBURG
+USC00415060,27.5683,-99.4331,BSh,arid,unseen_by_date,ghcn_training,no,urban,US,public,LAREDO 2
+USC00415701,26.1922,-98.2503,BSh,arid,unseen_by_date,ghcn_training,no,urban,US,public,MCALLEN
+USC00415707,31.1331,-102.2217,BSh,arid,unseen_by_date,ghcn_training,no,rural,US,public,MCCAMEY
+USC00415721,26.565,-98.1236,BSh,arid,unseen_by_date,ghcn_training,no,rural,US,public,MCCOOK
+USC00416502,31.8797,-102.3592,BSh,arid,unseen_by_date,ghcn_training,no,urban,US,public,ODESSA
+USC00416792,29.3272,-103.2061,BSh,arid,unseen_by_date,ghcn_training,no,rural,US,public,PANTHER JUNCTION
+USC00417622,26.3769,-98.8117,BSh,arid,unseen_by_date,ghcn_training,no,rural,US,public,RIO GRANDE CITY
+USC00419588,26.1781,-97.9708,BSh,arid,unseen_by_date,ghcn_training,no,urban,US,public,WESLACO
+USW00000270,28.2089,-100.0189,BSh,arid,unseen_by_date,ghcn_training,yes,rural,US,public,FAITH RCH AP
+USW00003031,31.925,-102.3875,BSh,arid,unseen_by_date,ghcn_training,yes,rural,US,public,ODESSA SCHLEMEYER FLD
+USW00003032,30.0481,-102.2128,BSh,arid,unseen_by_date,ghcn_training,yes,rural,US,public,DRYDEN TERRELL CO AP
+USW00003044,32.2125,-101.5214,BSh,arid,unseen_by_date,ghcn_training,yes,rural,US,public,BIG SPRING WRINKLE AP
+USW00003047,31.6219,-102.8072,BSh,arid,unseen_by_date,ghcn_training,no,rural,US,public,MONAHANS 6 ENE
+USW00003071,32.0364,-102.1011,BSh,arid,unseen_by_date,ghcn_training,no,urban,US,public,MIDLAND AIRPARK
+USW00012907,27.5333,-99.4667,BSh,arid,unseen_by_date,ghcn_training,yes,urban,US,public,LAREDO INTL AP
+USW00012947,28.4586,-99.2228,BSh,arid,unseen_by_date,ghcn_training,yes,rural,US,public,COTULLA LA SALLE CO AP
+USW00012959,26.1792,-98.2444,BSh,arid,unseen_by_date,ghcn_training,yes,urban,US,public,MCALLEN MILLER INTL AP
+USW00012987,26.5258,-98.0633,BSh,arid,unseen_by_date,ghcn_training,no,rural,US,public,EDINBURG 17 NNE
+USW00021510,19.7378,-156.0481,BSh,arid,unseen_by_date,ghcn_training,yes,rural,US,public,KAILUA KONA KE-AHOLE AP
+USW00022001,29.3667,-100.7833,BSh,arid,unseen_by_date,ghcn_training,yes,rural,US,public,DEL RIO LAUGHLIN AFB
+USW00022010,29.3783,-100.9269,BSh,arid,unseen_by_date,ghcn_training,yes,urban,US,public,DEL RIO INTL AP
+USW00023023,31.9433,-102.1892,BSh,arid,unseen_by_date,ghcn_training,no,rural,US,public,MIDLAND ODESSA
+USW00023091,30.9119,-102.9172,BSh,arid,unseen_by_date,ghcn_training,yes,rural,US,public,FT STOCKTON PECOS CO AP
+USW00023109,32.1667,-110.8833,BSh,arid,unseen_by_date,ghcn_training,yes,rural,US,public,DAVIS MONTHAN AFB
+USW00023155,35.4342,-119.0553,BSh,arid,unseen_by_date,ghcn_training,yes,urban,US,public,BAKERSFIELD AP
+USW00023160,32.1317,-110.9564,BSh,arid,unseen_by_date,ghcn_training,yes,urban,US,public,TUCSON INTL AP
+USW00053131,32.2394,-111.1697,BSh,arid,unseen_by_date,ghcn_training,no,rural,US,public,TUCSON 11 W
+USW00093138,33.8222,-116.5044,BSh,arid,unseen_by_date,ghcn_training,no,urban,US,public,PALM SPRINGS ASOS
+USW00093193,36.78,-119.7203,BSh,arid,unseen_by_date,ghcn_training,yes,urban,US,public,FRESNO YOSEMITE INTL
+CHM00059758,20.0,110.25,Aw,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CH,public,HAIKOU
+CHM00059948,18.217,109.583,Aw,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,CH,public,SANYA
+UVM00065518,11.15,-1.15,Aw,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,UV,public,PO
+BNM00065338,7.167,2.067,Aw,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,BN,public,BOHICON
+GHM00065437,7.817,-0.033,Aw,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,GH,public,KETE-KRACHI
+TH000048425,14.467,100.133,Aw,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,TH,public,SUPHAN BURI
+TH000048450,14.017,99.533,Aw,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,TH,public,KANCHANABURI
+THM00048453,13.667,100.617,Aw,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,TH,public,BANG NA AGROMET
+CHM00056182,32.65,103.567,Cwb,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,CH,public,SONGPAN
+SF003336820,-28.367,29.383,Cwb,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,SF,public,VAN REENEN
+CHM00056462,29.0,101.5,Cwb,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CH,public,JIULONG
+CHM00056651,26.833,100.467,Cwb,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,CH,public,LIJING
+CHM00056671,26.65,102.25,Cwb,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CH,public,HUILI
+CHM00056739,25.117,98.483,Cwb,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,CH,public,TENGCHONG
+CHM00056951,23.95,100.217,Cwb,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,CH,public,LINCANG
+CHM00057707,27.3,105.233,Cwb,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,CH,public,BIJIE
+AM000037711,40.867,45.15,Dfa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,AM,public,IDJEVAN
+CAN06130257,42.1034,-83.0945,Dfa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CA,public,AMHERSTBURG
+USC00060973,41.7944,-72.9319,Dfa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,US,public,BURLINGTON
+AM000037897,39.533,46.017,Dfa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,AM,public,SISIAN
+CAN06133055,43.1836,-79.5583,Dfa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CA,public,GRIMSBY MOUNTAIN
+USC00110356,40.6633,-90.4447,Dfa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,US,public,AVON
+CAN06133362,42.0333,-82.9,Dfa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,CA,public,HARROW CDA AUTO
+USC00110442,42.1153,-88.1639,Dfa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,US,public,BARRINGTON 3SW
+USC00110598,40.3444,-91.1125,Dfa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,US,public,BENTLEY
+CAN06139530,42.2761,-82.9553,Dfa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,CA,public,WINDSOR A
+KZ000035344,49.95,60.133,Dfa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,KZ,public,KARABUTAK
+CAN0613P001,41.9486,-82.5189,Dfa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,CA,public,POINT PELEE CS
+AM000037618,41.117,44.283,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,AM,public,TASHIR
+CAN01067748,55.9333,-129.9833,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,CA,public,STEWART A
+EN000026029,59.383,24.033,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,EN,public,PAKRI
+FI000000304,60.1667,24.95,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,FI,public,HELSINKI KAISANIEMI AWS
+KG000038353,42.83,74.58,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,KG,public,BISHKEK
+MJE00175548,43.15,19.13,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,MJ,public,ZABLJAK
+NO000005350,60.3883,11.5603,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,NO,public,NORD ODAL
+ROE00100898,47.6667,23.5,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,RO,public,BAIA MARE
+SW000002361,62.6331,17.9331,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,SW,public,HARNOSAND
+USC00050214,39.4992,-108.3808,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,US,public,ALTENBERN
+AM000037682,40.783,43.833,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,AM,public,AMASIA
+FI000002963,60.8139,23.5006,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,FI,public,JOKIOINEN JOKIOISTEN OBSERVATO
+USC00250365,41.5697,-101.6917,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,US,public,ARTHUR
+USC00251200,41.4083,-99.675,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,US,public,BROKEN BOW 2 W
+CHM00050788,47.233,131.983,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CH,public,FUJIN
+USC00258090,42.8389,-99.7781,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,US,public,SPRINGVIEW 2NW
+CHM00050854,46.383,125.317,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CH,public,ANDA
+USC00258751,42.8753,-100.5517,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,US,public,VALENTINE #1
+USC00258755,42.5703,-100.6933,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,US,public,VALENTINE NWR
+CHM00050953,45.75,126.767,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CH,public,HARBIN
+USC00396170,44.4419,-100.4172,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,US,public,OAHE DAM
+CHM00050968,45.217,127.967,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CH,public,SHANGZHI
+CHM00054094,44.567,129.6,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CH,public,MUDANJIANG
+CHM00054157,43.183,124.333,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CH,public,SIPING
+CHM00054236,42.417,122.533,Dwa,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,CH,public,ZHANGWU
+BP000091517,-9.417,159.967,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,BP,public,HONIARA
+BXM00096315,4.944,114.928,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,yes,urban,BX,public,BRUNEI INTL
+CEM00043466,6.9,79.867,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CE,public,COLOMBO
+CS000081003,9.967,-83.017,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,CS,public,PUERTO LIMON
+DRM00078458,19.75,-70.55,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,DR,public,PUERTO PLATA
+FJM00091680,-17.7597,177.4447,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,yes,urban,FJ,public,Nadi Airport
+GYM00081001,6.8,-58.15,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,GY,public,GEORGETOWN
+MA000067095,-18.117,49.4,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,MA,public,TOAMASINA
+NH000091554,-15.517,167.217,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,yes,urban,NH,public,PEKOA AIRPORT (SANT
+RP000098836,6.9,122.067,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,RP,public,ZAMBOANGA
+BPW00080601,-9.4333,160.05,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,BP,public,GUADALCANAL AAF
+CSM00078762,9.994,-84.209,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,yes,urban,CS,public,JUAN SANTAMARIA INTL
+NHM00091557,-17.699,168.32,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,NH,public,PORT VILA BAUERFIELD
+RQC00665807,18.4308,-66.4661,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,RQ,public,MANATI 2 E
+RPM00098644,9.664,123.853,Af,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,RP,public,TAGBILARAN
+BHM00078583,17.539,-88.308,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,yes,urban,BH,public,PHILIP S W GOLDSON INTL
+BL000085141,-14.47,-67.57,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,BL,public,RURRENABAQUE
+BMM00048062,20.133,92.873,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,BM,public,SITTWE
+CHM00059855,19.233,110.467,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CH,public,QIONGHAI
+DRM00078479,18.567,-68.363,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,yes,rural,DR,public,PUNTA CANA INTL
+HO000078711,15.217,-83.8,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,HO,public,PUERTO LEMPIRA
+IN099999901,11.667,92.717,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,IN,public,PORT BLAIR
+IV000005592,4.42,-7.37,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,IV,public,TABOU
+JM000078388,18.5,-77.917,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,JM,public,MONTEGO BAY/SANGSTE
+TH000048480,12.6,102.117,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,TH,public,CHANTHABURI
+BLM00085140,-14.3,-67.367,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,BL,public,REYES
+BMM00048097,16.907,96.133,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,yes,urban,BM,public,YANGON INTL
+CEM00043441,7.467,80.367,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CE,public,KURUNEGALA
+DRM00078486,18.433,-69.883,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,DR,public,SANTO DOMINGO
+JMM00078397,17.936,-76.788,Am,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,yes,rural,JM,public,NORMAN MANLEY INTL
+ASN00031108,-17.1347,145.4281,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,AS,public,WALKAMIN RESEARCH STATION
+BL000085365,-21.95,-63.65,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,BL,public,YACUIBA
+BMM00048008,25.367,97.4,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,BM,public,MYITKYINA
+CHM00054725,37.5,117.533,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CH,public,HUIMIN
+MCM00045011,22.15,113.592,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,yes,rural,MC,public,MACAU INTL
+NP000444540,27.7,85.367,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,yes,urban,NP,public,KATHMANDU AIRPORT
+PKM00041571,33.617,73.099,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,PK,public,CHAKLALA
+TZ000063962,-10.667,35.583,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,TZ,public,SONGEA
+ASN00033013,-20.5534,147.8464,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,AS,public,COLLINSVILLE POST OFFICE
+CHM00054776,37.4,122.683,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CH,public,CHENGSHANTOU
+NPM00044477,26.983,87.35,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,NP,public,DHANKUTA
+PKM00041598,32.933,73.717,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,PK,public,JHELUM
+ASN00033307,-19.4167,146.5364,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,AS,public,WOOLSHED
+CHM00054823,36.6,117.05,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CH,public,JINAN
+PKM00041600,32.5,74.533,Cwa,temperate,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,PK,public,SIALKOT
+CHM00059838,19.1,108.617,Aw,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,urban,CH,public,DONGFANG
+CUW00011706,19.9,-75.15,Aw,tropical,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,CU,public,GUANTANAMO BAY NAS
+NOE00105503,60.5669,9.1333,Dfb,cold,thin_zone_pull_2026-10-02,ghcnd_thin_zone_pull,no,rural,NO,public,NESBYEN-TODOKK
+KSM00047108,37.567,126.967,Cwa,temperate,aw_dwa_set_b_2026-10-04,gsod_aw_dwa_pull,no,urban,KS,public,SEOUL CITY
+KSM00047159,35.1,129.033,Cwa,temperate,aw_dwa_set_b_2026-10-04,gsod_aw_dwa_pull,no,urban,KS,public,BUSAN
+KSG471360,36.567,128.7,Cwa,temperate,aw_dwa_set_b_2026-10-04,gsod_aw_dwa_pull,no,urban,KS,public,ANDONG
+KSG471730,35.417,127.4,Cwa,temperate,aw_dwa_set_b_2026-10-04,gsod_aw_dwa_pull,no,urban,KS,public,NAMWON
+KSG471310,36.633,127.45,Cwa,temperate,aw_dwa_set_b_2026-10-04,gsod_aw_dwa_pull,no,urban,KS,public,CHEONGJU
+KSG471140,37.438,127.96,Dwa,cold,aw_dwa_set_b_2026-10-04,gsod_aw_dwa_pull,no,rural,KS,public,WONJU
+KSG471290,36.767,126.5,Cwa,temperate,aw_dwa_set_b_2026-10-04,gsod_aw_dwa_pull,no,urban,KS,public,SEOSAN
+KSM00047168,34.733,127.75,Cwa,temperate,aw_dwa_set_b_2026-10-04,gsod_aw_dwa_pull,no,urban,KS,public,YEOSU
+NIM00065201,6.577,3.321,Aw,tropical,aw_dwa_set_b_2026-10-04,gsod_aw_dwa_pull,no,urban,NI,public,MURTALA MUHAMMED
+NIM00065046,12.048,8.525,BSh,arid,aw_dwa_set_b_2026-10-04,gsod_aw_dwa_pull,yes,urban,NI,public,MALLAM AMINU INTL
+GHM00065472,5.605,-0.167,Aw,tropical,aw_dwa_set_b_2026-10-04,gsod_aw_dwa_pull,yes,urban,GH,public,KOTOKA INTL
