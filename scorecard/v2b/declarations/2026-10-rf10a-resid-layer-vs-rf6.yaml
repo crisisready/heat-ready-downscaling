@@ -1,0 +1,14 @@
+# Declared before the scorer runs (heatready-nonus-refit, 2026-10-06). The refit after E57: rf10gb's grid-bias prior
+# shifted non-US served deltas (tmax -0.30, tmin +0.28 C in Spain) because it carried neighbours' raw deltas
+# (terrain offsets, shrink-to-zero) and a support feature that acted as a region label. This candidate drops both: a
+# prior of neighbouring stations' rf10a out-of-fold residuals, applied as an additive layer on rf10a (no forest refit,
+# rf10a's CV gate unchanged). Ship bar (Nishant, 2026-10-06): better overall and no worse than rf6 in any zone.
+candidate: ds-2026.10-rf10a-resid-layer
+incumbent: ds-2026.09-rf6
+kind: layer
+declared_at: "2026-10-06"
+aim:
+  subset:
+    zones: [Aw, Dwa]
+  metric: rmse_tmax
+  min_effect_c: 0.05
