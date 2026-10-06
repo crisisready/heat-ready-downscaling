@@ -50,6 +50,7 @@ import numpy as np
 
 from heatready_downscaling.contract import aoa_dissimilarity, feature_importance_weights
 from heatready_downscaling import grid_bias_prior
+from heatready_downscaling import ssod_guard as ssod_guard_mod
 from heatready_downscaling.features import (FEATURE_ORDER, GRID_BIAS_FEATURES, REGIME_FEATURES,
                                             SUPPORTED_FEATURE_ORDERS, build_feature_matrix)
 
@@ -822,6 +823,10 @@ def main() -> None:
     parser.add_argument("--cv-region-map", default=None, metavar="JSON",
                         help="group FIPS regions into single leave-region-out folds, e.g. {\"CH\": \"NE_ASIA\"}; "
                              "recorded in metadata; only with --candidate-only")
+    parser.add_argument("--ssod-allowlist", default=None, metavar="CSV",
+                        help="stations whose 2025+ values were checked against a GSOD twin (ssod_guard): every other "
+                             "non-US GHCN-D row dated 2025-01-01 or later is dropped. Required whenever the corpus "
+                             "has such rows; a header-only CSV drops them all. Recorded in metadata")
     parser.add_argument("--save-oof-dir", default=None,
                         help="also write per-row leave-region-out OOF predictions to DIR/oof_{tmax,tmin}.csv.gz")
     args = parser.parse_args()
@@ -875,6 +880,18 @@ def main() -> None:
             holdout = {"path": os.path.basename(args.holdout_stations), "sha256": hashlib.sha256(f.read()).hexdigest(),
                        "rows_dropped": dropped}
         print(f"Holdout stations dropped: {dropped}")
+
+    ssod_guard = None
+    n_ssod = ssod_guard_mod.count_affected(rows)
+    if n_ssod and not args.ssod_allowlist:
+        raise SystemExit(f"{n_ssod} non-US GHCN-D row(s) are dated on or after {ssod_guard_mod.SWITCH_DATE} (NOAA's "
+                         "SSOD-v2 source switch: TMAX low, TMIN high). Pass --ssod-allowlist CSV (a header-only file "
+                         "drops them all); see heatready_downscaling/ssod_guard.py")
+    if args.ssod_allowlist:
+        rows, ssod_guard = ssod_guard_mod.apply_guard(rows, ssod_guard_mod.read_allowlist(args.ssod_allowlist))
+        ssod_guard.update({"allowlist": os.path.basename(args.ssod_allowlist),
+                           "sha256": ssod_guard_mod.sha256_file(args.ssod_allowlist)})
+        print(f"SSOD-v2 guard: {ssod_guard}")
 
     regime_sources = []
     if args.regime_features_csv:
@@ -974,6 +991,7 @@ def main() -> None:
                                 "shrink_weight": grid_bias_prior.SHRINK_WEIGHT,
                                 "min_days": grid_bias_prior.MIN_DAYS, **grid_bias_meta}} if grid_bias_meta else {}),
         **({"cv_region_map": cv_region_map} if cv_region_map else {}),
+        **({"ssod_guard": ssod_guard} if ssod_guard else {}),
         "excluded_station_rows": excluded_station_rows,
         **({"holdout_stations": holdout} if holdout else {}),
         "targets": ["delta_tmax_c", "delta_tmin_c"],
