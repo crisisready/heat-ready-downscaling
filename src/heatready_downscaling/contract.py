@@ -210,6 +210,17 @@ def derive_zones_passing_cv_gate(metadata: dict) -> dict[str, dict[str, bool]]:
     return out
 
 
+def check_lapse_contract(bundle: dict, metadata: dict) -> None:
+    """A lapse-base model's k (and optional offset cap) is written to both model.joblib and metadata.json by the
+    trainer. Serving subtracts the joblib's value, so a disagreement between the two (a half-copied or hand-edited
+    artifact) must refuse to load: serving without the term adds k x offset (about +5 C at 800 m) to every row."""
+    for key in ("tmax", "tmin"):
+        if float((metadata.get("lapse_k_c_per_m") or {}).get(key, 0.0)) != float((bundle.get("lapse_k") or {}).get(key, 0.0)):
+            raise ValueError(f"model '{metadata.get('model_version')}': lapse_k[{key}] differs between metadata.json and model.joblib")
+    if metadata.get("lapse_offset_cap_m") != bundle.get("lapse_offset_cap_m"):
+        raise ValueError(f"model '{metadata.get('model_version')}': lapse_offset_cap_m differs between metadata.json and model.joblib")
+
+
 class QRFModelAdapter:
     """v1's only concrete ModelAdapter -- wraps a joblib bundle
     {model_tmax, model_tmin, metadata, zones_passing_cv_gate,
@@ -258,6 +269,7 @@ class QRFModelAdapter:
         metadata = json.loads(client.get_object(Bucket=bucket, Key=f"{prefix}metadata.json")["Body"].read())
 
         validate_feature_order(metadata["feature_order"])
+        check_lapse_contract(bundle, metadata)
 
         bundle["metadata"] = metadata
         bundle["zones_passing_cv_gate"] = derive_zones_passing_cv_gate(metadata)
@@ -309,7 +321,7 @@ class QRFModelAdapter:
         """
         import numpy as np
 
-        from heatready_downscaling.features import build_feature_matrix
+        from heatready_downscaling.features import build_feature_matrix, lapse_term
 
         model_bundle = self._bundle
         model = model_bundle["model_tmax"] if target == "tmax" else model_bundle["model_tmin"]
@@ -345,6 +357,11 @@ class QRFModelAdapter:
             )
         if predict_idx:
             preds[predict_idx] = model.predict(X[predict_idx], quantiles=list(_QUANTILES))
+            # Lapse-base models fit delta + k * elevation offset; the same term comes back out here, on all three
+            # quantiles (interval width is unchanged). No-op (k = 0) for every model without a lapse term.
+            preds[predict_idx] -= lapse_term(
+                X[predict_idx], tuple(metadata["feature_order"]), model_bundle.get("lapse_k", {}).get(target, 0.0),
+                model_bundle.get("lapse_offset_cap_m"))[:, None]
 
         for i, r in enumerate(rows):
             if not complete_mask[i]:

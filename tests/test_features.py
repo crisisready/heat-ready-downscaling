@@ -4,6 +4,7 @@ import math
 from datetime import date
 from unittest.mock import patch
 
+import numpy as np
 import pytest
 
 from heatready_downscaling import features
@@ -116,3 +117,16 @@ class TestBuildFeatureMatrix:
         idx = features.FEATURE_ORDER.index("grid_diurnal_range_c")
         assert complete_mask == [True]
         assert X[0, idx] == pytest.approx(35.0 - 22.0)
+
+
+class TestLapseTerm:
+    def test_zero_k_is_zeros(self):
+        from heatready_downscaling.features import FEATURE_ORDER, lapse_term
+        assert (lapse_term(np.ones((3, len(FEATURE_ORDER))), FEATURE_ORDER, 0.0) == 0).all()
+
+    def test_term_is_k_times_offset_and_cap_clips_both_signs(self):
+        from heatready_downscaling.features import FEATURE_ORDER, lapse_term
+        X = np.zeros((3, len(FEATURE_ORDER)))
+        X[:, FEATURE_ORDER.index("elevation_rel_to_gridcell_m")] = [800.0, -800.0, 100.0]
+        assert lapse_term(X, FEATURE_ORDER, 0.0065) == pytest.approx([5.2, -5.2, 0.65])
+        assert lapse_term(X, FEATURE_ORDER, 0.0065, cap_m=500.0) == pytest.approx([3.25, -3.25, 0.65])
