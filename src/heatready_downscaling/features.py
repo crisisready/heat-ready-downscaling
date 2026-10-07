@@ -73,6 +73,29 @@ FEATURE_ORDER_GRIDBIAS = FEATURE_ORDER + GRID_BIAS_FEATURES
 SUPPORTED_FEATURE_ORDERS = {"base": FEATURE_ORDER, "regime": FEATURE_ORDER_REGIME, "gridbias": FEATURE_ORDER_GRIDBIAS}
 
 
+LAPSE_OFFSET_FEATURE = "elevation_rel_to_gridcell_m"
+
+
+def lapse_term(X, feature_order: tuple, k: float, cap_m: float | None = None):
+    """Per-row lapse term k * (elevation_rel_to_gridcell_m, clipped to +-cap_m when a cap is set), in C.
+
+    A lapse-base model (heatready-lapse-ship) fits delta + lapse_term and serves median - lapse_term, so the served
+    delta is on the same scale as every other model's. The trainer, the QRF adapter and the API's predict_downscaled
+    all call this one definition; k = 0 returns zeros (every model without a lapse term). The offset column is part of
+    every supported feature order and a complete row always has it, so the term is defined for every training and
+    serving row.
+    """
+    import numpy as np
+
+    X = np.asarray(X, dtype=float)
+    if not k:
+        return np.zeros(X.shape[0])
+    e = X[:, feature_order.index(LAPSE_OFFSET_FEATURE)]
+    if cap_m is not None:
+        e = np.clip(e, -float(cap_m), float(cap_m))
+    return float(k) * e
+
+
 def _doy_trig(d) -> tuple[float, float]:
     """Cyclic day-of-year encoding -- a raw integer would put Dec-31 and
     Jan-1 maximally apart; (sin, cos) keeps them adjacent."""

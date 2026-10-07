@@ -489,3 +489,26 @@ def test_merge_extra_rows_keeps_tmax_only_rows_and_drops_them_from_tmin_only():
     merged, counts = td.merge_extra_rows([], [base, {**base, "date": "2023-05-03", "delta_tmax_c": None}])
     assert counts["added"] == 1 and counts["dropped_null"] == 1
     assert td.math.isfinite(merged[0]["delta_tmax_c"]) and merged[0]["delta_tmin_c"] is None
+
+
+class TestLapseBaseCv:
+    def test_shift_cv_by_lapse_moves_lo_median_hi_and_keeps_nan(self):
+        cv = {"valid": np.array([True, False]), "oof_lo": np.array([1.0, np.nan]), "oof_median": np.array([2.0, np.nan]),
+              "oof_hi": np.array([3.0, np.nan]), "oof_di": np.array([0.5, np.nan])}
+        out = td.shift_cv_by_lapse(cv, np.array([0.5, 0.5]))
+        assert out["oof_median"][0] == 1.5 and out["oof_lo"][0] == 0.5 and out["oof_hi"][0] == 2.5
+        assert np.isnan(out["oof_median"][1])
+        assert cv["oof_median"][0] == 2.0  # input untouched
+
+    def test_cv_of_a_lapse_fit_scores_on_the_observed_delta_scale(self):
+        # delta is exactly -k * offset: the lapse-base forest sees a constant target, the shifted CV recovers delta
+        from heatready_downscaling.features import FEATURE_ORDER, lapse_term
+        k = 0.0065
+        rows = _make_rows(60, ["US", "FR", "GM"], {"US": "Cfa", "FR": "Cfb", "GM": "Cfb"})
+        for r in rows:
+            r["delta_tmax_c"] = -k * r["elevation_rel_to_gridcell_m"]
+        X, y, regions, *_ = td.build_training_feature_matrix(rows, "tmax")
+        term = lapse_term(X, FEATURE_ORDER, k)
+        with patch.object(td, "_MIN_FOLD_TRAIN_ROWS", 10):
+            cv = td.shift_cv_by_lapse(td.leave_region_out_cv(X, y + term, regions, n_jobs=1), term)
+        assert np.abs(cv["oof_median"] - y).max() < 1e-6

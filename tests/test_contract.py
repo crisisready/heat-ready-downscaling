@@ -340,3 +340,82 @@ class TestConfidenceClass:
 
     def test_low_above_medium_threshold(self):
         assert contract._confidence_class(3.0, False) == "low"
+
+
+class TestLapseBase:
+    """heatready-lapse-ship: a lapse-base model fits delta + k * offset, serving subtracts it again."""
+    K, E = 0.0065, 800.0
+
+    def _adapters(self, **bundle_extra):
+        plain = contract.QRFModelAdapter(_bundle(np.random.RandomState(0)))
+        lap = _bundle(np.random.RandomState(0))  # same forests, same rows
+        lap.update(bundle_extra)
+        return plain, contract.QRFModelAdapter(lap)
+
+    def test_no_lapse_k_changes_nothing(self):
+        plain, same = self._adapters()
+        row = {**_ROW, "elevation_rel_to_gridcell_m": self.E}
+        assert plain.predict([row], "tmax")[0]["delta_c"] == same.predict([row], "tmax")[0]["delta_c"]
+
+    def test_served_delta_subtracts_k_times_offset_and_interval_is_unchanged(self):
+        plain, lap = self._adapters(lapse_k={"tmax": self.K, "tmin": 0.0})
+        row = {**_ROW, "elevation_rel_to_gridcell_m": self.E}
+        a, b = plain.predict([row], "tmax")[0], lap.predict([row], "tmax")[0]
+        assert b["delta_c"] == pytest.approx(a["delta_c"] - self.K * self.E)
+        assert b["ci95_c"] == pytest.approx(a["ci95_c"])
+
+    def test_negative_offset_adds(self):
+        plain, lap = self._adapters(lapse_k={"tmax": self.K, "tmin": 0.0})
+        row = {**_ROW, "elevation_rel_to_gridcell_m": -300.0}
+        assert lap.predict([row], "tmax")[0]["delta_c"] == pytest.approx(plain.predict([row], "tmax")[0]["delta_c"] + self.K * 300.0)
+
+    def test_tmin_is_never_shifted(self):
+        plain, lap = self._adapters(lapse_k={"tmax": self.K, "tmin": 0.0})
+        bundle = lap._bundle
+        for b in (plain._bundle, bundle):
+            b["zones_passing_cv_gate"]["tmin"]["BWh"] = True
+        row = {**_ROW, "elevation_rel_to_gridcell_m": self.E}
+        assert lap.predict([row], "tmin")[0]["delta_c"] == plain.predict([row], "tmin")[0]["delta_c"]
+
+    def test_offset_cap_limits_the_subtracted_term(self):
+        plain, lap = self._adapters(lapse_k={"tmax": self.K, "tmin": 0.0}, lapse_offset_cap_m=500.0)
+        row = {**_ROW, "elevation_rel_to_gridcell_m": self.E}
+        assert lap.predict([row], "tmax")[0]["delta_c"] == pytest.approx(plain.predict([row], "tmax")[0]["delta_c"] - self.K * 500.0)
+
+    def test_round_trip_recovers_the_observed_delta_scale(self):
+        # a forest fit on delta + k * offset, served through the adapter, returns delta
+        rng = np.random.RandomState(1)
+        n = 400
+        X = rng.normal(size=(n, len(FEATURE_ORDER)))
+        e_idx = FEATURE_ORDER.index("elevation_rel_to_gridcell_m")
+        X[:, e_idx] = rng.uniform(-600, 600, n)
+        delta = 1.5  # constant true delta
+        forest = RandomForestQuantileRegressor(n_estimators=20, min_samples_leaf=5, random_state=0).fit(X, delta + self.K * X[:, e_idx])
+        bundle = _bundle(rng)
+        bundle["model_tmax"] = forest
+        bundle["lapse_k"] = {"tmax": self.K, "tmin": 0.0}
+        row = {**_ROW, "elevation_rel_to_gridcell_m": 400.0}
+        # the row's other features differ from X, but the target is constant in them: the forest's median is delta + k * 400
+        out = contract.QRFModelAdapter(bundle).predict([row], "tmax")[0]
+        assert out["delta_c"] == pytest.approx(delta + self.K * 400.0 - self.K * 400.0, abs=0.35)
+
+
+class TestCheckLapseContract:
+    def test_no_lapse_anywhere_passes(self):
+        contract.check_lapse_contract({}, {"model_version": "m"})
+
+    def test_matching_k_passes(self):
+        k = {"tmax": 0.0065, "tmin": 0.0}
+        contract.check_lapse_contract({"lapse_k": k, "lapse_offset_cap_m": None}, {"lapse_k_c_per_m": k, "lapse_offset_cap_m": None})
+
+    def test_metadata_k_without_joblib_k_refuses(self):
+        with pytest.raises(ValueError, match="lapse_k"):
+            contract.check_lapse_contract({}, {"model_version": "m", "lapse_k_c_per_m": {"tmax": 0.0065, "tmin": 0.0}})
+
+    def test_joblib_k_without_metadata_k_refuses(self):
+        with pytest.raises(ValueError, match="lapse_k"):
+            contract.check_lapse_contract({"lapse_k": {"tmax": 0.0065, "tmin": 0.0}}, {"model_version": "m"})
+
+    def test_cap_mismatch_refuses(self):
+        with pytest.raises(ValueError, match="lapse_offset_cap_m"):
+            contract.check_lapse_contract({"lapse_offset_cap_m": 500.0}, {"model_version": "m", "lapse_offset_cap_m": None})

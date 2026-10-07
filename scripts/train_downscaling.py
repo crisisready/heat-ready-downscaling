@@ -51,7 +51,7 @@ import numpy as np
 from heatready_downscaling.contract import aoa_dissimilarity, feature_importance_weights
 from heatready_downscaling import grid_bias_prior
 from heatready_downscaling import ssod_guard as ssod_guard_mod
-from heatready_downscaling.features import (FEATURE_ORDER, GRID_BIAS_FEATURES, REGIME_FEATURES,
+from heatready_downscaling.features import (FEATURE_ORDER, GRID_BIAS_FEATURES, REGIME_FEATURES, lapse_term,
                                             SUPPORTED_FEATURE_ORDERS, build_feature_matrix)
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -430,6 +430,15 @@ def _fit_one_qrf_fold(
         "lo": preds[:, 0], "median": preds[:, 1], "hi": preds[:, 2], "di": di,
         "n_train": int(train_mask.sum()), "n_test": int(test_mask.sum()),
     }
+
+
+def shift_cv_by_lapse(cv: dict, term: np.ndarray) -> dict:
+    """The CV folds of a lapse-base model fit delta + term, so their out-of-fold lo/median/hi are on the shifted scale;
+    subtract the term to score and calibrate on the served scale (observed delta), exactly as serving does."""
+    out = dict(cv)
+    for k in ("oof_lo", "oof_median", "oof_hi"):
+        out[k] = cv[k] - term
+    return out
 
 
 def leave_region_out_cv(X: np.ndarray, y: np.ndarray, regions: list[str], n_jobs: int = -1,
@@ -827,6 +836,12 @@ def main() -> None:
                         help="stations whose 2025+ values were checked against a GSOD twin (ssod_guard): every other "
                              "non-US GHCN-D row dated 2025-01-01 or later is dropped. Required whenever the corpus "
                              "has such rows; a header-only CSV drops them all. Recorded in metadata")
+    parser.add_argument("--lapse-k-tmax", type=float, default=0.0, metavar="C_PER_M",
+                        help="lapse base for tmax (heatready-lapse-ship): fit delta + k * elevation_rel_to_gridcell_m "
+                             "(0.0065 = the standard lapse rate) and serve median - k * offset. tmin is never changed. "
+                             "k is written to metadata.json and model.joblib; only with --candidate-only")
+    parser.add_argument("--lapse-offset-cap-m", type=float, default=None, metavar="M",
+                        help="clip the offset in the lapse term to +-M metres in the fit and in serving")
     parser.add_argument("--save-oof-dir", default=None,
                         help="also write per-row leave-region-out OOF predictions to DIR/oof_{tmax,tmin}.csv.gz")
     args = parser.parse_args()
@@ -838,6 +853,14 @@ def main() -> None:
         raise SystemExit("--feature-set gridbias is only allowed with --candidate-only")
     if args.cv_region_map and not args.candidate_only:
         raise SystemExit("--cv-region-map is only allowed with --candidate-only")
+    if (args.lapse_k_tmax or args.lapse_offset_cap_m is not None) and not args.candidate_only:
+        raise SystemExit("--lapse-k-tmax / --lapse-offset-cap-m are only allowed with --candidate-only")
+    if args.lapse_offset_cap_m is not None and not args.lapse_k_tmax:
+        raise SystemExit("--lapse-offset-cap-m needs --lapse-k-tmax")
+    if args.lapse_k_tmax and args.feature_set != "base":
+        raise SystemExit("--lapse-k-tmax is only supported with --feature-set base (the grid-bias refit and the regime "
+                         "sets were not validated with a lapse term)")
+    lapse_k = {"tmax": float(args.lapse_k_tmax), "tmin": 0.0}
     feature_order = SUPPORTED_FEATURE_ORDERS[args.feature_set]
     if args.extra_rows_json and not args.candidate_only:
         raise SystemExit("--extra-rows-json trains on rows that aren't in ghcn_training; it is only allowed "
@@ -926,7 +949,9 @@ def main() -> None:
         print(f"[{target}] {len(y)} usable row(s) across {len(set(regions))} region(s), {len(set(zones))} climate zone(s)")
 
         gb_ctx = grid_bias_context(rows, keep, feature_order)
-        cv = leave_region_out_cv(X, y, regions, n_jobs=args.cv_n_jobs, grid_bias_ctx=gb_ctx)
+        lapse = lapse_term(X, feature_order, lapse_k[target], args.lapse_offset_cap_m)
+        y_fit = y + lapse  # the forest fits delta + k * offset; every score and the served value subtract it again
+        cv = shift_cv_by_lapse(leave_region_out_cv(X, y_fit, regions, n_jobs=args.cv_n_jobs, grid_bias_ctx=gb_ctx), lapse)
         if gb_ctx is None:
             print(f"[{target}] running regression-kriging comparison baseline...")
             kriging_oof_median = regression_kriging_cv(X, y, regions, lons, lats, n_jobs=args.cv_n_jobs)
@@ -974,15 +999,20 @@ def main() -> None:
             ood_thresholds.append(ood_threshold)
 
         from quantile_forest import RandomForestQuantileRegressor
-        final_model = RandomForestQuantileRegressor(**_QRF_PARAMS).fit(X, y)
+        final_model = RandomForestQuantileRegressor(**_QRF_PARAMS).fit(X, y_fit)
         artifact_bundle[f"model_{target}"] = final_model
         artifact_bundle.update(_build_aoa_index(final_model, X, target, seed=_QRF_PARAMS["random_state"]))
 
         metadata_cv[target] = zone_metrics
         metadata_conformal[target] = q95_by_zone
 
+    artifact_bundle["lapse_k"] = lapse_k
+    artifact_bundle["lapse_offset_cap_m"] = args.lapse_offset_cap_m
     metadata = {
         "model_version": args.model_version,
+        "lapse_k_c_per_m": lapse_k,
+        "lapse_offset_cap_m": args.lapse_offset_cap_m,
+        "lapse_offset_feature": "elevation_rel_to_gridcell_m",
         "trained_at": datetime.utcnow().isoformat() + "Z",
         "feature_order": list(feature_order),
         "regime_features_sources": regime_sources,
