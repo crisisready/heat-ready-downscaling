@@ -5,7 +5,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
 
-from build_thin_zone_rows import coverage_by_year, read_stations  # noqa: E402
+from build_thin_zone_rows import coverage_by_year, load_obsfile_series, read_stations  # noqa: E402
 from scorecard_build_truth_set import airport_tag, hav_km  # noqa: E402
 from scorecard_extend_truth_set import extend  # noqa: E402
 
@@ -111,3 +111,21 @@ def test_apply_tmax_only_nulls_tmin_target_for_flagged_stations_only():
     out = apply_tmax_only(rows, [{"station_id": "A", "tmax_only": True}, {"station_id": "B", "tmax_only": False}])
     assert out[0]["station_tmin_c"] is None and out[0]["delta_tmin_c"] is None and out[0]["grid_tmin_c"] == 0.5
     assert out[1] == rows[1]
+
+
+def test_obsfile_source_reads_series_file_restricted_to_dates(tmp_path):
+    import json
+    from datetime import date
+    p = tmp_path / "sel.csv"
+    p.write_text("id,lat,lon,elev,source\nXA1,40.0,-3.0,600,obsfile\nXA2,41.0,-3.0,500,obsfile\n")
+    stations = read_stations(str(p))
+    assert {s["source"] for s in stations} == {"obsfile"}
+    obs = tmp_path / "obs"
+    obs.mkdir()
+    (obs / "XA1.json").write_text(json.dumps({"series": [
+        {"date": "2022-12-31", "station_tmax_c": 10.0, "station_tmin_c": 2.0},
+        {"date": "2023-01-01", "station_tmax_c": 11.0, "station_tmin_c": 3.0},
+        {"date": "2026-01-01", "station_tmax_c": 12.0, "station_tmin_c": 4.0}]}))
+    got = load_obsfile_series(stations, str(obs), date(2023, 1, 1), date(2025, 12, 31))
+    assert [o["date"] for o in got["XA1"]] == ["2023-01-01"]
+    assert got["XA2"] == []  # a missing file is an empty series, left out by the caller
