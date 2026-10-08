@@ -9,6 +9,11 @@ ghcn.fetch_ghcn_daily_bulk_concurrent (same QC-flag path as the main corpus). Gr
 covariates come from the same helpers build_gsod_bsh_rows.py and build_training_set.py use, and rows are
 assembled by build_gsod_bsh_rows.assemble_rows, so a row here is built exactly as every other ghcn_training row.
 
+obsfile stations (urban station-data chunk 1, 2026-10): a selection row with source=obsfile takes its daily series from
+--obs-dir/<id>.json ({"series": [{date, station_tmax_c, station_tmin_c}, ...]}), fetched and plausibility-checked beforehand by
+the source's own fetcher (AEMET OpenData: research/urban-station-data/aemet_fetch_obs.py in heat-risk-data-api). The builder then
+treats them like any other station.
+
 GSOD stations (chunk C-ref, 2026-10-04): a selection row with source=gsod and usaf/wban columns takes its
 observations from NOAA GSOD instead (build_gsod_bsh_rows.parse_gsod_csv, same parsing and plausibility checks), and
 tmax_only=True nulls that station's tmin target (GSOD's 00-24 UTC day cuts across the morning minimum east of about
@@ -55,7 +60,7 @@ def read_stations(path, only=None):
             except (KeyError, TypeError, ValueError):
                 elev = None
             source = (r.get("source") or "ghcnd").strip()
-            if source not in ("ghcnd", "gsod"):
+            if source not in ("ghcnd", "gsod", "obsfile"):
                 raise ValueError(f"{r['id']}: unknown source {source!r}")
             if source == "gsod" and not (r.get("usaf") and r.get("wban")):
                 raise ValueError(f"{r['id']}: source=gsod needs usaf and wban")
@@ -121,6 +126,21 @@ def fetch_gsod_series(stations, start_date, end_date, out_dir):
                 series.extend(parse_gsod_csv(body.decode("latin-1")))
         series_by_sid[s["station_id"]] = [o for o in series if lo <= o["date"] <= hi]
     return series_by_sid, failed
+
+
+def load_obsfile_series(stations, obs_dir, start_date, end_date):
+    """Series for source=obsfile stations from obs_dir/<id>.json, restricted to [start_date, end_date]. A missing file gives an
+    empty series (the station is then reported in no_ghcnd_series and left out, as for a failed GHCN-D fetch)."""
+    lo, hi = start_date.isoformat(), end_date.isoformat()
+    out = {}
+    for s in stations:
+        path = os.path.join(obs_dir, s["station_id"] + ".json")
+        if not os.path.exists(path):
+            out[s["station_id"]] = []
+            continue
+        with open(path) as f:
+            out[s["station_id"]] = [o for o in json.load(f)["series"] if lo <= o["date"] <= hi]
+    return out
 
 
 def apply_tmax_only(rows, stations):
@@ -204,6 +224,7 @@ def main(argv=None):
     ap.add_argument("--start-date", type=date.fromisoformat, required=True)
     ap.add_argument("--end-date", type=date.fromisoformat, required=True)
     ap.add_argument("--out-dir", required=True)
+    ap.add_argument("--obs-dir", help="directory of <station_id>.json series files for source=obsfile stations")
     ap.add_argument("--station-ids", nargs="+", help="restrict to these station ids (smoke tests)")
     ap.add_argument("--cluster-workers", type=int, default=1,
                     help="covariate clusters processed in parallel (separate processes); default 1")
@@ -235,6 +256,11 @@ def main(argv=None):
     gsod_series, failed_gsod = fetch_gsod_series([s for s in stations if s["source"] == "gsod"],
                                                  args.start_date, args.end_date, args.out_dir)
     series_by_sid.update(gsod_series)
+    obs_stations = [s for s in stations if s["source"] == "obsfile"]
+    if obs_stations:
+        if not args.obs_dir:
+            raise SystemExit("source=obsfile stations need --obs-dir")
+        series_by_sid.update(load_obsfile_series(obs_stations, args.obs_dir, args.start_date, args.end_date))
     no_series = sorted(s["station_id"] for s in stations if not series_by_sid.get(s["station_id"]))
     if no_series:  # a failed fetch and a genuinely empty station look the same here, so say so and mark incomplete
         logger.warning("no GHCN-D/GSOD series for %d station(s), left out: %s", len(no_series), no_series)
