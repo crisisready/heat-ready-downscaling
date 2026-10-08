@@ -101,9 +101,14 @@ def load_training_rows() -> list[dict]:
     missing a specific feature per-target, so a row missing only
     lst_warm_season_anomaly_c still contributes to whichever rows/targets
     it CAN support -- filtering it out entirely at the SQL level would
-    silently waste otherwise-usable station-days."""
+    silently waste otherwise-usable station-days.
+
+    Rows come back in (station_id, date) order, both from the query and again
+    here in Python. A seeded QRF builds a different forest for a different row
+    order, so an unordered SELECT made two fits of the same data differ (global
+    tmax RMSE 2.2143-2.2181, up to 1 C per station-day)."""
     import db
-    return db.execute(
+    rows = db.execute(
         """
         SELECT station_id, date, lon, lat, region, climate_zone,
                station_tmax_c, station_tmin_c, grid_tmax_c, grid_tmin_c,
@@ -117,8 +122,10 @@ def load_training_rows() -> list[dict]:
         WHERE region IS NOT NULL AND climate_zone IS NOT NULL
           AND grid_tmax_c IS NOT NULL AND grid_tmin_c IS NOT NULL
           AND delta_tmax_c IS NOT NULL AND delta_tmin_c IS NOT NULL
+        ORDER BY station_id, date
         """,
     )
+    return sorted(rows, key=lambda r: (r["station_id"], str(r["date"])))
 
 
 EXTRA_ROWS_ZONE = "_extra_rows"

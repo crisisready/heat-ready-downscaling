@@ -464,6 +464,20 @@ class TestLoadValidationRowsZonesFilter:
         assert "climate_zone IN" not in captured["query"]
         assert captured["params"] == ()
 
+    def test_unsampled_query_is_ordered_and_sampled_query_stays_random(self, monkeypatch):
+        import db
+        captured = []
+
+        def fake_execute(query, params):
+            captured.append(query)
+            return []
+
+        monkeypatch.setattr(db, "execute", fake_execute)
+        vld.load_validation_rows(sample=None, seed=1, zones=None)
+        vld.load_validation_rows(sample=10, seed=1, zones=None)
+        assert "ORDER BY station_id, date" in captured[0]
+        assert "ORDER BY random()" in captured[1] and "station_id, date" not in captured[1].split("ORDER BY")[-1]
+
     def test_zones_adds_in_clause_with_one_placeholder_per_zone(self, monkeypatch):
         import db
         captured = {}

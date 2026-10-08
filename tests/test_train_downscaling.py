@@ -512,3 +512,42 @@ class TestLapseBaseCv:
         with patch.object(td, "_MIN_FOLD_TRAIN_ROWS", 10):
             cv = td.shift_cv_by_lapse(td.leave_region_out_cv(X, y + term, regions, n_jobs=1), term)
         assert np.abs(cv["oof_median"] - y).max() < 1e-6
+
+
+class TestLoadTrainingRowsOrdering:
+    """An unordered SELECT let a seeded QRF fit a different forest per row order
+    (global tmax RMSE spread 2.2143-2.2181). The load must be order-independent."""
+
+    @staticmethod
+    def _fake_db(monkeypatch, execute):
+        # db is the private API repo's module and is not installed here.
+        import types
+        fake = types.ModuleType("db")
+        fake.execute = execute
+        monkeypatch.setitem(sys.modules, "db", fake)
+
+    def test_query_has_deterministic_order_by(self, monkeypatch):
+        captured = {}
+
+        def fake_execute(query, *a, **k):
+            captured["query"] = query
+            return []
+
+        self._fake_db(monkeypatch, fake_execute)
+        td.load_training_rows()
+        assert "ORDER BY station_id, date" in captured["query"]
+
+    def test_shuffled_inputs_give_identical_rows(self, monkeypatch):
+        rows = _make_rows(6, ["a", "b", "c"], {"a": "Cfb", "b": "BSh", "c": "Cfa"})
+        shuffled_a = list(rows)
+        shuffled_b = list(rows)
+        np.random.RandomState(1).shuffle(shuffled_a)
+        np.random.RandomState(2).shuffle(shuffled_b)
+        assert shuffled_a != shuffled_b
+        self._fake_db(monkeypatch, lambda *a, **k: shuffled_a)
+        out_a = td.load_training_rows()
+        self._fake_db(monkeypatch, lambda *a, **k: shuffled_b)
+        out_b = td.load_training_rows()
+        assert out_a == out_b
+        keys = [(r["station_id"], str(r["date"])) for r in out_a]
+        assert keys == sorted(keys)

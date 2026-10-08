@@ -200,6 +200,8 @@ def load_validation_rows(sample: int | None, seed: int, zones: list[str] | None 
     if sample:
         query += " ORDER BY random() LIMIT %s"
         params.append(int(sample))
+    else:
+        query += " ORDER BY station_id, date"
     rows = db.execute(query, tuple(params))
     logger.info("Loaded %d ghcn_training row(s) for validation%s", len(rows),
                 f" (zones={sorted(zones)})" if zones else "")
