@@ -125,7 +125,7 @@ def load_training_rows() -> list[dict]:
         ORDER BY station_id, date
         """,
     )
-    return sorted(rows, key=lambda r: (r["station_id"], str(r["date"])))
+    return sorted(rows, key=lambda r: (r["station_id"] or "", str(r["date"])))
 
 
 EXTRA_ROWS_ZONE = "_extra_rows"
