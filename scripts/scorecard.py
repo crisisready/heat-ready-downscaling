@@ -399,10 +399,15 @@ def residual_layer_table(train_rows: list[dict], target: str, feature_order, qrf
     months = np.array([int(str(train_rows[i]["date"])[5:7]) for i in keep])
     folds = np.array([int(hashlib.sha256(s.encode()).hexdigest(), 16) % layer["folds"] for s in sids])
     resid = np.full(len(y), np.nan)
+    if len(set(folds.tolist())) < 2:
+        raise SystemExit(f"[{target}] residual layer: the training stations fall in fewer than 2 folds")
     for k in range(layer["folds"]):
         hold = folds == k
+        if not hold.any():
+            continue
         m = RandomForestQuantileRegressor(**{**qrf_params, **layer.get("oof_qrf_params", {}), "n_jobs": n_jobs})
         m.fit(X[~hold], y[~hold])
+        # unweighted median: same values as the served (weighted) median on these forests, about 200x faster
         resid[hold] = y[hold] - m.predict(X[hold], quantiles=0.5, weighted_quantile=False)
         print(f"[{target}] residual layer fold {k + 1}/{layer['folds']}: {int(hold.sum())} rows, "
               f"rmse {float(np.sqrt(np.mean(resid[hold] ** 2))):.3f} C", flush=True)
@@ -443,7 +448,9 @@ def recipe_predictions(rows, recipe, metadata, cutoff, target, truth_ids, test_r
     served_meta = {"gate": metadata.get("cv", {}).get("leave_region_out", {}).get(target, {}).get("by_zone"),
                    "q95": metadata.get("conformal_q95_by_zone" if target == "tmax" else "conformal_q95_by_zone_tmin"),
                    "ood": metadata.get("ood_aoa_threshold")}
-    key = _cache_key({**key_parts, "recipe": recipe, "cutoff": cutoff, "target": target, "served_meta": served_meta,
+    allow = ({"ssod_allowlist_sha256": _sha256_file(_repo_path("", recipe["ssod_allowlist"]))}
+             if recipe.get("ssod_allowlist") else {})   # the list's contents, not just its path, shape the corpus
+    key = _cache_key({**key_parts, **allow, "recipe": recipe, "cutoff": cutoff, "target": target, "served_meta": served_meta,
                       "train_rows_sha256": rows_fingerprint(train), "test_rows_sha256": rows_fingerprint(test_rows)})
     path = os.path.join(cache_dir, f"{recipe['model_version']}__{cutoff}__{target}__{key}.csv.gz")
     if os.path.exists(path):
@@ -553,7 +560,6 @@ def cmd_run(args) -> None:
     frames, years_out, prov = [], [], []
     for cutoff in spec["tiers"][args.tier]["cutoffs"]:
         year = sc.score_year(cutoff)
-        inc_train_stations = None
         for target in ("tmax", "tmin"):
             keys = [(s, d) for s, d, t in manifest if t == target and int(d[:4]) == year]
             if not keys:
@@ -583,13 +589,13 @@ def cmd_run(args) -> None:
             print(f"[{cutoff} {target}] {status} ({len(keys)} rows)", flush=True)
             if status != "scored":
                 continue
-            if inc_train_stations is None:
-                tr = recipe_corpus(rows, inc, cutoff, excluded, target)
-                coords = {r["station_id"]: (r["lat"], r["lon"]) for r in tr}
-                lats = np.array([c[0] for c in coords.values()], float)
-                lons = np.array([c[1] for c in coords.values()], float)
-                inc_train_stations = {sid: _haversine_min_km(float(s["lat"]), float(s["lon"]), lats, lons)
-                                      for sid, s in st_by_id.items()}
+            # per target: an incumbent with target-specific extra rows trains each target on different stations
+            tr = recipe_corpus(rows, inc, cutoff, excluded, target)
+            coords = {r["station_id"]: (r["lat"], r["lon"]) for r in tr}
+            lats = np.array([c[0] for c in coords.values()], float)
+            lons = np.array([c[1] for c in coords.values()], float)
+            inc_train_stations = {sid: _haversine_min_km(float(s["lat"]), float(s["lon"]), lats, lons)
+                                  for sid, s in st_by_id.items()}
             frames.append(pd.DataFrame({
                 "station_id": [k[0] for k in keys], "date": [k[1] for k in keys], "year": year, "target": target,
                 "zone": [by_key[k]["climate_zone"] for k in keys],
