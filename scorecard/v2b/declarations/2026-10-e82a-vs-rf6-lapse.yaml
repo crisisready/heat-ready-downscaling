@@ -1,0 +1,12 @@
+# Declared 2026-10-30 before any scorer run (heat-risk-data-api RESEARCH_LOG E82 prereg, commit 7f74ae13). Aim: halve
+# BSh's tmin excess over the global v2b tmin target (2.686 vs 2.295 on the E59 rows), so min effect 0.195 C. Served
+# through the incumbent's own CV gate (ds-2026.10-rf6-lapse metadata copied under this name). The plan's ship rule decides.
+candidate: ds-2026.10-e82a
+incumbent: ds-2026.10-rf6-lapse
+kind: model_version
+declared_at: "2026-10-30"
+aim:
+  subset:
+    zones: [BSh]
+  metric: rmse_tmin
+  min_effect_c: 0.195

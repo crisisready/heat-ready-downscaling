@@ -1,0 +1,11 @@
+# Corpus recipe for ds-2026.10-rf6-lapse (served in production since 2026-10-07, E60): rf6's corpus and base
+# features, the lapse base on tmax (fit delta + 0.0065 C/m x elevation offset clipped to 600 m, served minus the
+# term) and the header-only SSOD allowlist the bundle was trained with (sha256 b4b4adcf..., same bytes). The allowlist
+# only drops rows dated 2025 or later, so it changes nothing at any scorecard cutoff; it is here so the recipe states
+# the shipped recipe. tmin carries no term and is rf6's.
+model_version: ds-2026.10-rf6-lapse
+feature_set: base
+extra_rows: []
+lapse_k_tmax: 0.0065
+lapse_offset_cap_m: 600
+ssod_allowlist: scorecard/ssod_guard/allowlist_empty.csv

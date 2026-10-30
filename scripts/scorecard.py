@@ -76,6 +76,40 @@ def load_recipe(path: str) -> dict:
         raise SystemExit("the scorecard refits base and gridbias recipes only; a regime recipe needs its covariate "
                          "CSVs plumbed through first")
     recipe.setdefault("cv_region_map", None)
+    # Optional keys, read with .get() so a recipe without them keeps its cache key:
+    #   lapse_k_tmax, lapse_offset_cap_m  the trainer's --lapse-k-tmax / --lapse-offset-cap-m (tmin never gets a term)
+    #   ssod_allowlist                    the trainer's --ssod-allowlist (repo-relative CSV)
+    #   extra_rows_targets                targets whose fit adds extra_rows (default both)
+    #   qrf_params, qrf_params_targets    overrides of the trainer's _QRF_PARAMS, for the named targets (default both)
+    if recipe.get("lapse_k_tmax") and recipe["feature_set"] != "base":
+        raise SystemExit(f"recipe {path}: a lapse term needs the base feature set, as in the trainer")
+    if recipe.get("lapse_offset_cap_m") is not None and not recipe.get("lapse_k_tmax"):
+        raise SystemExit(f"recipe {path}: lapse_offset_cap_m needs lapse_k_tmax")
+    for key in ("extra_rows_targets", "qrf_params_targets"):
+        if not set(recipe.get(key, ("tmax", "tmin"))) <= {"tmax", "tmin"}:
+            raise SystemExit(f"recipe {path}: {key} must name tmax and/or tmin")
+    unknown = set(recipe.get("qrf_params", {})) - {"n_estimators", "min_samples_leaf", "max_samples", "max_features"}
+    if unknown:
+        raise SystemExit(f"recipe {path}: qrf_params {sorted(unknown)} are not overridable")
+    #   residual_layer_tmin               a station-grouped out-of-fold residual table added to the served median
+    #                                     (residual_layer_table); keys below, oof_qrf_params optional. tmin only:
+    #                                     its out-of-fold fits do not carry tmax's lapse term
+    if "residual_layer_tmax" in recipe:
+        raise SystemExit(f"recipe {path}: residual_layer_tmax is not supported (the lapse term is not in its fits)")
+    for target in ("tmin",):
+        layer = recipe.get(f"residual_layer_{target}")
+        if layer is not None:
+            need = {"length_km", "radius_km", "same_site_km", "shrink_weight", "folds", "min_days"}
+            if recipe["feature_set"] != "base":
+                raise SystemExit(f"recipe {path}: residual_layer_{target} needs the base feature set (a gridbias "
+                                 "prior built from all stations would leak a held-out fold's targets)")
+            if not need <= set(layer) or set(layer) - need - {"oof_qrf_params"} \
+                    or not isinstance(layer["folds"], int) or not isinstance(layer["min_days"], int) or layer["folds"] < 2:
+                raise SystemExit(f"recipe {path}: residual_layer_{target} needs exactly {sorted(need)} "
+                                 "(+ oof_qrf_params), folds >= 2")
+            if set(layer.get("oof_qrf_params", {})) - {"n_estimators", "min_samples_leaf", "max_samples",
+                                                       "max_features"}:
+                raise SystemExit(f"recipe {path}: residual_layer_{target}.oof_qrf_params not overridable")
     return recipe
 
 
@@ -231,12 +265,36 @@ def _haversine_min_km(lat, lon, lats, lons) -> float:
     return float((6371.0 * 2 * np.arcsin(np.sqrt(a))).min()) if len(lats) else float("inf")
 
 
-def recipe_corpus(rows: list[dict], recipe: dict, cutoff: str, truth_ids: set[str]) -> list[dict]:
-    """The recipe's training rows at a cutoff: its own sources, dated on or before the cutoff, with
-    every truth station removed at every date."""
-    srcs = {"ghcn_training", *(x["name"] for x in recipe["extra_rows"])}
-    return [r for r in rows if r["_src"] in srcs and str(r["date"])[:10] <= cutoff
-            and r["station_id"] not in truth_ids]
+def recipe_corpus(rows: list[dict], recipe: dict, cutoff: str, truth_ids: set[str],
+                  target: str | None = None) -> list[dict]:
+    """The recipe's training rows at a cutoff: its own sources (extra rows only for the targets the
+    recipe names), dated on or before the cutoff, with every truth station removed at every date and
+    the recipe's SSOD allowlist applied as the trainer applies it."""
+    srcs = {"ghcn_training"}
+    if target is None or target in recipe.get("extra_rows_targets", ("tmax", "tmin")):
+        srcs |= {x["name"] for x in recipe["extra_rows"]}
+    train = [r for r in rows if r["_src"] in srcs and str(r["date"])[:10] <= cutoff
+             and r["station_id"] not in truth_ids]
+    if recipe.get("ssod_allowlist"):
+        from heatready_downscaling import ssod_guard
+        train, _ = ssod_guard.apply_guard(train, ssod_guard.read_allowlist(_repo_path("", recipe["ssod_allowlist"])))
+    return train
+
+
+def extra_stations_near_truth(rows: list[dict], stations: list[dict], km: float) -> set[str]:
+    """Extra-file stations (never in ghcn_training) within km of a truth station: twins under another id,
+    which would leak the truth into a recipe that adds the file. Removed like truth stations."""
+    skip = {r["station_id"] for r in rows if r["_src"] == "ghcn_training"} | {s["station_id"] for s in stations}
+    coords = {}
+    for r in rows:
+        if r["_src"] != "ghcn_training" and r["station_id"] not in skip and r.get("lat") is not None \
+                and r.get("lon") is not None:
+            coords.setdefault(r["station_id"], (float(r["lat"]), float(r["lon"])))
+    lats = np.array([float(s["lat"]) for s in stations], float)
+    lons = np.array([float(s["lon"]) for s in stations], float)
+    if not coords:
+        return set()
+    return {sid for sid, (la, lo) in coords.items() if _haversine_min_km(la, lo, lats, lons) <= km}
 
 
 _FINGERPRINT_COLS = ("station_id", "date", "climate_zone", "region", "grid_tmax_c", "grid_tmin_c", "delta_tmax_c",
@@ -276,14 +334,15 @@ def attach_grid_bias_for_fit(train_rows: list[dict], test_rows: list[dict], targ
 
 
 def served_predictions(train_rows: list[dict], test_rows: list[dict], target: str, metadata: dict,
-                       n_jobs: int, feature_set: str = "base") -> list[dict]:
+                       n_jobs: int, feature_set: str = "base", recipe: dict | None = None) -> list[dict]:
     """Fit the recipe's QRF on train_rows and return the SERVED result for each test row: the DS
-    serving contract with this version's own CV gate (from its metadata.json)."""
+    serving contract with this version's own CV gate (from its metadata.json). A lapse recipe fits
+    delta + term as the trainer does, and the adapter subtracts it again."""
     import train_downscaling as td
     from quantile_forest import RandomForestQuantileRegressor
 
     from heatready_downscaling.contract import QRFModelAdapter, derive_zones_passing_cv_gate
-    from heatready_downscaling.features import SUPPORTED_FEATURE_ORDERS
+    from heatready_downscaling.features import SUPPORTED_FEATURE_ORDERS, lapse_term
 
     FEATURE_ORDER = SUPPORTED_FEATURE_ORDERS[feature_set]
     if feature_set == "gridbias":
@@ -291,8 +350,14 @@ def served_predictions(train_rows: list[dict], test_rows: list[dict], target: st
     X, y, *_ = td.build_training_feature_matrix(train_rows, target, feature_order=FEATURE_ORDER)
     if len(y) < td._MIN_FOLD_TRAIN_ROWS:
         return []
-    model = RandomForestQuantileRegressor(**{**td._QRF_PARAMS, "n_jobs": n_jobs}).fit(X, y)
+    recipe = recipe or {}
+    lapse_k = {"tmax": float(recipe.get("lapse_k_tmax") or 0.0), "tmin": 0.0}
+    cap = recipe.get("lapse_offset_cap_m")
+    y_fit = np.asarray(y, dtype=float) + lapse_term(X, tuple(FEATURE_ORDER), lapse_k[target], cap)
+    params = recipe.get("qrf_params", {}) if target in recipe.get("qrf_params_targets", ("tmax", "tmin")) else {}
+    model = RandomForestQuantileRegressor(**{**td._QRF_PARAMS, **params, "n_jobs": n_jobs}).fit(X, y_fit)
     bundle = {
+        "lapse_k": lapse_k, "lapse_offset_cap_m": cap,
         f"model_{target}": model,
         "metadata": {"model_version": metadata["model_version"], "feature_order": list(FEATURE_ORDER),
                      "conformal_q95_by_zone": metadata.get("conformal_q95_by_zone", {}),
@@ -301,18 +366,91 @@ def served_predictions(train_rows: list[dict], test_rows: list[dict], target: st
         "zones_passing_cv_gate": derive_zones_passing_cv_gate(metadata),
         **td._build_aoa_index(model, X, target, td._QRF_PARAMS["random_state"]),
     }
-    return QRFModelAdapter(bundle).predict(test_rows, target)
+    results = QRFModelAdapter(bundle).predict(test_rows, target)
+    layer = recipe.get(f"residual_layer_{target}")
+    if layer:
+        table = residual_layer_table(train_rows, target, FEATURE_ORDER, {**td._QRF_PARAMS, **params}, layer, n_jobs)
+        cache = {}
+        for r, res in zip(test_rows, results):
+            if res["applied"] and r.get("lat") is not None and r.get("lon") is not None:
+                k = (float(r["lat"]), float(r["lon"]), int(str(r["date"])[5:7]))
+                if k not in cache:
+                    cache[k] = residual_prior_at(table, *k, layer)
+                res["delta_c"] += cache[k]
+        moved = [v for v in cache.values() if v]
+        print(f"[{target}] residual layer: {sum(len(v[2]) for v in table.values())} station-months, "
+              f"{len(moved)}/{len(cache)} test site-months moved, mean |prior| "
+              f"{np.mean(np.abs(moved)) if moved else 0.0:.3f} C", flush=True)
+    return results
+
+
+def residual_layer_table(train_rows: list[dict], target: str, feature_order, qrf_params: dict, layer: dict,
+                         n_jobs: int) -> dict:
+    """Station-grouped out-of-fold residuals (observed minus the forest's median) of the training rows, as a
+    month -> (lats, lons, mean residual) table of station-months with at least layer["min_days"] rows. A
+    serving port would ship this table and add residual_prior_at() to the served median; no truth station is
+    in train_rows, and every fold's forest is fit without the stations it predicts."""
+    import train_downscaling as td
+    from quantile_forest import RandomForestQuantileRegressor
+
+    X, y, _r, _z, lons, lats, keep = td.build_training_feature_matrix(train_rows, target, return_keep=True,
+                                                                     feature_order=tuple(feature_order))
+    sids = np.array([train_rows[i]["station_id"] for i in keep])
+    months = np.array([int(str(train_rows[i]["date"])[5:7]) for i in keep])
+    folds = np.array([int(hashlib.sha256(s.encode()).hexdigest(), 16) % layer["folds"] for s in sids])
+    resid = np.full(len(y), np.nan)
+    if len(set(folds.tolist())) < 2:
+        raise SystemExit(f"[{target}] residual layer: the training stations fall in fewer than 2 folds")
+    for k in range(layer["folds"]):
+        hold = folds == k
+        if not hold.any():
+            continue
+        m = RandomForestQuantileRegressor(**{**qrf_params, **layer.get("oof_qrf_params", {}), "n_jobs": n_jobs})
+        m.fit(X[~hold], y[~hold])
+        # unweighted median: same values as the served (weighted) median on these forests, about 200x faster
+        resid[hold] = y[hold] - m.predict(X[hold], quantiles=0.5, weighted_quantile=False)
+        print(f"[{target}] residual layer fold {k + 1}/{layer['folds']}: {int(hold.sum())} rows, "
+              f"rmse {float(np.sqrt(np.mean(resid[hold] ** 2))):.3f} C", flush=True)
+    acc = {}
+    for s, mo, la, lo, v in zip(sids, months, lats, lons, resid):
+        a = acc.setdefault((s, mo), [la, lo, 0.0, 0])
+        a[2] += v
+        a[3] += 1
+    table = {}
+    for (s, mo), (la, lo, tot, n) in acc.items():
+        if n >= layer["min_days"]:
+            table.setdefault(mo, []).append((la, lo, tot / n))
+    return {mo: tuple(np.array(c) for c in zip(*v)) for mo, v in table.items()}
+
+
+def residual_prior_at(table: dict, lat: float, lon: float, month: int, layer: dict) -> float:
+    """Gaussian-kernel mean of neighbouring station-months' residuals, shrunk toward 0: sum(w r) / (sum(w) +
+    shrink_weight), neighbours within radius_km and farther than same_site_km (a site never informs itself)."""
+    t = table.get(month)
+    if t is None:
+        return 0.0
+    la, lo, mean = t
+    p1, p2 = math.radians(lat), np.radians(la)
+    h = np.sin((p2 - p1) / 2) ** 2 + math.cos(p1) * np.cos(p2) * np.sin(np.radians(lo - lon) / 2) ** 2
+    km = 2 * 6371.0 * np.arcsin(np.sqrt(np.minimum(h, 1.0)))
+    use = (km > layer["same_site_km"]) & (km <= layer["radius_km"])
+    if not use.any():
+        return 0.0
+    w = np.exp(-0.5 * (km[use] / layer["length_km"]) ** 2)
+    return float((w * mean[use]).sum() / (w.sum() + layer["shrink_weight"]))
 
 
 def recipe_predictions(rows, recipe, metadata, cutoff, target, truth_ids, test_rows, cache_dir, key_parts,
                        n_jobs) -> tuple[dict, dict]:
     """{(station_id, date): (served_delta, ci95)} for one recipe/cutoff/target, from the cache when the
     content key matches. Returns (predictions, provenance)."""
-    train = recipe_corpus(rows, recipe, cutoff, truth_ids)
+    train = recipe_corpus(rows, recipe, cutoff, truth_ids, target)
     served_meta = {"gate": metadata.get("cv", {}).get("leave_region_out", {}).get(target, {}).get("by_zone"),
                    "q95": metadata.get("conformal_q95_by_zone" if target == "tmax" else "conformal_q95_by_zone_tmin"),
                    "ood": metadata.get("ood_aoa_threshold")}
-    key = _cache_key({**key_parts, "recipe": recipe, "cutoff": cutoff, "target": target, "served_meta": served_meta,
+    allow = ({"ssod_allowlist_sha256": _sha256_file(_repo_path("", recipe["ssod_allowlist"]))}
+             if recipe.get("ssod_allowlist") else {})   # the list's contents, not just its path, shape the corpus
+    key = _cache_key({**key_parts, **allow, "recipe": recipe, "cutoff": cutoff, "target": target, "served_meta": served_meta,
                       "train_rows_sha256": rows_fingerprint(train), "test_rows_sha256": rows_fingerprint(test_rows)})
     path = os.path.join(cache_dir, f"{recipe['model_version']}__{cutoff}__{target}__{key}.csv.gz")
     if os.path.exists(path):
@@ -322,7 +460,7 @@ def recipe_predictions(rows, recipe, metadata, cutoff, target, truth_ids, test_r
                 preds[(rec["station_id"], rec["date"])] = (float(rec["served_delta"]),
                                                           float(rec["ci95"]) if rec["ci95"] else float("nan"))
         return preds, {"cache": os.path.basename(path), "cache_hit": True, "sha256": _sha256_file(path)}
-    results = served_predictions(train, test_rows, target, metadata, n_jobs, recipe["feature_set"])
+    results = served_predictions(train, test_rows, target, metadata, n_jobs, recipe["feature_set"], recipe)
     if not results:
         return {}, {"cache": None, "cache_hit": False, "train_rows": len(train),
                     "note": "fewer training rows than the trainer's minimum before this cutoff"}
@@ -389,6 +527,13 @@ def cmd_run(args) -> None:
 
     import train_downscaling as td
     rows, sources = load_rows(spec, [inc] + ([cand] if cand else []), args.data_dir)
+    near = extra_stations_near_truth(rows, stations, float(spec.get("dedupe_km", 1.0)))
+    if near:
+        print(f"{len(near)} extra-file station(s) within {spec.get('dedupe_km', 1.0)} km of a truth station removed "
+              f"from every recipe: {sorted(near)}", flush=True)
+        sources.append({"name": "extra_stations_near_truth", "removed": sorted(near),
+                        "sha256": hashlib.sha256(json.dumps(sorted(near)).encode()).hexdigest()})
+    excluded = truth_ids | near
     by_key = {}
     for r in rows:
         if r["station_id"] in truth_ids:
@@ -415,19 +560,18 @@ def cmd_run(args) -> None:
     frames, years_out, prov = [], [], []
     for cutoff in spec["tiers"][args.tier]["cutoffs"]:
         year = sc.score_year(cutoff)
-        inc_train_stations = None
         for target in ("tmax", "tmin"):
             keys = [(s, d) for s, d, t in manifest if t == target and int(d[:4]) == year]
             if not keys:
                 prov.append({"cutoff": cutoff, "target": target, "status": "no manifest rows"})
                 continue
             test_rows = [by_key[k] for k in keys]
-            p_inc, prov_inc = recipe_predictions(rows, inc, inc_meta, cutoff, target, truth_ids, test_rows,
+            p_inc, prov_inc = recipe_predictions(rows, inc, inc_meta, cutoff, target, excluded, test_rows,
                                                  args.cache_dir, key_parts, args.n_jobs)
             if not p_inc:
                 p_cand, prov_cand = {}, {"note": "not fit: the incumbent has nothing to compare against"}
             elif cand is not None:
-                p_cand, prov_cand = recipe_predictions(rows, cand, cand_meta, cutoff, target, truth_ids, test_rows,
+                p_cand, prov_cand = recipe_predictions(rows, cand, cand_meta, cutoff, target, excluded, test_rows,
                                                        args.cache_dir, key_parts, args.n_jobs)
             else:
                 p_cand = load_candidate_predictions(args.candidate_predictions, cutoff, target)
@@ -445,13 +589,13 @@ def cmd_run(args) -> None:
             print(f"[{cutoff} {target}] {status} ({len(keys)} rows)", flush=True)
             if status != "scored":
                 continue
-            if inc_train_stations is None:
-                tr = recipe_corpus(rows, inc, cutoff, truth_ids)
-                coords = {r["station_id"]: (r["lat"], r["lon"]) for r in tr}
-                lats = np.array([c[0] for c in coords.values()], float)
-                lons = np.array([c[1] for c in coords.values()], float)
-                inc_train_stations = {sid: _haversine_min_km(float(s["lat"]), float(s["lon"]), lats, lons)
-                                      for sid, s in st_by_id.items()}
+            # per target: an incumbent with target-specific extra rows trains each target on different stations
+            tr = recipe_corpus(rows, inc, cutoff, excluded, target)
+            coords = {r["station_id"]: (r["lat"], r["lon"]) for r in tr}
+            lats = np.array([c[0] for c in coords.values()], float)
+            lons = np.array([c[1] for c in coords.values()], float)
+            inc_train_stations = {sid: _haversine_min_km(float(s["lat"]), float(s["lon"]), lats, lons)
+                                  for sid, s in st_by_id.items()}
             frames.append(pd.DataFrame({
                 "station_id": [k[0] for k in keys], "date": [k[1] for k in keys], "year": year, "target": target,
                 "zone": [by_key[k]["climate_zone"] for k in keys],
