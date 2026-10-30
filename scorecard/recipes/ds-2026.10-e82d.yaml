@@ -1,0 +1,27 @@
+# E82 round 2, candidate d (heat-risk-data-api research/bsh-tmin-e82, plan #909 chunk 1, aim BSh tmin): the round-1
+# winner ds-2026.10-e82a plus a station-grouped out-of-fold residual layer on tmin (scripts/scorecard.py
+# residual_layer_table): 5 station-hashed folds of the training corpus, each fold's served-median residual from a
+# forest fit without its stations, averaged per station-month (>= 5 rows), then a Gaussian-kernel prior (length 50 km,
+# radius 150 km, a site within 3 km never informs itself, shrink 2.0) added to the served tmin median on applied rows.
+# Servable: its predict-time inputs are lat, lon and month; a serving port would ship the table in the bundle.
+# Constants set by cold consult (E82 round 2); E58's 150 km tmax version had no skill at held-out stations.
+model_version: ds-2026.10-e82d
+feature_set: base
+extra_rows:
+  - name: e82_final_arid_n3.json
+    sha256: ec9503435830d2408561ba2cb21526274375b1034b31c0a4d9b3e5303920ec46
+extra_rows_targets: [tmin]
+qrf_params_targets: [tmin]
+qrf_params:
+  max_samples: 630000
+residual_layer_tmin:
+  length_km: 50
+  radius_km: 150
+  same_site_km: 3
+  shrink_weight: 2.0
+  folds: 5
+  min_days: 5
+  oof_qrf_params: {n_estimators: 100, max_samples: 300000}
+lapse_k_tmax: 0.0065
+lapse_offset_cap_m: 600
+ssod_allowlist: scorecard/ssod_guard/allowlist_empty.csv

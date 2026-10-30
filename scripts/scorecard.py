@@ -91,6 +91,21 @@ def load_recipe(path: str) -> dict:
     unknown = set(recipe.get("qrf_params", {})) - {"n_estimators", "min_samples_leaf", "max_samples", "max_features"}
     if unknown:
         raise SystemExit(f"recipe {path}: qrf_params {sorted(unknown)} are not overridable")
+    #   residual_layer_tmin               a station-grouped out-of-fold residual table added to the served median
+    #                                     (residual_layer_table); keys below, oof_qrf_params optional. tmin only:
+    #                                     its out-of-fold fits do not carry tmax's lapse term
+    if "residual_layer_tmax" in recipe:
+        raise SystemExit(f"recipe {path}: residual_layer_tmax is not supported (the lapse term is not in its fits)")
+    for target in ("tmin",):
+        layer = recipe.get(f"residual_layer_{target}")
+        if layer is not None:
+            need = {"length_km", "radius_km", "same_site_km", "shrink_weight", "folds", "min_days"}
+            if not need <= set(layer) or set(layer) - need - {"oof_qrf_params"} or layer["folds"] < 2:
+                raise SystemExit(f"recipe {path}: residual_layer_{target} needs exactly {sorted(need)} "
+                                 "(+ oof_qrf_params), folds >= 2")
+            if set(layer.get("oof_qrf_params", {})) - {"n_estimators", "min_samples_leaf", "max_samples",
+                                                       "max_features"}:
+                raise SystemExit(f"recipe {path}: residual_layer_{target}.oof_qrf_params not overridable")
     return recipe
 
 
@@ -347,7 +362,73 @@ def served_predictions(train_rows: list[dict], test_rows: list[dict], target: st
         "zones_passing_cv_gate": derive_zones_passing_cv_gate(metadata),
         **td._build_aoa_index(model, X, target, td._QRF_PARAMS["random_state"]),
     }
-    return QRFModelAdapter(bundle).predict(test_rows, target)
+    results = QRFModelAdapter(bundle).predict(test_rows, target)
+    layer = recipe.get(f"residual_layer_{target}")
+    if layer:
+        table = residual_layer_table(train_rows, target, FEATURE_ORDER, {**td._QRF_PARAMS, **params}, layer, n_jobs)
+        cache = {}
+        for r, res in zip(test_rows, results):
+            if res["applied"] and r.get("lat") is not None and r.get("lon") is not None:
+                k = (float(r["lat"]), float(r["lon"]), int(str(r["date"])[5:7]))
+                if k not in cache:
+                    cache[k] = residual_prior_at(table, *k, layer)
+                res["delta_c"] += cache[k]
+        moved = [v for v in cache.values() if v]
+        print(f"[{target}] residual layer: {sum(len(v[2]) for v in table.values())} station-months, "
+              f"{len(moved)}/{len(cache)} test site-months moved, mean |prior| "
+              f"{np.mean(np.abs(moved)) if moved else 0.0:.3f} C", flush=True)
+    return results
+
+
+def residual_layer_table(train_rows: list[dict], target: str, feature_order, qrf_params: dict, layer: dict,
+                         n_jobs: int) -> dict:
+    """Station-grouped out-of-fold residuals (observed minus the forest's median) of the training rows, as a
+    month -> (lats, lons, mean residual) table of station-months with at least layer["min_days"] rows. A
+    serving port would ship this table and add residual_prior_at() to the served median; no truth station is
+    in train_rows, and every fold's forest is fit without the stations it predicts."""
+    import train_downscaling as td
+    from quantile_forest import RandomForestQuantileRegressor
+
+    X, y, _r, _z, lons, lats, keep = td.build_training_feature_matrix(train_rows, target, return_keep=True,
+                                                                     feature_order=tuple(feature_order))
+    sids = np.array([train_rows[i]["station_id"] for i in keep])
+    months = np.array([int(str(train_rows[i]["date"])[5:7]) for i in keep])
+    folds = np.array([int(hashlib.sha256(s.encode()).hexdigest(), 16) % layer["folds"] for s in sids])
+    resid = np.full(len(y), np.nan)
+    for k in range(layer["folds"]):
+        hold = folds == k
+        m = RandomForestQuantileRegressor(**{**qrf_params, **layer.get("oof_qrf_params", {}), "n_jobs": n_jobs})
+        m.fit(X[~hold], y[~hold])
+        resid[hold] = y[hold] - m.predict(X[hold], quantiles=0.5, weighted_quantile=False)
+        print(f"[{target}] residual layer fold {k + 1}/{layer['folds']}: {int(hold.sum())} rows, "
+              f"rmse {float(np.sqrt(np.mean(resid[hold] ** 2))):.3f} C", flush=True)
+    acc = {}
+    for s, mo, la, lo, v in zip(sids, months, lats, lons, resid):
+        a = acc.setdefault((s, mo), [la, lo, 0.0, 0])
+        a[2] += v
+        a[3] += 1
+    table = {}
+    for (s, mo), (la, lo, tot, n) in acc.items():
+        if n >= layer["min_days"]:
+            table.setdefault(mo, []).append((la, lo, tot / n))
+    return {mo: tuple(np.array(c) for c in zip(*v)) for mo, v in table.items()}
+
+
+def residual_prior_at(table: dict, lat: float, lon: float, month: int, layer: dict) -> float:
+    """Gaussian-kernel mean of neighbouring station-months' residuals, shrunk toward 0: sum(w r) / (sum(w) +
+    shrink_weight), neighbours within radius_km and farther than same_site_km (a site never informs itself)."""
+    t = table.get(month)
+    if t is None:
+        return 0.0
+    la, lo, mean = t
+    p1, p2 = math.radians(lat), np.radians(la)
+    h = np.sin((p2 - p1) / 2) ** 2 + math.cos(p1) * np.cos(p2) * np.sin(np.radians(lo - lon) / 2) ** 2
+    km = 2 * 6371.0 * np.arcsin(np.sqrt(np.minimum(h, 1.0)))
+    use = (km > layer["same_site_km"]) & (km <= layer["radius_km"])
+    if not use.any():
+        return 0.0
+    w = np.exp(-0.5 * (km[use] / layer["length_km"]) ** 2)
+    return float((w * mean[use]).sum() / (w.sum() + layer["shrink_weight"]))
 
 
 def recipe_predictions(rows, recipe, metadata, cutoff, target, truth_ids, test_rows, cache_dir, key_parts,

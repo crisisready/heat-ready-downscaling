@@ -1,6 +1,8 @@
 """Scorecard v1: manifest hashing, units and pooling, the ship rule, report blocks, and the runner's
 corpus selection and served-prediction path (real quantile_forest fits on tiny synthetic data)."""
 import gzip
+import json
+import math
 import os
 import sys
 
@@ -444,3 +446,51 @@ def test_served_predictions_lapse_fit_adds_term_to_y():
     lapse = runner.served_predictions(train, test, "tmax", meta, n_jobs=1, recipe={"lapse_k_tmax": 0.0065})
     # fit on y + term, serve minus term: served deltas stay on the observed scale, close to the plain fit's
     assert np.mean(np.abs([a["delta_c"] - b["delta_c"] for a, b in zip(lapse, plain)])) < 0.3
+
+
+_LAYER = {"length_km": 15, "radius_km": 45, "same_site_km": 3, "shrink_weight": 1.0, "folds": 2, "min_days": 5}
+
+
+def test_residual_prior_at_skips_same_site_and_shrinks():
+    import scorecard as runner
+    # one neighbour ~11 km north (weight exp(-0.5 (11.1/15)^2)), one at the query point itself (skipped)
+    table = {7: (np.array([20.1, 20.0]), np.array([70.0, 70.0]), np.array([2.0, 9.0]))}
+    got = runner.residual_prior_at(table, 20.0, 70.0, 7, _LAYER)
+    w = math.exp(-0.5 * (11.119 / 15) ** 2)
+    assert got == pytest.approx(2.0 * w / (w + 1.0), rel=1e-3)
+    assert runner.residual_prior_at(table, 20.0, 70.0, 8, _LAYER) == 0.0          # no table for the month
+    assert runner.residual_prior_at(table, 25.0, 70.0, 7, _LAYER) == 0.0          # nothing within radius
+
+
+def test_load_recipe_residual_layer_keys(tmp_path):
+    import scorecard as runner
+    p = tmp_path / "r.yaml"
+    base = "model_version: m\nfeature_set: base\nextra_rows: []\n"
+    p.write_text(base + "residual_layer_tmin: {length_km: 15}\n")
+    with pytest.raises(SystemExit):
+        runner.load_recipe(str(p))
+    p.write_text(base + "residual_layer_tmax: " + json.dumps(_LAYER) + "\n")
+    with pytest.raises(SystemExit):
+        runner.load_recipe(str(p))
+    p.write_text(base + "residual_layer_tmin: " + json.dumps(_LAYER) + "\n")
+    assert runner.load_recipe(str(p))["residual_layer_tmin"]["folds"] == 2
+
+
+def test_served_predictions_residual_layer_moves_applied_tmin_only():
+    pytest.importorskip("quantile_forest")
+    import scorecard as runner
+    rng = np.random.default_rng(3)
+    train = _synthetic_rows(10, 28, "BSh", rng)    # one month, so every station-month has 28 days
+    for i, r in enumerate(train):        # station-level tmin offsets the features cannot see, stations 100+ km apart
+        s = int(r["station_id"][3:])
+        r["lat"], r["lon"] = 20.0 + s, 70.0
+        r["delta_tmin_c"] = (3.0 if s == 0 else -0.5) + rng.normal(0, 0.1)
+    test = [dict(r, station_id="T", lat=20.05, date="2025" + r["date"][4:]) for r in train[:28]]   # 5.6 km from st 0
+    test += [dict(r, station_id="W", climate_zone="BWh") for r in test[:5]]                      # gate fails
+    meta = {"model_version": "m", "cv": {"leave_region_out": {
+        "tmax": {"by_zone": {}}, "tmin": {"by_zone": {"BSh": {"qrf_beats_grid": True}}}}}}
+    plain = runner.served_predictions(train, test, "tmin", meta, n_jobs=1)
+    layer = runner.served_predictions(train, test, "tmin", meta, n_jobs=1, recipe={"residual_layer_tmin": _LAYER})
+    moved = [b["delta_c"] - a["delta_c"] for a, b in zip(plain[:28], layer[:28])]
+    assert all(m > 1.0 for m in moved)             # station 0 runs ~3.4 C above what the forest learns elsewhere
+    assert layer[28:] == plain[28:] and not any(r["applied"] for r in layer[28:])

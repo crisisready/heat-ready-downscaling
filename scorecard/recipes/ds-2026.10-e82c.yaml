@@ -1,0 +1,18 @@
+# E82 round 2, candidate c (heat-risk-data-api research/bsh-tmin-e82, plan #909 chunk 1, aim BSh tmin): the round-1
+# winner ds-2026.10-e82a (arid-group extra rows, tmin only; picked by cold consult: ship-rule clean except the aim)
+# with the preregistered round-2 hyperparameters for the tmin fit, as one combined arm: max_features 0.4 (8 of 21
+# features per split instead of sqrt, about 4) and min_samples_leaf 10. tmax is the incumbent's fit.
+model_version: ds-2026.10-e82c
+feature_set: base
+extra_rows:
+  - name: e82_final_arid_n3.json
+    sha256: ec9503435830d2408561ba2cb21526274375b1034b31c0a4d9b3e5303920ec46
+extra_rows_targets: [tmin]
+qrf_params_targets: [tmin]
+qrf_params:
+  max_samples: 630000
+  max_features: 0.4
+  min_samples_leaf: 10
+lapse_k_tmax: 0.0065
+lapse_offset_cap_m: 600
+ssod_allowlist: scorecard/ssod_guard/allowlist_empty.csv
