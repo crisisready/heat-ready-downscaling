@@ -1,0 +1,17 @@
+# E82 candidate a (heat-risk-data-api research/bsh-tmin-e82, plan #909 chunk 1, aim BSh tmin): the served recipe
+# ds-2026.10-rf6-lapse plus, for the tmin fit only, the arid-group stations (BSh, BSk, BWh, BWk: 696 stations, 482,526 rows) of the ws1 multi-year "final" corpus (both splits,
+# 2010-2020), every third day kept, stations within 3 km of a scorecard truth station dropped
+# (research/bsh-tmin-e82/build_extra_rows.py). The per-tree sample is capped near the incumbent's training row count so
+# the forest's node count stays near the served one. tmax is the incumbent's fit (same rows, seed and lapse term).
+model_version: ds-2026.10-e82a
+feature_set: base
+extra_rows:
+  - name: e82_final_arid_n3.json
+    sha256: ec9503435830d2408561ba2cb21526274375b1034b31c0a4d9b3e5303920ec46
+extra_rows_targets: [tmin]
+qrf_params_targets: [tmin]
+qrf_params:
+  max_samples: 630000
+lapse_k_tmax: 0.0065
+lapse_offset_cap_m: 600
+ssod_allowlist: scorecard/ssod_guard/allowlist_empty.csv

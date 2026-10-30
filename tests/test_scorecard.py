@@ -353,3 +353,75 @@ def test_yaml_booleans_in_subset_are_refused():
     d["aim"]["subset"] = {"airport": [True]}
     with pytest.raises(ValueError):
         sc.validate_declaration(d)
+
+
+def test_recipe_corpus_extra_rows_targets_and_ssod_allowlist(tmp_path):
+    import scorecard as runner
+    rows = [{"station_id": "A", "date": "2023-05-01", "_src": "ghcn_training"},
+            {"station_id": "SP000004452", "date": "2025-02-01", "_src": "ghcn_training"},
+            {"station_id": "G", "date": "2015-05-01", "_src": "x.json"}]
+    allow = tmp_path / "allow.csv"
+    allow.write_text("station_id\n")
+    rc = {"extra_rows": [{"name": "x.json"}], "extra_rows_targets": ["tmin"], "ssod_allowlist": str(allow)}
+    assert [r["station_id"] for r in runner.recipe_corpus(rows, rc, "2024-12-31", set(), "tmax")] == ["A"]
+    assert [r["station_id"] for r in runner.recipe_corpus(rows, rc, "2024-12-31", set(), "tmin")] == ["A", "G"]
+    # the header-only allowlist drops the non-US 2025 row, which the cutoff already excludes
+    assert [r["station_id"] for r in runner.recipe_corpus(rows, rc, "2025-12-31", set(), "tmax")] == ["A"]
+
+
+def test_extra_stations_near_truth():
+    import scorecard as runner
+    rows = [{"station_id": "DB", "lat": 33.0, "lon": -112.0, "_src": "ghcn_training"},
+            {"station_id": "TWIN", "lat": 33.005, "lon": -112.0, "_src": "x.json"},
+            {"station_id": "FAR", "lat": 34.0, "lon": -112.0, "_src": "x.json"},
+            {"station_id": "DB", "lat": 33.0, "lon": -112.0, "_src": "x.json"}]
+    assert runner.extra_stations_near_truth(rows, [{"lat": "33.0", "lon": "-112.0"}], 1.0) == {"TWIN"}
+
+
+def test_served_predictions_lapse_recipe_subtracts_its_term():
+    pytest.importorskip("quantile_forest")
+    import scorecard as runner
+    rng = np.random.default_rng(0)
+    train = _synthetic_rows(8, 40, "BSh", rng)
+    test = _synthetic_rows(2, 5, "BSh", rng, year=2025)
+    for r in test:
+        r["elevation_rel_to_gridcell_m"] = 300.0
+    meta = {"model_version": "m", "cv": {"leave_region_out": {
+        "tmax": {"by_zone": {"BSh": {"qrf_beats_grid": True}}}, "tmin": {"by_zone": {}}}}}
+    plain = runner.served_predictions(train, test, "tmax", meta, n_jobs=1)
+    lapse = runner.served_predictions(train, test, "tmax", meta, n_jobs=1,
+                                      recipe={"lapse_k_tmax": 0.0065, "lapse_offset_cap_m": 600})
+    # training offsets are all 0, so the forest is unchanged and serving subtracts 0.0065 x 300
+    assert np.allclose([a["delta_c"] - b["delta_c"] for a, b in zip(lapse, plain)], -1.95, atol=1e-9)
+
+
+def test_load_recipe_rejects_bad_optional_keys(tmp_path):
+    import scorecard as runner
+    p = tmp_path / "r.yaml"
+    p.write_text("model_version: m\nfeature_set: base\nextra_rows: []\nqrf_params: {random_state: 1}\n")
+    with pytest.raises(SystemExit):
+        runner.load_recipe(str(p))
+    p.write_text("model_version: m\nfeature_set: base\nextra_rows: []\nlapse_offset_cap_m: 600\n")
+    with pytest.raises(SystemExit):
+        runner.load_recipe(str(p))
+    assert runner.load_recipe("scorecard/recipes/ds-2026.10-rf6-lapse.yaml")["lapse_k_tmax"] == 0.0065
+
+
+def test_qrf_params_apply_only_to_named_targets(monkeypatch):
+    pytest.importorskip("quantile_forest")
+    import scorecard as runner
+    import quantile_forest
+    seen = []
+    real = quantile_forest.RandomForestQuantileRegressor
+
+    def spy(**kw):
+        seen.append(kw.get("min_samples_leaf"))
+        return real(**kw)
+    monkeypatch.setattr(quantile_forest, "RandomForestQuantileRegressor", spy)
+    rng = np.random.default_rng(0)
+    train, test = _synthetic_rows(4, 30, "BSh", rng), _synthetic_rows(1, 3, "BSh", rng, year=2025)
+    meta = {"model_version": "m", "cv": {"leave_region_out": {"tmax": {"by_zone": {}}, "tmin": {"by_zone": {}}}}}
+    rc = {"qrf_params": {"min_samples_leaf": 9}, "qrf_params_targets": ["tmin"]}
+    runner.served_predictions(train, test, "tmax", meta, n_jobs=1, recipe=rc)
+    runner.served_predictions(train, test, "tmin", meta, n_jobs=1, recipe=rc)
+    assert seen == [5, 9]

@@ -76,6 +76,21 @@ def load_recipe(path: str) -> dict:
         raise SystemExit("the scorecard refits base and gridbias recipes only; a regime recipe needs its covariate "
                          "CSVs plumbed through first")
     recipe.setdefault("cv_region_map", None)
+    # Optional keys, read with .get() so a recipe without them keeps its cache key:
+    #   lapse_k_tmax, lapse_offset_cap_m  the trainer's --lapse-k-tmax / --lapse-offset-cap-m (tmin never gets a term)
+    #   ssod_allowlist                    the trainer's --ssod-allowlist (repo-relative CSV)
+    #   extra_rows_targets                targets whose fit adds extra_rows (default both)
+    #   qrf_params, qrf_params_targets    overrides of the trainer's _QRF_PARAMS, for the named targets (default both)
+    if recipe.get("lapse_k_tmax") and recipe["feature_set"] != "base":
+        raise SystemExit(f"recipe {path}: a lapse term needs the base feature set, as in the trainer")
+    if recipe.get("lapse_offset_cap_m") is not None and not recipe.get("lapse_k_tmax"):
+        raise SystemExit(f"recipe {path}: lapse_offset_cap_m needs lapse_k_tmax")
+    for key in ("extra_rows_targets", "qrf_params_targets"):
+        if not set(recipe.get(key, ("tmax", "tmin"))) <= {"tmax", "tmin"}:
+            raise SystemExit(f"recipe {path}: {key} must name tmax and/or tmin")
+    unknown = set(recipe.get("qrf_params", {})) - {"n_estimators", "min_samples_leaf", "max_samples", "max_features"}
+    if unknown:
+        raise SystemExit(f"recipe {path}: qrf_params {sorted(unknown)} are not overridable")
     return recipe
 
 
@@ -231,12 +246,33 @@ def _haversine_min_km(lat, lon, lats, lons) -> float:
     return float((6371.0 * 2 * np.arcsin(np.sqrt(a))).min()) if len(lats) else float("inf")
 
 
-def recipe_corpus(rows: list[dict], recipe: dict, cutoff: str, truth_ids: set[str]) -> list[dict]:
-    """The recipe's training rows at a cutoff: its own sources, dated on or before the cutoff, with
-    every truth station removed at every date."""
-    srcs = {"ghcn_training", *(x["name"] for x in recipe["extra_rows"])}
-    return [r for r in rows if r["_src"] in srcs and str(r["date"])[:10] <= cutoff
-            and r["station_id"] not in truth_ids]
+def recipe_corpus(rows: list[dict], recipe: dict, cutoff: str, truth_ids: set[str],
+                  target: str | None = None) -> list[dict]:
+    """The recipe's training rows at a cutoff: its own sources (extra rows only for the targets the
+    recipe names), dated on or before the cutoff, with every truth station removed at every date and
+    the recipe's SSOD allowlist applied as the trainer applies it."""
+    srcs = {"ghcn_training"}
+    if target is None or target in recipe.get("extra_rows_targets", ("tmax", "tmin")):
+        srcs |= {x["name"] for x in recipe["extra_rows"]}
+    train = [r for r in rows if r["_src"] in srcs and str(r["date"])[:10] <= cutoff
+             and r["station_id"] not in truth_ids]
+    if recipe.get("ssod_allowlist"):
+        from heatready_downscaling import ssod_guard
+        train, _ = ssod_guard.apply_guard(train, ssod_guard.read_allowlist(_repo_path("", recipe["ssod_allowlist"])))
+    return train
+
+
+def extra_stations_near_truth(rows: list[dict], stations: list[dict], km: float) -> set[str]:
+    """Extra-file stations (never in ghcn_training) within km of a truth station: twins under another id,
+    which would leak the truth into a recipe that adds the file. Removed like truth stations."""
+    db_ids = {r["station_id"] for r in rows if r["_src"] == "ghcn_training"}
+    coords = {}
+    for r in rows:
+        if r["_src"] != "ghcn_training" and r["station_id"] not in db_ids:
+            coords.setdefault(r["station_id"], (float(r["lat"]), float(r["lon"])))
+    lats = np.array([float(s["lat"]) for s in stations], float)
+    lons = np.array([float(s["lon"]) for s in stations], float)
+    return {sid for sid, (la, lo) in coords.items() if _haversine_min_km(la, lo, lats, lons) <= km}
 
 
 _FINGERPRINT_COLS = ("station_id", "date", "climate_zone", "region", "grid_tmax_c", "grid_tmin_c", "delta_tmax_c",
@@ -276,14 +312,15 @@ def attach_grid_bias_for_fit(train_rows: list[dict], test_rows: list[dict], targ
 
 
 def served_predictions(train_rows: list[dict], test_rows: list[dict], target: str, metadata: dict,
-                       n_jobs: int, feature_set: str = "base") -> list[dict]:
+                       n_jobs: int, feature_set: str = "base", recipe: dict | None = None) -> list[dict]:
     """Fit the recipe's QRF on train_rows and return the SERVED result for each test row: the DS
-    serving contract with this version's own CV gate (from its metadata.json)."""
+    serving contract with this version's own CV gate (from its metadata.json). A lapse recipe fits
+    delta + term as the trainer does, and the adapter subtracts it again."""
     import train_downscaling as td
     from quantile_forest import RandomForestQuantileRegressor
 
     from heatready_downscaling.contract import QRFModelAdapter, derive_zones_passing_cv_gate
-    from heatready_downscaling.features import SUPPORTED_FEATURE_ORDERS
+    from heatready_downscaling.features import SUPPORTED_FEATURE_ORDERS, lapse_term
 
     FEATURE_ORDER = SUPPORTED_FEATURE_ORDERS[feature_set]
     if feature_set == "gridbias":
@@ -291,8 +328,14 @@ def served_predictions(train_rows: list[dict], test_rows: list[dict], target: st
     X, y, *_ = td.build_training_feature_matrix(train_rows, target, feature_order=FEATURE_ORDER)
     if len(y) < td._MIN_FOLD_TRAIN_ROWS:
         return []
-    model = RandomForestQuantileRegressor(**{**td._QRF_PARAMS, "n_jobs": n_jobs}).fit(X, y)
+    recipe = recipe or {}
+    lapse_k = {"tmax": float(recipe.get("lapse_k_tmax") or 0.0), "tmin": 0.0}
+    cap = recipe.get("lapse_offset_cap_m")
+    y_fit = np.asarray(y, dtype=float) + lapse_term(X, tuple(FEATURE_ORDER), lapse_k[target], cap)
+    params = recipe.get("qrf_params", {}) if target in recipe.get("qrf_params_targets", ("tmax", "tmin")) else {}
+    model = RandomForestQuantileRegressor(**{**td._QRF_PARAMS, **params, "n_jobs": n_jobs}).fit(X, y_fit)
     bundle = {
+        "lapse_k": lapse_k, "lapse_offset_cap_m": cap,
         f"model_{target}": model,
         "metadata": {"model_version": metadata["model_version"], "feature_order": list(FEATURE_ORDER),
                      "conformal_q95_by_zone": metadata.get("conformal_q95_by_zone", {}),
@@ -308,7 +351,7 @@ def recipe_predictions(rows, recipe, metadata, cutoff, target, truth_ids, test_r
                        n_jobs) -> tuple[dict, dict]:
     """{(station_id, date): (served_delta, ci95)} for one recipe/cutoff/target, from the cache when the
     content key matches. Returns (predictions, provenance)."""
-    train = recipe_corpus(rows, recipe, cutoff, truth_ids)
+    train = recipe_corpus(rows, recipe, cutoff, truth_ids, target)
     served_meta = {"gate": metadata.get("cv", {}).get("leave_region_out", {}).get(target, {}).get("by_zone"),
                    "q95": metadata.get("conformal_q95_by_zone" if target == "tmax" else "conformal_q95_by_zone_tmin"),
                    "ood": metadata.get("ood_aoa_threshold")}
@@ -322,7 +365,7 @@ def recipe_predictions(rows, recipe, metadata, cutoff, target, truth_ids, test_r
                 preds[(rec["station_id"], rec["date"])] = (float(rec["served_delta"]),
                                                           float(rec["ci95"]) if rec["ci95"] else float("nan"))
         return preds, {"cache": os.path.basename(path), "cache_hit": True, "sha256": _sha256_file(path)}
-    results = served_predictions(train, test_rows, target, metadata, n_jobs, recipe["feature_set"])
+    results = served_predictions(train, test_rows, target, metadata, n_jobs, recipe["feature_set"], recipe)
     if not results:
         return {}, {"cache": None, "cache_hit": False, "train_rows": len(train),
                     "note": "fewer training rows than the trainer's minimum before this cutoff"}
@@ -389,6 +432,13 @@ def cmd_run(args) -> None:
 
     import train_downscaling as td
     rows, sources = load_rows(spec, [inc] + ([cand] if cand else []), args.data_dir)
+    near = extra_stations_near_truth(rows, stations, float(spec.get("dedupe_km", 1.0)))
+    if near:
+        print(f"{len(near)} extra-file station(s) within {spec.get('dedupe_km', 1.0)} km of a truth station removed "
+              f"from every recipe: {sorted(near)}", flush=True)
+        sources.append({"name": "extra_stations_near_truth", "removed": sorted(near),
+                        "sha256": hashlib.sha256(json.dumps(sorted(near)).encode()).hexdigest()})
+    excluded = truth_ids | near
     by_key = {}
     for r in rows:
         if r["station_id"] in truth_ids:
@@ -422,12 +472,12 @@ def cmd_run(args) -> None:
                 prov.append({"cutoff": cutoff, "target": target, "status": "no manifest rows"})
                 continue
             test_rows = [by_key[k] for k in keys]
-            p_inc, prov_inc = recipe_predictions(rows, inc, inc_meta, cutoff, target, truth_ids, test_rows,
+            p_inc, prov_inc = recipe_predictions(rows, inc, inc_meta, cutoff, target, excluded, test_rows,
                                                  args.cache_dir, key_parts, args.n_jobs)
             if not p_inc:
                 p_cand, prov_cand = {}, {"note": "not fit: the incumbent has nothing to compare against"}
             elif cand is not None:
-                p_cand, prov_cand = recipe_predictions(rows, cand, cand_meta, cutoff, target, truth_ids, test_rows,
+                p_cand, prov_cand = recipe_predictions(rows, cand, cand_meta, cutoff, target, excluded, test_rows,
                                                        args.cache_dir, key_parts, args.n_jobs)
             else:
                 p_cand = load_candidate_predictions(args.candidate_predictions, cutoff, target)
@@ -446,7 +496,7 @@ def cmd_run(args) -> None:
             if status != "scored":
                 continue
             if inc_train_stations is None:
-                tr = recipe_corpus(rows, inc, cutoff, truth_ids)
+                tr = recipe_corpus(rows, inc, cutoff, excluded)
                 coords = {r["station_id"]: (r["lat"], r["lon"]) for r in tr}
                 lats = np.array([c[0] for c in coords.values()], float)
                 lons = np.array([c[1] for c in coords.values()], float)
