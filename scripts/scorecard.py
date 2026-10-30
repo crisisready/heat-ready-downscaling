@@ -100,7 +100,11 @@ def load_recipe(path: str) -> dict:
         layer = recipe.get(f"residual_layer_{target}")
         if layer is not None:
             need = {"length_km", "radius_km", "same_site_km", "shrink_weight", "folds", "min_days"}
-            if not need <= set(layer) or set(layer) - need - {"oof_qrf_params"} or layer["folds"] < 2:
+            if recipe["feature_set"] != "base":
+                raise SystemExit(f"recipe {path}: residual_layer_{target} needs the base feature set (a gridbias "
+                                 "prior built from all stations would leak a held-out fold's targets)")
+            if not need <= set(layer) or set(layer) - need - {"oof_qrf_params"} \
+                    or not isinstance(layer["folds"], int) or not isinstance(layer["min_days"], int) or layer["folds"] < 2:
                 raise SystemExit(f"recipe {path}: residual_layer_{target} needs exactly {sorted(need)} "
                                  "(+ oof_qrf_params), folds >= 2")
             if set(layer.get("oof_qrf_params", {})) - {"n_estimators", "min_samples_leaf", "max_samples",
