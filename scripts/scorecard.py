@@ -265,13 +265,16 @@ def recipe_corpus(rows: list[dict], recipe: dict, cutoff: str, truth_ids: set[st
 def extra_stations_near_truth(rows: list[dict], stations: list[dict], km: float) -> set[str]:
     """Extra-file stations (never in ghcn_training) within km of a truth station: twins under another id,
     which would leak the truth into a recipe that adds the file. Removed like truth stations."""
-    db_ids = {r["station_id"] for r in rows if r["_src"] == "ghcn_training"}
+    skip = {r["station_id"] for r in rows if r["_src"] == "ghcn_training"} | {s["station_id"] for s in stations}
     coords = {}
     for r in rows:
-        if r["_src"] != "ghcn_training" and r["station_id"] not in db_ids:
+        if r["_src"] != "ghcn_training" and r["station_id"] not in skip and r.get("lat") is not None \
+                and r.get("lon") is not None:
             coords.setdefault(r["station_id"], (float(r["lat"]), float(r["lon"])))
     lats = np.array([float(s["lat"]) for s in stations], float)
     lons = np.array([float(s["lon"]) for s in stations], float)
+    if not coords:
+        return set()
     return {sid for sid, (la, lo) in coords.items() if _haversine_min_km(la, lo, lats, lons) <= km}
 
 
@@ -496,7 +499,7 @@ def cmd_run(args) -> None:
             if status != "scored":
                 continue
             if inc_train_stations is None:
-                tr = recipe_corpus(rows, inc, cutoff, excluded)
+                tr = recipe_corpus(rows, inc, cutoff, excluded, target)
                 coords = {r["station_id"]: (r["lat"], r["lon"]) for r in tr}
                 lats = np.array([c[0] for c in coords.values()], float)
                 lons = np.array([c[1] for c in coords.values()], float)

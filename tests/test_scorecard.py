@@ -375,7 +375,10 @@ def test_extra_stations_near_truth():
             {"station_id": "TWIN", "lat": 33.005, "lon": -112.0, "_src": "x.json"},
             {"station_id": "FAR", "lat": 34.0, "lon": -112.0, "_src": "x.json"},
             {"station_id": "DB", "lat": 33.0, "lon": -112.0, "_src": "x.json"}]
-    assert runner.extra_stations_near_truth(rows, [{"lat": "33.0", "lon": "-112.0"}], 1.0) == {"TWIN"}
+    truth = [{"station_id": "T", "lat": "33.0", "lon": "-112.0"}]
+    assert runner.extra_stations_near_truth(rows + [{"station_id": "T", "lat": 33.0, "lon": -112.0, "_src": "x.json"},
+                                                    {"station_id": "NOLL", "lat": None, "lon": None, "_src": "x.json"}],
+                                            truth, 1.0) == {"TWIN"}
 
 
 def test_served_predictions_lapse_recipe_subtracts_its_term():
@@ -425,3 +428,19 @@ def test_qrf_params_apply_only_to_named_targets(monkeypatch):
     runner.served_predictions(train, test, "tmax", meta, n_jobs=1, recipe=rc)
     runner.served_predictions(train, test, "tmin", meta, n_jobs=1, recipe=rc)
     assert seen == [5, 9]
+
+
+def test_served_predictions_lapse_fit_adds_term_to_y():
+    pytest.importorskip("quantile_forest")
+    import scorecard as runner
+    rng = np.random.default_rng(1)
+    train = _synthetic_rows(8, 40, "BSh", rng)
+    for i, r in enumerate(train):     # offsets vary in training; the observed delta does not depend on them
+        r["elevation_rel_to_gridcell_m"] = float((i % 7) * 100)
+    test = [dict(r, date="2025" + r["date"][4:]) for r in train[:40]]
+    meta = {"model_version": "m", "cv": {"leave_region_out": {
+        "tmax": {"by_zone": {"BSh": {"qrf_beats_grid": True}}}, "tmin": {"by_zone": {}}}}}
+    plain = runner.served_predictions(train, test, "tmax", meta, n_jobs=1)
+    lapse = runner.served_predictions(train, test, "tmax", meta, n_jobs=1, recipe={"lapse_k_tmax": 0.0065})
+    # fit on y + term, serve minus term: served deltas stay on the observed scale, close to the plain fit's
+    assert np.mean(np.abs([a["delta_c"] - b["delta_c"] for a, b in zip(lapse, plain)])) < 0.3
