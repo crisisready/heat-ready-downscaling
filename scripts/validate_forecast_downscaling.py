@@ -183,8 +183,14 @@ def fetch_lead_daily_for_station(
     start = min(dates) - timedelta(days=_FETCH_PAD_DAYS)
     end = max(dates) + timedelta(days=_FETCH_PAD_DAYS)
 
-    _sfx = "" if lead_days == 0 else f"_previous_day{lead_days}"  # #1250: lead 0 = plain names
-    hourly_params = ",".join(f"{v}{_sfx}" for v in _LEAD_VARS)
+    # Lead 0 (same day) is served under the plain names; a `_previous_day0` suffix is silently
+    # dropped by the API. Those plain values take each hour from the most recent run (probed
+    # 2026-11-20: 00-05Z from the 00Z run, 08-11Z from 06Z, ...), i.e. a 0-5 h forecast, fresher
+    # than a same-day forecast served from one morning run (0-24 h). `_previous_day{N}` is the run
+    # 24*N h older (24*N to 24*N+5 h), so every lead here, lead 1 included, is somewhat fresher
+    # than what production serves at that lead; lead 0 is the freshest end of that range.
+    suffix = "" if lead_days == 0 else f"_previous_day{lead_days}"
+    hourly_params = ",".join(f"{v}{suffix}" for v in _LEAD_VARS)
     params = {
         "latitude": lat, "longitude": lon,
         "start_date": start.isoformat(), "end_date": end.isoformat(),
@@ -219,7 +225,6 @@ def fetch_lead_daily_for_station(
             return result
         return {}
 
-    suffix = "" if lead_days == 0 else f"_previous_day{lead_days}"  # #1250
     hourly = resp["hourly"]
     remapped = {"time": hourly.get("time", [])}
     for v in _LEAD_VARS:
