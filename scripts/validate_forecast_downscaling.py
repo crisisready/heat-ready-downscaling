@@ -183,7 +183,8 @@ def fetch_lead_daily_for_station(
     start = min(dates) - timedelta(days=_FETCH_PAD_DAYS)
     end = max(dates) + timedelta(days=_FETCH_PAD_DAYS)
 
-    hourly_params = ",".join(f"{v}_previous_day{lead_days}" for v in _LEAD_VARS)
+    _sfx = "" if lead_days == 0 else f"_previous_day{lead_days}"  # #1250: lead 0 = plain names
+    hourly_params = ",".join(f"{v}{_sfx}" for v in _LEAD_VARS)
     params = {
         "latitude": lat, "longitude": lon,
         "start_date": start.isoformat(), "end_date": end.isoformat(),
@@ -218,7 +219,7 @@ def fetch_lead_daily_for_station(
             return result
         return {}
 
-    suffix = f"_previous_day{lead_days}"
+    suffix = "" if lead_days == 0 else f"_previous_day{lead_days}"  # #1250
     hourly = resp["hourly"]
     remapped = {"time": hourly.get("time", [])}
     for v in _LEAD_VARS:
@@ -523,7 +524,7 @@ def build_paired_rows(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--model-version", required=True)
-    parser.add_argument("--lead-days", type=int, required=True, help="forecast lead time to validate, 1-7")
+    parser.add_argument("--lead-days", type=int, required=True, help="forecast lead time to validate, 0-7 (0 = same-day forecast)")
     parser.add_argument("--bucket", default=None, help="defaults to VULNERABILITY_DATA_BUCKET env var")
     parser.add_argument("--sample", type=int, default=3000, help="random ghcn_training row sample size; 0 = full table")
     parser.add_argument("--seed", type=int, default=20260721)
@@ -566,8 +567,8 @@ def main() -> None:
                           "the elevation-nan request-config path")
     base_variant = (args.base_variant or "native_noelev") if args.elevation_nan else None
 
-    if not (1 <= args.lead_days <= 7):
-        raise SystemExit("--lead-days must be 1-7 (production's FORECAST_DAYS horizon)")
+    if not (0 <= args.lead_days <= 7):  # #1250: lead 0 allowed
+        raise SystemExit("--lead-days must be 0-7 (same day through production's FORECAST_DAYS horizon)")
 
     api_key = _open_meteo_api_key()
     if not api_key:

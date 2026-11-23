@@ -39,7 +39,8 @@ def _fake_lead_response(base_temp_c: float, lead_days: int):
     """24 hours of previous_dayN-suffixed hourly data, same 06:00-local-day
     window as the lag-fill test fixture (see that file's comment)."""
     times = [f"2023-06-15T{h:02d}:00" for h in range(6, 24)] + [f"2023-06-16T{h:02d}:00" for h in range(0, 6)]
-    suffix = f"_previous_day{lead_days}"
+    # Lead 0 (same day) is served under the plain variable names.
+    suffix = "" if lead_days == 0 else f"_previous_day{lead_days}"
     return {
         "hourly": {
             "time": times,
@@ -85,6 +86,30 @@ class TestProcessOneStationLead:
         assert len(payload["lead_rows"]) == 1
         assert payload["lead_rows"][0]["climate_zone"] == "Cfa"
         assert payload["lead_rows"][0]["grid_tmax_c"] != 29.0  # replaced by the lead reconstruction
+
+    def test_lead0_requests_and_reads_the_plain_variable_names(self):
+        """Lead 0 is the same-day forecast. The Previous Runs API serves it as
+        temperature_2m etc.; a `_previous_day0` suffix is silently dropped from the
+        response (live probe, 2026-11-23), which would pair zero rows."""
+        station = {
+            "station_id": "TEST000",
+            "rows": [{
+                "station_id": "TEST000", "date": "2023-06-15", "lat": 40.0, "lon": -75.0,
+                "climate_zone": "Cfa", "station_tmax_c": 30.0, "station_tmin_c": 20.0,
+                "grid_tmax_c": 29.0, "grid_tmin_c": 19.0,
+            }],
+            "tz": "UTC",
+            "lead_days": 0,
+            "url": "https://customer-previous-runs-api.open-meteo.com/v1/forecast",
+        }
+        session = FakeSession(_fake_lead_response(base_temp_c=25.0, lead_days=0))
+
+        payload = vfd._process_one_station_lead(station, session)
+
+        assert session.calls_params[0]["hourly"] == "temperature_2m,dewpoint_2m,windspeed_10m,surface_pressure"
+        assert payload is not NO_RESULT
+        assert len(payload["lead_rows"]) == 1
+        assert payload["lead_rows"][0]["grid_tmax_c"] != 29.0
 
     def test_pre_coverage_date_is_dropped_and_counted(self):
         station = {
