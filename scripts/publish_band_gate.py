@@ -151,7 +151,7 @@ def main() -> None:
     parser.add_argument("--model-version", required=True)
     parser.add_argument(
         "--band-key", required=True,
-        choices=["lag_fill"] + [f"forecast_lead{n}" for n in range(1, 8)],
+        choices=["lag_fill"] + [f"forecast_lead{n}" for n in range(0, 8)],  # 0 = same-day forecast
     )
     parser.add_argument("--bucket", default=None, help="defaults to VULNERABILITY_DATA_BUCKET env var")
     parser.add_argument("--profile", default=None, help="named AWS profile (omit on EC2 with an attached IAM role)")
